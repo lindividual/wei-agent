@@ -319,6 +319,8 @@ struct App {
   /// "what is still running" is asked about the process, and a reader should not have to open
   /// five sessions to answer it.
   jobs : @core.JobStore
+  /// Labels already read, so redrawing the sidebar does not re-read every session head.
+  labels : LabelCache
   /// The path of the session being displayed. Shared by every browser: there is one
   /// document, so there is one answer to "what is on screen".
   mut displayed : String
@@ -420,6 +422,43 @@ fn App::status_line(self : App, shown : Runner) -> String {
 // ── The sidebar's view ─────────────────────────────────────────────────────
 
 ///|
+/// Labels already worked out, keyed by session path.
+///
+/// A session's label only changes when its file does, and `list_sessions` already reports when
+/// that was — so a lookup needs no syscall at all. It exists because the sidebar is rebuilt twice
+/// per turn (the running mark changes) and reading the head of every session to redraw it made
+/// that cost grow with the store: 20 workspaces of 10 sessions came to 12MB read per refresh.
+pub(all) struct LabelCache {
+  mut entries : Map[String, (Int64, String)]
+}
+
+///|
+pub fn LabelCache::new() -> LabelCache {
+  { entries: Map([]), }
+}
+
+///|
+/// The label for a session, reading its head only when the file has changed.
+async fn LabelCache::label(
+  self : LabelCache,
+  path : String,
+  modified : Int64,
+) -> String {
+  match self.entries.get(path) {
+    Some((cached_at, label)) =>
+      if cached_at == modified {
+        return label
+      }
+    None => ()
+  }
+  // The first user message is in the first lines of the file; the cap only has to be larger than
+  // the header plus a few entries.
+  let label = @core.session_label(@platform.read_prefix(path, 16 * 1024))
+  self.entries.set(path, (modified, label))
+  label
+}
+
+///|
 /// The sidebar's view of the store: every workspace that has sessions, newest first,
 /// each described from the top of its newest file.
 ///
@@ -434,8 +473,7 @@ async fn workspace_items(
   for stored in @platform.list_workspaces(app.root, sidebar_sessions()) {
     let sessions : Array[@html.SessionItem] = []
     for session in stored.sessions {
-      let prefix = @platform.read_prefix(session.path, 64 * 1024)
-      let label = @core.session_label(prefix)
+      let label = app.labels.label(session.path, session.modified)
       sessions.push({
         path: session.path,
         // A session whose first turn is still running has no label in its file yet, and
@@ -636,7 +674,9 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
   runner.live = []
   runner.prompt = text
   let index = runner.turn
-  let session = runner.path
+  // The tag a client compares against is the session's short id, not its path: 80 bytes of path
+  // on every frame of a stream is the largest single cost in the envelope.
+  let session = short_id(runner.path)
   // The sidebar marks a session as running while it is, which is how work in a session
   // nobody is looking at stays visible.
   let refresh_sidebar = async fn() {
@@ -744,10 +784,9 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
                 ),
               ).to_scoped_sse(session),
             )
-            // A small threshold: a short reply is only a few dozen characters, and
-            // waiting for more of them would mean the reader sees nothing until the turn
-            // is over — which is what streaming is for.
-            let fresh = @html.StreamBuffer::new(id, threshold=8)
+            // Small enough that the reader sees the first characters almost immediately, large
+            // enough that a frame's envelope is not most of what it carries.
+            let fresh = @html.StreamBuffer::new(id, threshold=24)
             open_text = Some(fresh)
             fresh
           }
@@ -773,9 +812,9 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
                 @html.render_thinking_stream(id, "\{id}-body"),
               ).to_scoped_sse(session),
             )
-            // A larger threshold than text: this is collapsed, so the only thing a frame
-            // buys is the sense that something is happening.
-            let fresh = @html.StreamBuffer::new("\{id}-body", threshold=64)
+            // Much larger than text: reasoning is collapsed, so a frame buys only the sense that
+            // something is happening — and a thinking-heavy model sends a lot of it.
+            let fresh = @html.StreamBuffer::new("\{id}-body", threshold=256)
             open_thinking = Some(fresh)
             fresh
           }
@@ -1067,7 +1106,8 @@ fn transcript_node(app : App, shown : Runner) -> @html.Node {
   ignore(app)
   @html.render_transcript(
     shown.session.context().messages,
-    session=shown.path,
+    // The same tag the scoped frames carry: the browser compares them, so they have to agree.
+    session=short_id(shown.path),
     extra~,
   )
 }
@@ -1110,6 +1150,7 @@ async fn main {
     hub: @server.Hub::new(),
     registry: [first],
     jobs: @core.JobStore::new(),
+    labels: LabelCache::new(),
     displayed: first.path,
   }
   // Display changes go through a queue so that the order they arrive in is the order they

@@ -64,7 +64,7 @@ test "quotes in markup survive the frame" {
 ///|
 test "each operation encodes its own shape" {
   assert_true(
-    Patch::SetText(target="t", text="hi").to_sse().contains("\"op\":\"text\""),
+    Patch::AppendText(target="t", text="hi").to_sse().contains("\"op\":\"appendtext\""),
   )
   assert_true(
     Patch::Status(text="working").to_sse().contains("\"op\":\"status\""),
@@ -80,7 +80,7 @@ test "each operation encodes its own shape" {
 
 ///|
 /// Deltas below the threshold accumulate rather than each becoming a frame.
-test "small deltas are batched" {
+test "small deltas are batched, and sent as the delta only" {
   let buffer = StreamBuffer::new("t", threshold=10)
   assert_true(buffer.push("abc") is None) // 3 characters
   assert_true(buffer.push("def") is None) // 6
@@ -89,19 +89,62 @@ test "small deltas are batched" {
   let patch = buffer.push("ghij")
   assert_true(patch is Some(_), msg="expected a flush at the threshold")
   match patch {
-    Some(SetText(target~, text~)) => {
+    Some(AppendText(target~, text~)) => {
       assert_eq(target, "t")
+      // The frame carries the ten characters that had not been sent, not the ten characters of
+      // the block: that distinction is the difference between linear and quadratic traffic.
       assert_eq(text, "abcdefghij")
     }
-    Some(_) => fail("expected a SetText patch")
+    Some(_) => fail("expected an AppendText patch")
     None => fail("expected a patch")
   }
+  // And the next frame carries only what followed.
+  let _ = buffer.push("k")
+  match buffer.flush() {
+    Some(AppendText(text~, ..)) => assert_eq(text, "k")
+    Some(_) => fail("expected an AppendText patch")
+    None => fail("expected the tail")
+  }
+}
+
+///|
+/// The property that matters: the frames partition the text.
+///
+/// Before this, every frame repeated everything received so far, so a long answer cost its own
+/// length squared — 40KB of reasoning turned into 12MB of frames. Feeding a long text in tiny
+/// deltas and adding up what was sent is the cheapest way to pin that down.
+test "a long stream sends each character exactly once" {
+  let buffer = StreamBuffer::new("t", threshold=64)
+  let piece = "0123456789"
+  let mut total = 0
+  let mut frames = 0
+  for _ in 0..<4000 {
+    match buffer.push(piece) {
+      Some(AppendText(text~, ..)) => {
+        total += text.length()
+        frames += 1
+      }
+      Some(_) => fail("expected text frames")
+      None => ()
+    }
+  }
+  match buffer.flush() {
+    Some(AppendText(text~, ..)) => total += text.length()
+    Some(_) => fail("expected text frames")
+    None => ()
+  }
+  let expected = 4000 * piece.length()
+  assert_eq(buffer.text.length(), expected)
+  // Every character once, no more and no fewer.
+  assert_eq(total, expected)
+  // And a bounded number of frames: one per threshold, not one per delta.
+  assert_true(frames <= expected / 64 + 1, msg="\{frames} frames for \{expected} characters")
 }
 
 ///|
 /// Flushing the same content twice sends nothing the second time, so an idle
 /// stream does not keep repainting.
-test "a redundant flush sends nothing" {
+test "a redundant flush sends nothing (nothing is left)" {
   let buffer = StreamBuffer::new("t", threshold=1000)
   let _ = buffer.push("hello")
   let first = buffer.flush()
@@ -119,8 +162,8 @@ test "the final flush delivers the tail" {
   let buffer = StreamBuffer::new("t", threshold=1000)
   let _ = buffer.push("the end")
   match buffer.flush() {
-    Some(SetText(text~, ..)) => assert_eq(text, "the end")
-    Some(_) => fail("expected a SetText patch")
+    Some(AppendText(text~, ..)) => assert_eq(text, "the end")
+    Some(_) => fail("expected an AppendText patch")
     None => fail("expected the tail to be flushed")
   }
 }

@@ -73,7 +73,7 @@ async test "one encoding serves every subscriber" {
   let hub = Hub::new()
   let (_, first) = hub.subscribe()
   let (_, second) = hub.subscribe()
-  let patch = @html.Patch::SetText(target="stream-1", text="partial")
+  let patch = @html.Patch::AppendText(target="stream-1", text="partial")
   hub.broadcast(patch.to_sse())
   assert_eq(drain(first), drain(second))
 }
