@@ -162,9 +162,9 @@ provider 会拒绝这样的记录。修复时合成的错误文本明确告诉�
 
 ```bash
 moon test                    # 全包
-moon test -p core            # 176 个测试
-moon test -p platform        # 21 个测试，工具与存储在真实文件系统上
-moon test -p html            # 26 个测试，含 4 个 HTML 注入测试
+moon test -p core            # 178 个测试
+moon test -p platform        # 24 个测试，工具与存储在真实文件系统上
+moon test -p html            # 32 个测试，含侧边栏结构与 4 个 HTML 注入测试
 moon test -p server          # 8 个测试，起真 socket 验传输
 moon test -p agent           # 4 个测试，假模型端到端跑 turn
 moon run verify              # 全量：160 个文件、46,399 条 entry 往返
