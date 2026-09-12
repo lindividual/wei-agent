@@ -1,0 +1,12 @@
+import {
+  "moonbit-community/rabbita",
+  "moonbit-community/rabbita/cmd",
+  "moonbit-community/rabbita/html",
+  "moonbit-community/rabbita/sub",
+  "moonbit-community/rabbita/websocket",
+}
+
+options(
+  is_main: true,
+  supported_targets: [ "js" ],
+)
