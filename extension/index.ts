@@ -73,6 +73,13 @@ type Block =
 /// message opens a new exchange, which is what the UI anchors per turn.
 type TurnMsg = { user: string | null; blocks: Block[] };
 
+/// One saved session inside a workspace.
+type SessionInfo = {
+  path: string;
+  label: string;
+  modified: number;
+};
+
 /// A workspace is a directory that has at least one saved session.
 type WorkspaceInfo = {
   cwd: string;
@@ -82,6 +89,9 @@ type WorkspaceInfo = {
   lastSession: string;
   lastModified: number;
   preview: string;
+  /// Newest first, capped: a workspace can accumulate hundreds of sessions and
+  /// the sidebar only ever shows a handful.
+  sessions: SessionInfo[];
 };
 
 /// Process-lifetime state. Survives the module reload that accompanies a
@@ -95,6 +105,10 @@ type Shell = {
   /// Actual bound port; null until the listener is up.
   port: number | null;
   generation: number;
+  /// Cached workspace scan. `SessionManager.listAll()` walks every session file
+  /// in every project and costs ~450ms here, which is far too much to pay on
+  /// each switch and each page load.
+  workspaces: { at: number; data: WorkspaceInfo[] } | null;
 };
 
 const GLOBAL_KEY = "__piWebShellShell";
@@ -108,6 +122,7 @@ function shell(): Shell {
     api: null,
     port: null,
     generation: 0,
+    workspaces: null,
   } satisfies Shell;
   return g[GLOBAL_KEY] as Shell;
 }
@@ -257,9 +272,29 @@ function historyFromEntries(entries: any[]): TurnMsg[] {
   return out;
 }
 
-/// Group saved sessions by working directory, newest first. This is what the
-/// browser shows as the workspace list.
+const WORKSPACES_TTL_MS = 15_000;
+
+/// How many sessions per workspace the sidebar receives.
+const MAX_SESSIONS_SHOWN = 25;
+
+/// Workspace list with `active` recomputed per call; the expensive scan is
+/// cached because it is identical for every caller in the process.
 async function listWorkspaces(activeCwd: string): Promise<WorkspaceInfo[]> {
+  const sh = shell();
+  const now = Date.now();
+  const cached = sh.workspaces;
+  let base: WorkspaceInfo[];
+  if (cached && now - cached.at < WORKSPACES_TTL_MS) {
+    base = cached.data;
+  } else {
+    base = await scanWorkspaces();
+    sh.workspaces = { at: now, data: base };
+  }
+  return base.map((w) => ({ ...w, active: w.cwd === activeCwd }));
+}
+
+/// The uncached scan, kept separate so `active` never leaks into the cache.
+async function scanWorkspaces(): Promise<WorkspaceInfo[]> {
   const all = await SessionManager.listAll();
   const byCwd = new Map<string, any[]>();
   for (const s of all) {
@@ -273,9 +308,18 @@ async function listWorkspaces(activeCwd: string): Promise<WorkspaceInfo[]> {
     sessions.sort((a, b) => +new Date(b.modified) - +new Date(a.modified));
     const newest = sessions[0];
     out.push({
+      sessions: sessions.slice(0, MAX_SESSIONS_SHOWN).map((s: any) => ({
+        path: s.path,
+        label:
+          String(s.name || s.firstMessage || "").trim().slice(0, 64) ||
+          "(空会话)",
+        modified: +new Date(s.modified),
+      })),
       cwd,
       name: cwd.split("/").filter(Boolean).pop() ?? cwd,
-      active: cwd === activeCwd,
+      // Always false here; `listWorkspaces` stamps the real value so it never
+      // reaches the shared cache.
+      active: false,
       sessionCount: sessions.length,
       lastSession: newest.path,
       lastModified: +new Date(newest.modified),
@@ -348,15 +392,27 @@ async function snapshot(): Promise<unknown | null> {
   if (!ctx) return null;
   try {
     const cwd = ctx.cwd;
+    const tb0 = Date.now();
+    const branch = ctx.sessionManager.getBranch() as any[];
+    const tb1 = Date.now();
+    const turns = historyFromEntries(branch);
+    const tb2 = Date.now();
+    if (tb2 - tb0 > 100) {
+      dbg(`snapshot parts: getBranch=${tb1 - tb0}ms entries=${branch.length} historyFromEntries=${tb2 - tb1}ms turns=${turns.length}`);
+    }
     return {
       kind: "history",
       cwd,
-      turns: historyFromEntries(ctx.sessionManager.getBranch() as any[]),
+      // Lets the sidebar mark which session inside the active workspace is
+      // the one currently open.
+      sessionFile: ctx.sessionManager.getSessionFile() ?? "",
+      turns,
       running: !ctx.isIdle(),
       workspaces: await listWorkspaces(cwd),
       instances: instanceList(),
     };
-  } catch {
+  } catch (err) {
+    dbg(`snapshot FAILED: ${(err as Error).message}`);
     return null;
   }
 }
@@ -424,8 +480,8 @@ async function onClientMessage(raw: unknown): Promise<void> {
           kind: "workspaces",
           workspaces: await listWorkspaces(s.ctx?.cwd ?? ""),
         });
-      } catch {
-        /* stale or unreadable session list */
+      } catch (err) {
+        dbg(`listWorkspaces FAILED: ${(err as Error).message}`);
       }
       return;
     }
@@ -573,13 +629,15 @@ export default function (pi: ExtensionAPI) {
 
     if (!firstConnect) {
       // A workspace switch: push the new session to everyone already watching.
-      const snap = await snapshot();
-      const workspaces = await listWorkspaces(ctx.cwd).catch(() => []);
+      // `snapshot()` already carries workspaces, so computing them again here
+      // would double the most expensive part of the switch.
+      const t0 = Date.now();
+      const snap: any = await snapshot();
+      dbg(`switch push: snapshot=${Date.now() - t0}ms`);
       broadcast({
         kind: "workspace_changed",
         cwd: ctx.cwd,
-        ...(snap as any),
-        workspaces,
+        ...(snap ?? {}),
         instances: instanceList(),
       });
     }
@@ -595,7 +653,12 @@ export default function (pi: ExtensionAPI) {
     const msg: any = (event as any).message;
     if (msg?.role !== "user") return;
     const text = textOf(msg).trim();
-    if (text) broadcast({ kind: "turn", user: text, blocks: [] });
+    if (!text) return;
+    // pi only writes a session file once it has content, so a brand-new
+    // session is absent from the workspace list until then. Drop the cached
+    // scan so the next snapshot picks it up (and can highlight it).
+    shell().workspaces = null;
+    broadcast({ kind: "turn", user: text, blocks: [] });
   });
 
   pi.on("turn_end", async (event) => {

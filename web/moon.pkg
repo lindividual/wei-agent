@@ -3,6 +3,7 @@ import {
   "moonbit-community/rabbita",
   "moonbit-community/rabbita/cmd",
   "moonbit-community/rabbita/html",
+  "moonbit-community/rabbita/nav",
   "moonbit-community/rabbita/websocket",
   "moonbitlang/core/json",
 }

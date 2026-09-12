@@ -44,23 +44,19 @@
   }
   .side-title:first-child { padding-top: 2px; }
   .ws {
-    display: block;
-    width: 100%;
-    text-align: left;
-    background: transparent;
+    display: flex;
+    align-items: stretch;
     border: 1px solid transparent;
     border-radius: 6px;
-    padding: 6px 8px;
     margin-bottom: 2px;
-    cursor: pointer;
-    color: var(--text);
-    font: inherit;
   }
-  .ws:hover:not(:disabled) { background: #232833; }
-  .ws.active {
-    background: #232833;
-    border-color: var(--line);
-    cursor: default;
+  .ws:hover { background: #232833; }
+  .ws.active { background: #232833; border-color: var(--line); }
+  .ws-main {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 4px 6px 8px;
+    cursor: pointer;
   }
   .ws.active .ws-name { color: var(--accent); }
   .ws-name {
@@ -70,6 +66,31 @@
     text-overflow: ellipsis;
   }
   .ws-meta { color: var(--dim); font-size: 11px; }
+  .ws-toggle {
+    flex: 0 0 auto;
+    width: 22px;
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    color: var(--dim);
+    font-size: 10px;
+  }
+  .ws-toggle:hover { color: var(--text); }
+  .sess {
+    padding: 4px 8px 4px 18px;
+    margin-bottom: 1px;
+    border-radius: 4px;
+    border-left: 2px solid transparent;
+    font-size: 12px;
+    color: var(--dim);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .sess:hover { background: #232833; color: var(--text); }
+  .sess.current { color: var(--accent); border-left-color: var(--accent); }
+
   .inst {
     display: flex;
     gap: 6px;
@@ -112,11 +133,12 @@
   .dot {
     width: 26px; height: 26px;
     display: grid; place-items: center;
+    border: 0;
     border-radius: 50%;
     background: #262a33;
     color: var(--dim);
     font: 11px var(--mono);
-    text-decoration: none;
+    cursor: pointer;
     transition: background .12s, color .12s;
   }
   .dot:hover { background: var(--accent); color: #14161a; }
@@ -146,7 +168,7 @@
     background: #1a1d23;
     overflow: hidden;
   }
-  .thinking > summary, .tool > summary {
+  .block .head {
     cursor: pointer;
     padding: 7px 12px;
     color: var(--dim);
@@ -156,22 +178,33 @@
     align-items: center;
     gap: 7px;
   }
-  .thinking > summary::before { content: "💭"; }
-  .tool > summary::before { content: "🔧"; }
-  .tool.error > summary::before { content: "⚠️"; }
-  .thinking > summary:hover, .tool > summary:hover { color: var(--text); }
+  /* Icon from ::before, disclosure arrow from ::after — one pseudo-element
+     each, so they can't fight over the same slot. */
+  .block .head::before { font-size: 12px; }
+  .block.thinking .head::before { content: "\1F4AD"; }
+  .block.tool .head::before { content: "\1F527"; }
+  .block.tool.error .head::before { content: "\26A0\FE0F"; }
+  .block .head::after {
+    content: "\25B8";
+    font-size: 10px;
+    margin-left: auto;
+    transition: transform .12s;
+  }
+  .block.open .head::after { transform: rotate(90deg); }
+  .block .head:hover { color: var(--text); }
   .tool.error { border-color: #5a2e33; }
-  .tool.error > summary { color: var(--warn); }
+  .tool.error .head { color: var(--warn); }
 
-  .thinking .body {
-    padding: 4px 12px 12px;
+  .block .body {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--line);
     color: var(--dim);
-    font-size: 14px;
+    font-size: 13px;
+    max-height: 420px;
+    overflow: auto;
     white-space: pre-wrap;
     word-break: break-word;
-    border-top: 1px solid var(--line);
-    max-height: 340px;
-    overflow-y: auto;
   }
   pre {
     margin: 0;
@@ -219,6 +252,8 @@
   .md table { border-collapse: collapse; margin: .7em 0; }
   .md th, .md td { border: 1px solid var(--line); padding: 5px 9px; }
   .md img { max-width: 100%; }
+
+  .sentinel { height: 1px; scroll-margin-bottom: 8px; }
 
   .pending {
     max-width: 860px;
