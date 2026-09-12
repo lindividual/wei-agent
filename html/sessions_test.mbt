@@ -8,7 +8,7 @@
 
 ///|
 fn session(path : String, label : String, current : Bool) -> SessionItem {
-  { path, label, modified: 1_700_000_000_000L, current, }
+  { path, label, modified: 1_700_000_000_000L, current, running: false, }
 }
 
 ///|
@@ -136,4 +136,40 @@ test "a session label is escaped" {
   ).render()
   assert_false(html.contains("<script>"), msg=html)
   assert_true(html.contains("&lt;script&gt;"), msg=html)
+}
+
+///|
+/// A session with a turn running is marked, wherever it is: with sessions running in
+/// parallel, the one being looked at is not necessarily the one doing work.
+test "a running session is marked in the list" {
+  let running : SessionItem = {
+    path: "/a.jsonl",
+    label: "working on something",
+    modified: 1_700_000_000_000L,
+    current: false,
+    running: true,
+  }
+  let html = render_sessions(
+    [
+      workspace(
+        "/work/one",
+        true,
+        [running, session("/b.jsonl", "idle", false)],
+        0,
+      ),
+    ],
+    1_700_000_000_000L,
+  ).render()
+  assert_true(html.contains("class=\"session running\""), msg=html)
+  assert_eq(count_of(html, "class=\"dot\""), 1)
+  // Marked without pretending it is the current one.
+  assert_false(html.contains("session current"), msg=html)
+}
+
+///|
+/// The transcript says which session it is, which is what lets the browser ignore
+/// patches belonging to another one.
+test "a transcript carries its session" {
+  let html = render_transcript([], session="/store/one.jsonl").render()
+  assert_true(html.contains("data-session=\"/store/one.jsonl\""), msg=html)
 }

@@ -66,6 +66,23 @@ pub fn Patch::to_sse(self : Patch) -> String {
 }
 
 ///|
+/// Encode as one SSE frame, tagged with the session it belongs to.
+///
+/// Patches produced while a turn runs are about that turn's session and no other. With
+/// several sessions able to run at once, a browser showing one of them must be able to
+/// ignore the rest — without this, a hidden session's streamed text would be appended to
+/// whatever the reader is looking at.
+///
+/// The tag is a frame-level field rather than part of the patch: it says who the patch is
+/// for, not what to do, and the snapshot frames that carry no tag are for everyone.
+pub fn Patch::to_scoped_sse(self : Patch, session : String) -> String {
+  let scoped : Json = Json::object(
+    Map([("session", Json::string(session)), ("patch", self.to_json())]),
+  )
+  "event: patch\ndata: \{scoped.stringify()}\n\n"
+}
+
+///|
 pub fn append_node(target : String, node : Node) -> Patch {
   Append(target~, html=node.render())
 }

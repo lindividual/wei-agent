@@ -417,7 +417,7 @@ async function main() {
     await cdp.eval(
       `(() => {
         const input = document.getElementById('prompt');
-        input.value = ${JSON.stringify("Reply with exactly: browser-ok")};
+        input.value = ${JSON.stringify("Reply with exactly: second-ok")};
         document.getElementById('composer').requestSubmit();
         return true;
       })()`,
@@ -577,6 +577,95 @@ async function main() {
       30000,
     );
     check(true, "one click restores it");
+
+    console.log("\nparallel turns (switching away must not stop anything)");
+    // Two sessions, both with content, so each is identifiable by its first message.
+    const openSession = async (label) =>
+      await cdp.eval(
+        `(() => {
+          const row = [...document.querySelectorAll('#sessions [data-session]')]
+            .find(r => r.textContent.includes(${JSON.stringify(label)}));
+          if (!row) return null;
+          row.click();
+          return row.dataset.session;
+        })()`,
+      );
+    const counter = async () => {
+      const text = await cdp.eval("document.getElementById('status').textContent");
+      const match = /(\d+) model call/.exec(text);
+      return match ? Number(match[1]) : null;
+    };
+
+    // A prompt that keeps the model busy for minutes: the point is that the rest of the
+    // checks can happen while it runs.
+    const longPrompt =
+      "Read every file in core/, then every file in html/, then every file in platform/, and summarise each in one sentence.";
+    check(!!(await openSession("browser-ok")), "the first session is displayed");
+    await cdp.eval(
+      `(() => {
+        const input = document.getElementById('prompt');
+        input.value = ${JSON.stringify(longPrompt)};
+        document.getElementById('composer').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `/working….+tool call\\(s\\)/.test(document.getElementById('status').textContent)`,
+      "the long turn to get under way",
+      90000,
+    );
+    const before = await counter();
+    check(before !== null && before >= 1, "the turn reports progress while it runs", `counter=${before}`);
+
+    // Away: the other session. Nothing about the running one may show up here.
+    check(!!(await openSession("second-ok")), "the second session can be opened");
+    await cdp.waitFor(
+      `document.getElementById('transcript').textContent.includes('second-ok')`,
+      "the second session's own transcript",
+      30000,
+    );
+    check(
+      (await cdp.eval("document.querySelectorAll('#transcript [id^=live-tool]').length")) === 0,
+      "no output from the hidden session leaked into the visible one",
+    );
+    check(
+      (await cdp.eval("document.querySelectorAll('#sessions .dot').length")) >= 1,
+      "the sidebar marks the session that is still working",
+    );
+    const shownStatus = await cdp.eval("document.getElementById('status').textContent");
+    check(
+      !/working… \d+ model call/.test(shownStatus),
+      "the hidden turn's progress stays off the visible status line",
+      shownStatus,
+    );
+
+    // Let it work while nobody is watching, then come back and see that it did.
+    await sleep(9000);
+    check(!!(await openSession("browser-ok")), "the working session can be opened again");
+    await cdp.waitFor(
+      `document.getElementById('transcript').textContent.includes(${JSON.stringify(longPrompt)})`,
+      "the running exchange to be back on screen",
+      30000,
+    );
+    let after = await counter();
+    if (after === null) {
+      // It finished while hidden, which is also proof that it kept going.
+      after = await cdp.eval(
+        "document.querySelectorAll('#transcript .exchange').length",
+      );
+      check(after >= 2, "the turn completed while hidden");
+    } else {
+      check(
+        after > before,
+        "the turn made progress while another session was displayed",
+        `before=${before} after=${after}`,
+      );
+    }
+    check(
+      (await cdp.eval("document.querySelectorAll('#transcript [id^=live-tool]').length")) >= 1 ||
+        (await cdp.eval("document.querySelectorAll('#transcript .result').length")) >= 1,
+      "the work done out of sight is on screen when the session comes back",
+    );
 
     console.log("\nno uncaught exceptions");
     check(

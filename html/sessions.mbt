@@ -22,6 +22,10 @@ pub(all) struct SessionItem {
   /// Last write, in milliseconds since the epoch. Used for age and for order.
   modified : Int64
   current : Bool
+  /// True while a turn is running in this session, whether or not it is the one being
+  /// looked at. With sessions running in parallel this is the only way to know that
+  /// something is still happening somewhere else.
+  running : Bool
 } derive(Eq, Debug)
 
 ///|
@@ -62,25 +66,35 @@ pub fn render_sessions(workspaces : Array[WorkspaceItem], now : Int64) -> Node {
 fn render_workspace(workspace : WorkspaceItem, now : Int64) -> Node {
   let rows : Array[Node] = []
   for item in workspace.sessions {
-    let classes = if item.current { "session current" } else { "session" }
-    rows.push(
-      el("li", attrs=[cls(classes)], children=[
-        el(
-          "button",
-          attrs=[
-            attr("type", "button"),
-            attr("data-session", item.path),
-            attr("title", item.path),
-          ],
-          children=[
-            txt(if item.label == "" { "(empty session)" } else { item.label }),
-          ],
-        ),
-        el("div", attrs=[cls("meta")], children=[
-          txt(age_label(item.modified, now)),
-        ]),
+    let mut classes = if item.current { "session current" } else { "session" }
+    if item.running {
+      classes = "\{classes} running"
+    }
+    let children : Array[Node] = [
+      el(
+        "button",
+        attrs=[
+          attr("type", "button"),
+          attr("data-session", item.path),
+          attr("title", item.path),
+        ],
+        children=[
+          txt(if item.label == "" { "(empty session)" } else { item.label }),
+        ],
+      ),
+    ]
+    if item.running {
+      // A dot rather than text: it has to be legible at a glance from any workspace.
+      children.push(
+        el("span", attrs=[cls("dot"), attr("title", "running")], children=[]),
+      )
+    }
+    children.push(
+      el("div", attrs=[cls("meta")], children=[
+        txt(age_label(item.modified, now)),
       ]),
     )
+    rows.push(el("li", attrs=[cls(classes)], children~))
   }
   let children : Array[Node] = [
     el("summary", attrs=[attr("title", workspace.cwd)], children=[

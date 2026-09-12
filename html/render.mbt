@@ -158,7 +158,15 @@ pub fn render_exchange(
 /// Blocks are paired with their tool results at each boundary rather than once at
 /// the end, because a summary can land in the middle — and pairing is what
 /// guarantees a result is never shown without the call it answered.
-pub fn render_transcript(messages : Array[@core.ContextMessage]) -> Node {
+pub fn render_transcript(
+  messages : Array[@core.ContextMessage],
+  /// Which session this transcript is of. Carried in the DOM because the browser needs
+  /// it to decide whether a patch it just received is for what it is showing.
+  session? : String = "",
+  /// Sections to append after the conversation — a turn that is still running, which the
+  /// committed messages do not describe yet.
+  extra? : Array[Node] = [],
+) -> Node {
   let sections : Array[Node] = []
   let mut user : String? = None
   let mut pieces : Array[Piece] = []
@@ -188,7 +196,60 @@ pub fn render_transcript(messages : Array[@core.ContextMessage]) -> Node {
   }
   drain(pieces, blocks, results)
   push_exchange(sections, index, user, pieces)
-  el("div", attrs=[attr("id", "transcript")], children=sections)
+  for node in extra {
+    sections.push(node)
+  }
+  el(
+    "div",
+    attrs=[attr("id", "transcript"), attr("data-session", session)],
+    children=sections,
+  )
+}
+
+///|
+/// A piece of a turn that is still arriving.
+///
+/// The ids are the ones the live patches use as their targets, which is what lets a
+/// snapshot of a running turn be continued by the stream rather than replaced by it.
+pub(all) enum LivePiece {
+  Text(id~ : String, text~ : String)
+  Thinking(id~ : String, text~ : String)
+  Tool(id~ : String, call~ : @core.Content, result~ : @core.ToolResultMessage)
+} derive(Eq, Debug)
+
+///|
+/// A running turn, as far as it has got: the reader's message, and a container holding
+/// everything the model has produced so far.
+///
+/// Rendered from the server's record of the turn rather than from the DOM, so a browser
+/// that arrives in the middle — or comes back to it — sees the same thing as one that has
+/// been there all along.
+pub fn render_running_exchange(
+  index : Int,
+  user : String,
+  pieces : Array[LivePiece],
+) -> Node {
+  let children : Array[Node] = []
+  for piece in pieces {
+    match piece {
+      Text(id~, text~) =>
+        children.push(
+          el("div", attrs=[cls("text"), attr("id", id)], children=[
+            Node::Text(text),
+          ]),
+        )
+      Thinking(id~, text~) =>
+        children.push(render_thinking_stream(id, "\{id}-body", text~))
+      Tool(id~, call~, result~) =>
+        children.push(render_tool(id, call, Some(result)))
+    }
+  }
+  el("section", attrs=[cls("exchange"), attr("id", exchange_id(index))], children=[
+    el("div", attrs=[cls("user")], children=[markdown_or_text(user)]),
+    el("div", attrs=[cls("blocks"), attr("id", blocks_id(index))], children=[
+      el("div", attrs=[attr("id", "streams-\{index}")], children~),
+    ]),
+  ])
 }
 
 ///|
@@ -344,10 +405,17 @@ pub fn render_exchange_start(index : Int, user : String?) -> Node {
 /// Reasoning is collapsed, but a model that thinks for a minute must not look like a
 /// frozen page: the summary says what is happening, and the text is there for a
 /// reader who opens it while it is still being written.
-pub fn render_thinking_stream(id : String, body_id : String) -> Node {
+pub fn render_thinking_stream(
+  id : String,
+  body_id : String,
+  /// What has arrived so far. Empty while it is the first thing being streamed.
+  text? : String = "",
+) -> Node {
   el("details", attrs=[cls("thinking"), attr("id", id)], children=[
     el("summary", children=[txt("thinking…")]),
-    el("div", attrs=[cls("body"), attr("id", body_id)], children=[]),
+    el("div", attrs=[cls("body"), attr("id", body_id)], children=[
+      Node::Text(text),
+    ]),
   ])
 }
 
