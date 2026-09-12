@@ -209,7 +209,7 @@ async fn open_session(
       let path = if value.contains("/") {
         value
       } else {
-        match find_by_id(root, cwd, value) {
+        match @platform.find_session(root, value) {
           Some(found) => found
           None => raise Failure::Failure("no session \{value} in \{root}")
         }
@@ -220,18 +220,6 @@ async fn open_session(
       (open_path(path), path)
     }
   }
-}
-
-///|
-/// A session file whose name carries this id.
-async fn find_by_id(root : String, cwd : String, id : String) -> String? {
-  let dir = @core.session_dir_for(root, cwd)
-  for name in @platform.list_entries(dir) {
-    if name.has_suffix("_\{id}.jsonl") {
-      return Some("\{dir}/\{name}")
-    }
-  }
-  None
 }
 
 ///|

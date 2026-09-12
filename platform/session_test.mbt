@@ -187,3 +187,23 @@ async test "list_workspaces caps the sessions it lists but counts them all" {
   assert_eq(workspaces[0].sessions.length(), 2)
   assert_eq(workspaces[0].total, 5)
 }
+
+///|
+/// An id identifies a session without knowing which workspace it lives in, which is
+/// what makes `--resume <id>` agree with the sidebar.
+async test "find_session searches every workspace" {
+  let root = session_scratch("find")
+  let one = "\{root}/--work-one--/2020-01-01T00-00-00.000Z_aaaa1111.jsonl"
+  let two = "\{root}/--work-two--/2021-01-01T00-00-00.000Z_bbbb2222.jsonl"
+  make_dirs(@core.parent_of(one))
+  make_dirs(@core.parent_of(two))
+  create_session(one, header("aaaa1111", "/work/one"))
+  create_session(two, header("bbbb2222", "/work/two"))
+
+  assert_eq(find_session(root, "bbbb2222"), Some(two))
+  assert_eq(find_session(root, "aaaa1111"), Some(one))
+  // An id that is a suffix of another must not match the wrong file.
+  assert_eq(find_session(root, "1111"), None)
+  assert_eq(find_session(root, ""), None)
+  assert_eq(find_session("\{root}/nope", "aaaa1111"), None)
+}

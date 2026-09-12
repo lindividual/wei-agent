@@ -195,6 +195,30 @@ pub async fn list_workspaces(
 }
 
 ///|
+/// The session file whose name carries this id, anywhere in the store.
+///
+/// Across workspaces rather than only the starting directory: the store holds every
+/// directory the agent has worked in, and an id is enough to identify one — which is
+/// also what makes `--resume <id>` agree with what the sidebar offers.
+pub async fn find_session(root : String, id : String) -> String? {
+  if id == "" || !path_exists(root) {
+    return None
+  }
+  for name in list_entries(root) {
+    let dir = "\{root}/\{name}"
+    if !is_directory(dir) {
+      continue
+    }
+    for file in list_entries(dir) {
+      if file.has_suffix("_\{id}.jsonl") {
+        return Some("\{dir}/\{file}")
+      }
+    }
+  }
+  None
+}
+
+///|
 /// The newest session file for one working directory, which is what
 /// `--continue` means.
 pub async fn newest_session(root : String, cwd : String) -> String? {
