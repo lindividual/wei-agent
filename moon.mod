@@ -19,13 +19,13 @@ repository = ""
 
 license = "Apache-2.0"
 
-keywords = []
+keywords = [ ]
 
-preferred_target = "js"
+preferred_target = "native"
 
 description = ""
 
 import {
-  "moonbit-community/rabbita@0.15.7",
+  "moonbitlang/async@0.21.0",
   "moonbit-community/cmark@0.4.8",
 }

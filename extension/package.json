@@ -1,7 +1,0 @@
-{
-  "name": "pi-web-shell-extension",
-  "private": true,
-  "dependencies": {
-    "ws": "^8.18.0"
-  }
-}
