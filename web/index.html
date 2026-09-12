@@ -27,6 +27,66 @@
 
   .app { display: flex; height: 100%; }
 
+  /* ── workspace sidebar ── */
+  .sidebar {
+    flex: 0 0 208px;
+    background: #191c22;
+    border-right: 1px solid var(--line);
+    overflow-y: auto;
+    padding: 12px 10px 20px;
+  }
+  .side-title {
+    color: var(--dim);
+    font-size: 11px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    padding: 12px 6px 6px;
+  }
+  .side-title:first-child { padding-top: 2px; }
+  .ws {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 6px 8px;
+    margin-bottom: 2px;
+    cursor: pointer;
+    color: var(--text);
+    font: inherit;
+  }
+  .ws:hover:not(:disabled) { background: #232833; }
+  .ws.active {
+    background: #232833;
+    border-color: var(--line);
+    cursor: default;
+  }
+  .ws.active .ws-name { color: var(--accent); }
+  .ws-name {
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ws-meta { color: var(--dim); font-size: 11px; }
+  .inst {
+    display: flex;
+    gap: 6px;
+    padding: 3px 8px;
+    font: 11px var(--mono);
+    color: var(--dim);
+  }
+  .inst.current { color: var(--accent); }
+  .inst-port { flex: 0 0 auto; }
+  .inst-cwd {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    direction: rtl;
+    text-align: left;
+  }
+
   /* ── turn anchors ── */
   .rail {
     flex: 0 0 52px;
@@ -176,6 +236,15 @@
     animation: pulse 1s infinite;
   }
   @keyframes pulse { 50% { opacity: .2; } }
+
+  /* ── empty state ── */
+  .empty { max-width: 860px; margin: 18vh auto 0; text-align: center; }
+  .empty-title {
+    font: 600 26px var(--mono);
+    color: var(--text);
+    letter-spacing: -.5px;
+  }
+  .empty-hint { margin-top: 10px; color: var(--dim); font-size: 14px; }
 
   /* ── composer ── */
   .composer {

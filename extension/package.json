@@ -3,8 +3,5 @@
   "private": true,
   "dependencies": {
     "ws": "^8.18.0"
-  },
-  "pi": {
-    "extensions": ["./index.ts"]
   }
 }

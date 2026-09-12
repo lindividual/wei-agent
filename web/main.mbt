@@ -26,8 +26,29 @@ struct Exchange {
 } derive(Eq)
 
 ///|
+/// A directory with at least one saved session, as listed by the extension.
+struct Workspace {
+  cwd : String
+  name : String
+  active : Bool
+  session_count : Int
+  last_session : String
+} derive(Eq)
+
+///|
+/// Another running pi process serving its own web shell.
+struct Instance {
+  pid : Int
+  cwd : String
+  port : Int
+  current : Bool
+} derive(Eq)
+
+///|
 struct Model {
   exchanges : Array[Exchange]
+  workspaces : Array[Workspace]
+  instances : Array[Instance]
   draft : String
   running : Bool
 } derive(Eq)
@@ -42,6 +63,7 @@ enum Msg {
   WsErrored
   Draft(String)
   Submit
+  SwitchWorkspace(String)
 } derive(Eq)
 
 // ── JSON accessors ─────────────────────────────────────────────────────────
@@ -68,6 +90,14 @@ fn jbool(j : Json, key : String) -> Bool {
 }
 
 ///|
+fn jint(j : Json, key : String) -> Int {
+  match jfield(j, key) {
+    Some(Number(n, ..)) => n.to_int()
+    _ => 0
+  }
+}
+
+///|
 fn jarray(j : Json, key : String) -> Array[Json] {
   match jfield(j, key) {
     Some(Array(a)) => a
@@ -83,6 +113,50 @@ fn juser(j : Json) -> String? {
     Some(String(s)) => Some(s)
     _ => None
   }
+}
+
+///|
+fn parse_workspace(j : Json) -> Workspace? {
+  let cwd = jstr(j, "cwd")
+  if cwd == "" {
+    return None
+  }
+  Some({
+    cwd,
+    name: jstr(j, "name"),
+    active: jbool(j, "active"),
+    session_count: jint(j, "sessionCount"),
+    last_session: jstr(j, "lastSession"),
+  })
+}
+
+///|
+fn parse_workspaces(j : Json) -> Array[Workspace] {
+  let out : Array[Workspace] = []
+  for item in jarray(j, "workspaces") {
+    match parse_workspace(item) {
+      Some(w) => out.push(w)
+      None => ()
+    }
+  }
+  out
+}
+
+///|
+fn parse_instances(j : Json) -> Array[Instance] {
+  let out : Array[Instance] = []
+  for item in jarray(j, "instances") {
+    let pid = jint(item, "pid")
+    if pid != 0 {
+      out.push({
+        pid,
+        cwd: jstr(item, "cwd"),
+        port: jint(item, "port"),
+        current: jbool(item, "current"),
+      })
+    }
+  }
+  out
 }
 
 // ── Wire → model ───────────────────────────────────────────────────────────
@@ -152,6 +226,15 @@ fn apply_history(j : Json) -> Array[Exchange] {
   exs
 }
 
+///|
+/// Build a JSON text frame for the bridge.
+fn send_json(fields : Map[String, String]) -> @cmd.Cmd {
+  @websocket.send(
+    WS_ID,
+    @websocket.Payload::Text(@json.to_json(fields).stringify()),
+  )
+}
+
 // ── update ─────────────────────────────────────────────────────────────────
 
 ///|
@@ -167,50 +250,52 @@ fn update(
           match jstr(j, "kind") {
             "history" => (
               {
+                ..model,
                 exchanges: apply_history(j),
-                draft: model.draft,
+                workspaces: parse_workspaces(j),
+                instances: parse_instances(j),
                 running: jbool(j, "running"),
               },
               @cmd.none,
             )
+            // A workspace switch delivers a full snapshot under its own kind.
+            "workspace_changed" => (
+              {
+                ..model,
+                exchanges: apply_history(j),
+                workspaces: parse_workspaces(j),
+                instances: parse_instances(j),
+                running: false,
+              },
+              @cmd.none,
+            )
+            "workspaces" => ({ ..model, workspaces: parse_workspaces(j) }, @cmd.none)
             "turn" => (
-              {
-                exchanges: append_turn(model.exchanges, j),
-                draft: model.draft,
-                running: model.running,
-              },
+              { ..model, exchanges: append_turn(model.exchanges, j) },
               @cmd.none,
             )
-            "status" => (
-              {
-                exchanges: model.exchanges,
-                draft: model.draft,
-                running: jbool(j, "running"),
-              },
-              @cmd.none,
-            )
+            "status" => ({ ..model, running: jbool(j, "running") }, @cmd.none)
             _ => (model, @cmd.none)
           }
         Err(_) => (model, @cmd.none)
       }
     WsOpened | WsClosed | WsErrored => (model, @cmd.none)
-    Draft(s) => (
-      { exchanges: model.exchanges, draft: s, running: model.running },
-      @cmd.none,
-    )
+    Draft(s) => ({ ..model, draft: s }, @cmd.none)
     Submit => {
       let text = model.draft.trim().to_string()
       if text == "" {
         (model, @cmd.none)
       } else {
-        let fields : Map[String, String] = { "kind": "prompt", "text": text }
-        let payload = @json.to_json(fields).stringify()
         (
-          { exchanges: model.exchanges, draft: "", running: model.running },
-          @websocket.send(WS_ID, @websocket.Payload::Text(payload)),
+          { ..model, draft: "" },
+          send_json({ "kind": "prompt", "text": text }),
         )
       }
     }
+    SwitchWorkspace(session) => (
+      model,
+      send_json({ "kind": "switch", "session": session }),
+    )
   }
 }
 
@@ -262,8 +347,40 @@ fn render_exchange(ex : Exchange) -> @html.Html {
 }
 
 ///|
+///|
+/// Workspace list plus the other pi processes serving their own shell.
+fn sidebar(model : Model, emit : @cmd.Emit[Msg]) -> @html.Html {
+  @html.aside(class="sidebar", [
+    @html.div(class="side-title", "工作区"),
+    ..model.workspaces.map(fn(w) {
+      @html.button(
+        class="ws" + (if w.active { " active" } else { "" }),
+        disabled=w.active,
+        on_click=emit(SwitchWorkspace(w.last_session)),
+        [
+          @html.div(class="ws-name", w.name),
+          @html.div(class="ws-meta", "\{w.session_count} 会话"),
+        ],
+      )
+    }),
+    if model.instances.length() > 1 {
+      @html.div(class="side-title", "实例 · \{model.instances.length()}")
+    } else {
+      @html.nothing
+    },
+    ..model.instances.map(fn(i) {
+      @html.div(class="inst" + (if i.current { " current" } else { "" }), [
+        @html.div(class="inst-port", ":\{i.port}"),
+        @html.div(class="inst-cwd", i.cwd),
+      ])
+    }),
+  ])
+}
+
+///|
 fn view(model : Model, emit : @cmd.Emit[Msg]) -> @html.Html {
   @html.div(class="app", [
+    sidebar(model, emit),
     @html.nav(class="rail", [
       @html.div(class="rail-title", "#"),
       ..model.exchanges.map(fn(ex) {
@@ -272,6 +389,14 @@ fn view(model : Model, emit : @cmd.Emit[Msg]) -> @html.Html {
     ]),
     @html.div(class="chat", [
       @html.div(class="stream", [
+        if model.exchanges.length() == 0 {
+          @html.div(class="empty", [
+            @html.div(class="empty-title", "pi-web-shell"),
+            @html.div(class="empty-hint", "在下面输入问题，按发送开始对话。"),
+          ])
+        } else {
+          @html.nothing
+        },
         ..model.exchanges.map(render_exchange),
         if model.running {
           @html.div(class="pending", "生成中…")
@@ -301,7 +426,7 @@ fn view(model : Model, emit : @cmd.Emit[Msg]) -> @html.Html {
 
 ///|
 fn initial() -> Model {
-  { exchanges: [], draft: "", running: false }
+  { exchanges: [], workspaces: [], instances: [], draft: "", running: false }
 }
 
 ///|
