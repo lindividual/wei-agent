@@ -1,3 +1,13 @@
 #!/bin/sh
+set -e
 
 moon check
+
+# `core/` holds the portable half of the reimplementation: message model,
+# provider codecs, agent loop, session store. It has to compile for every
+# backend, which is only true while it stays free of platform code.
+#
+# If one of these fails, something under core/ reached for IO. Fix the code,
+# not this script.
+moon check -p core --target js
+moon check -p core --target wasm-gc

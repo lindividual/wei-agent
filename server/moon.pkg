@@ -1,0 +1,10 @@
+import {
+  "lindividual/pi-web-shell/html",
+  "moonbitlang/async/aqueue",
+  "moonbitlang/async/http",
+  "moonbitlang/async/io",
+  "moonbitlang/async/socket",
+  "moonbitlang/core/encoding/utf8",
+}
+
+supported_targets = "+native"

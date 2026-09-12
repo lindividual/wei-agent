@@ -1,0 +1,15 @@
+import {
+  "lindividual/pi-web-shell/agent",
+  "lindividual/pi-web-shell/core",
+  "lindividual/pi-web-shell/html",
+  "lindividual/pi-web-shell/platform",
+  "lindividual/pi-web-shell/server",
+  "moonbitlang/async",
+  "moonbitlang/async/stdio",
+  "moonbitlang/core/env",
+  "moonbitlang/core/json",
+}
+
+supported_targets = "+native"
+
+pkgtype(kind: "executable")
