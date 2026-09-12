@@ -138,3 +138,52 @@ async test "read_prefix stops early" {
   // Longer than the file is the whole file.
   assert_eq(read_prefix(path, 1000).length(), 4 * line.length())
 }
+
+///|
+/// The workspace list groups sessions by the directory recorded in their headers,
+/// newest workspace first, and caps how many sessions each one shows.
+async test "list_workspaces reads the cwd from the sessions" {
+  let root = session_scratch("workspaces")
+  // The directory name deliberately does not encode this cwd: the encoding is
+  // lossy, so the header is the only trustworthy answer.
+  let older = "\{root}/--not-the-real-path--/2020-01-01T00-00-00.000Z_old.jsonl"
+  let newer = "\{root}/--also-wrong--/2030-01-01T00-00-00.000Z_new.jsonl"
+  make_dirs(@core.parent_of(older))
+  make_dirs(@core.parent_of(newer))
+  create_session(older, header("old", "/work/one"))
+  create_session(newer, header("new", "/work/two"))
+  // A directory with no sessions is not a workspace.
+  make_dirs("\{root}/--empty--")
+
+  let workspaces = list_workspaces(root, 10)
+  assert_eq(workspaces.length(), 2)
+  assert_eq(workspaces[0].cwd, "/work/two")
+  assert_eq(workspaces[1].cwd, "/work/one")
+  assert_eq(workspaces[0].total, 1)
+  assert_eq(workspaces[0].sessions.length(), 1)
+
+  // A directory whose newest session cannot be attributed is skipped rather than
+  // listed under a guessed path.
+  let broken = "\{root}/--broken--/2031-01-01T00-00-00.000Z_broken.jsonl"
+  make_dirs(@core.parent_of(broken))
+  write_text(broken, "not json at all\n")
+  let after = list_workspaces(root, 10)
+  assert_eq(after.length(), 2)
+}
+
+///|
+async test "list_workspaces caps the sessions it lists but counts them all" {
+  let root = session_scratch("cap")
+  let dir = "\{root}/--work-one--"
+  make_dirs(dir)
+  for i in 0..<5 {
+    create_session(
+      "\{dir}/2020-01-0\{i + 1}T00-00-00.000Z_s\{i}.jsonl",
+      header("s\{i}", "/work/one"),
+    )
+  }
+  let workspaces = list_workspaces(root, 2)
+  assert_eq(workspaces.length(), 1)
+  assert_eq(workspaces[0].sessions.length(), 2)
+  assert_eq(workspaces[0].total, 5)
+}

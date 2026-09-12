@@ -70,6 +70,31 @@ pub fn session_dir_name(cwd : String) -> String {
 }
 
 ///|
+/// The working directory a session file was recorded in.
+///
+/// Read from the header rather than decoded from the directory name. The encoding
+/// replaces every separator with a dash, so a directory named `--a-b--` could be
+/// `a/b` or the single directory `a-b` — and guessing wrong would move the agent
+/// into a directory that does not exist. The sessions already record the answer.
+///
+/// Tolerates a truncated or malformed first line: the caller may have read only a
+/// prefix of the file.
+pub fn cwd_of_session_file(text : String) -> String? {
+  for raw in text.split("\n") {
+    let line = raw.trim()
+    if line.is_empty() {
+      continue
+    }
+    return try SessionHeader::from_json(@json.parse(line)) catch {
+      _ => None
+    } noraise {
+      header => Some(header.cwd)
+    }
+  }
+  None
+}
+
+///|
 /// A fresh entry id: eight hex characters, matching the shape pi writes.
 ///
 /// Ids only need to be unique within a session, and collisions across sessions

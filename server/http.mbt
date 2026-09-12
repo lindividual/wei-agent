@@ -6,7 +6,8 @@
 /// - `GET /`          the page, with whatever conversation already exists
 /// - `GET /events`    an SSE stream of patches
 /// - `POST /prompt`   a user message
-/// - `POST /session`  switch to another saved session, or start a new one
+/// - `POST /session`  open a saved session (of any workspace)
+/// - `POST /new`      start a new session in a workspace
 /// - `POST /abort`    stop the running turn
 ///
 /// The POST routes answer immediately and the work happens behind them. A turn
@@ -42,9 +43,12 @@ pub(all) struct Routes {
   /// while reading the model's response, so the process never abandons a tool that
   /// has already started.
   abort : () -> Unit
-  /// Switches the session every client is looking at. An empty path means a new
-  /// session.
+  /// Opens the session at this path, and moves the agent into its workspace.
   switch_session : (String) -> Unit
+  /// Starts a new session in this working directory. Separate from opening one
+  /// because "a directory" and "a session file" would otherwise have to be told
+  /// apart by inspecting the path.
+  new_session : (String) -> Unit
 }
 
 ///|
@@ -148,6 +152,11 @@ pub async fn serve(port : Int, hub : Hub, routes : Routes) -> Unit {
         let path = read_body(body)
         ok(conn)
         (routes.switch_session)(path)
+      }
+      (Post, "/new") => {
+        let cwd = read_body(body)
+        ok(conn)
+        (routes.new_session)(cwd)
       }
       _ => not_found(conn)
     }

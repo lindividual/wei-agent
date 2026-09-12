@@ -22,7 +22,14 @@
  * need a real turn.
  */
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, mkdirSync, existsSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -66,6 +73,66 @@ function note(text) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/// The store directory name for a working directory.
+///
+/// Reimplemented here rather than imported, because the check has to be able to
+/// seed a workspace the server has never seen. `assertEncodingRule` keeps the copy
+/// honest: it is checked against the directory the server itself created.
+function storeDirName(cwd) {
+  const start = cwd.startsWith("/") ? 1 : 0;
+  const body = cwd
+    .slice(start)
+    .replace(/[/\\:]/g, "-");
+  return `--${body}--`;
+}
+
+/// A session file the server will accept: a header, then two entries.
+function sessionFile(cwd, label) {
+  const id = Math.random().toString(16).slice(2, 10);
+  const at = new Date(1700000000000).toISOString();
+  const line = (o) => JSON.stringify(o);
+  return {
+    id,
+    text: [
+      line({ type: "session", version: 3, id, timestamp: at, cwd }),
+      line({
+        type: "message",
+        id: "u1",
+        parentId: null,
+        timestamp: at,
+        message: {
+          role: "user",
+          content: [{ type: "text", text: label }],
+          timestamp: 1700000000000,
+        },
+      }),
+      line({
+        type: "message",
+        id: "a1",
+        parentId: "u1",
+        timestamp: at,
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "seeded" }],
+          api: "openai-completions",
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 2,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: "stop",
+          timestamp: 1700000000000,
+        },
+      }),
+    ].join("\n") + "\n",
+  };
+}
 
 // ── a very small CDP client ────────────────────────────────────────────────
 
@@ -322,17 +389,19 @@ async function main() {
     );
 
     console.log("\nsidebar (a new session, then going back to the old one)");
-    await cdp.eval(
-      `document.querySelector('[data-session=""]').click()`,
+    check(
+      (await cdp.eval("document.querySelectorAll('#sessions [data-new]').length")) === 1,
+      "the open workspace offers a new session",
     );
+    await cdp.eval(`document.querySelector('[data-new]').click()`);
     await cdp.waitFor(
       `document.querySelectorAll('#transcript .exchange').length === 0`,
       "a new session to clear the transcript",
       30000,
     );
     check(
-      (await cdp.eval("document.querySelectorAll('#sessions [data-session]').length")) >= 3,
-      "the sidebar lists the new session next to the old ones",
+      (await cdp.eval("document.querySelectorAll('#sessions [data-session]').length")) >= 2,
+      "the sidebar lists the new session next to the old one",
     );
     const back = await cdp.eval(
       `(() => {
@@ -350,6 +419,95 @@ async function main() {
       30000,
     );
     check(true, "clicking a sidebar row opens that session");
+
+    console.log("\nworkspaces (a session from another directory)");
+    // Seed a second workspace the server has never seen: its own directory and a
+    // session file that says where the agent should work.
+    // A sibling of the store, so the temporary directory that holds it is removed
+    // with the rest.
+    // Deliberately long: the sidebar has to ellipsise a workspace name rather than
+    // overflow or push the transcript around.
+    const otherCwd = `${store}-another-project-with-a-long-name`;
+    mkdirSync(otherCwd, { recursive: true });
+    writeFileSync(join(otherCwd, "marker-b.txt"), "MARKER-B-7f3a2c\n");
+    // The encoding is a copy of the server's; check it against the directory the
+    // server created for its own cwd, so a drift in either copy fails here.
+    const ownDir = join(store, storeDirName(process.cwd()));
+    check(
+      existsSync(ownDir),
+      "the store directory rule still matches the server's",
+      `${ownDir} does not exist`,
+    );
+    const otherDir = join(store, storeDirName(otherCwd));
+    mkdirSync(otherDir, { recursive: true });
+    const seeded = sessionFile(otherCwd, "seeded question from the other project");
+    writeFileSync(join(otherDir, `2020-01-01T00-00-00.000Z_${seeded.id}.jsonl`), seeded.text);
+
+    // A reload, because the sidebar is only re-rendered on connect, on a switch and
+    // after a turn — there is no polling, by design.
+    await cdp.send("Page.navigate", { url: URL });
+    await cdp.waitFor("document.readyState === 'complete'", "page reload", 20000);
+    await sleep(1500);
+    check(
+      (await cdp.eval("document.querySelectorAll('#sessions details.workspace').length")) === 2,
+      "both workspaces are listed",
+    );
+    check(
+      (await cdp.eval(
+        `(() => {
+          const open = document.querySelectorAll('#sessions details.workspace[open]');
+          return open.length === 1 && open[0].querySelector('summary').title === ${JSON.stringify(process.cwd())};
+        })()`,
+      )) === true,
+      "only the workspace being worked in is open",
+    );
+
+    const switched = await cdp.eval(
+      `(() => {
+        const row = [...document.querySelectorAll('#sessions [data-session]')]
+          .find(r => r.textContent.includes('other project'));
+        if (!row) return null;
+        row.click();
+        return row.dataset.session;
+      })()`,
+    );
+    check(!!switched, "the seeded session is listed under its own workspace", switched ?? "not found");
+    await cdp.waitFor(
+      `document.getElementById('status').textContent.includes(${JSON.stringify(`in ${otherCwd}`)})`,
+      "the agent to move into the other workspace",
+      30000,
+    );
+    check(
+      (await cdp.eval(
+        `(() => {
+          const open = document.querySelectorAll('#sessions details.workspace[open]');
+          return open.length === 1 && open[0].querySelector('summary').title === ${JSON.stringify(otherCwd)};
+        })()`,
+      )) === true,
+      "the other workspace is the active one now",
+    );
+    check(
+      (await cdp.eval("document.querySelectorAll('#sessions .session.current').length")) === 1,
+      "exactly one session is marked current",
+    );
+
+    // The point of a workspace: the tools run there. A relative path only resolves
+    // if the read tool was given the new directory.
+    const markerPrompt = "Use the read tool on marker-b.txt and reply with its contents.";
+    await cdp.eval(
+      `(() => {
+        const input = document.getElementById('prompt');
+        input.value = ${JSON.stringify(markerPrompt)};
+        document.getElementById('composer').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.getElementById('transcript').textContent.includes('MARKER-B-7f3a2c')`,
+      "the tool to read the file from the new workspace",
+      120000,
+    );
+    check(true, "tools run in the workspace that was opened");
 
     console.log("\nreconnect (the server is restarted under the page)");
     server.kill("SIGKILL");
@@ -415,6 +573,10 @@ async function main() {
     chrome?.kill("SIGKILL");
     if (!KEEP) {
       rmSync(store, { recursive: true, force: true });
+      rmSync(`${store}-another-project-with-a-long-name`, {
+        recursive: true,
+        force: true,
+      });
       rmSync(profile, { recursive: true, force: true });
     } else {
       console.log(`kept store ${store} and profile ${profile}`);

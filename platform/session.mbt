@@ -69,6 +69,12 @@ pub(all) struct StoredSession {
 /// started later and was abandoned. A missing directory is an empty list — a fresh
 /// install has no sessions, which is not a failure.
 pub async fn list_sessions(dir : String) -> Array[StoredSession] {
+  sessions_in(dir)
+}
+
+///|
+/// The same listing, without the "missing directory is fine" framing.
+async fn sessions_in(dir : String) -> Array[StoredSession] {
   if !path_exists(dir) {
     return []
   }
@@ -99,6 +105,86 @@ pub async fn list_sessions(dir : String) -> Array[StoredSession] {
           1
         }
       } else if a.path > b.path {
+        -1
+      } else {
+        1
+      }
+    })
+  }
+  out
+}
+
+///|
+/// A working directory with saved sessions.
+pub(all) struct StoredWorkspace {
+  /// The store directory holding them.
+  dir : String
+  /// Where the agent worked, as the sessions themselves recorded it.
+  cwd : String
+  /// Newest first, capped by the caller.
+  sessions : Array[StoredSession]
+  /// How many sessions the workspace holds, including the ones not listed.
+  total : Int
+  /// Last write across the workspace, for ordering the list.
+  modified : Int64
+} derive(Eq, Debug)
+
+///|
+/// Every workspace in the store that has at least one session, most recently used
+/// first.
+///
+/// The cwd comes from the newest session's header rather than from the directory
+/// name, which cannot be decoded back (see `cwd_of_session_file`). Only that one
+/// session is read: every session in a directory is there because it shares that
+/// cwd.
+///
+/// A directory whose newest session has an unreadable header is skipped rather than
+/// guessed at — listing it under the wrong directory would offer to move the agent
+/// somewhere it has never been.
+pub async fn list_workspaces(
+  root : String,
+  max_sessions : Int,
+) -> Array[StoredWorkspace] {
+  let out : Array[StoredWorkspace] = []
+  if !path_exists(root) {
+    return out
+  }
+  for name in list_entries(root) {
+    let dir = "\{root}/\{name}"
+    if !is_directory(dir) {
+      continue
+    }
+    let sessions = sessions_in(dir)
+    if sessions.is_empty() {
+      continue
+    }
+    let cwd = match
+      @core.cwd_of_session_file(read_prefix(sessions[0].path, 8192)) {
+      Some(cwd) => cwd
+      None => continue
+    }
+    let shown = if sessions.length() > max_sessions {
+      sessions[:max_sessions].to_owned()
+    } else {
+      sessions
+    }
+    out.push({
+      dir,
+      cwd,
+      sessions: shown,
+      total: sessions.length(),
+      modified: sessions[0].modified,
+    })
+  }
+  if out.length() > 1 {
+    out.sort_by((a, b) => {
+      if a.modified != b.modified {
+        if a.modified > b.modified {
+          -1
+        } else {
+          1
+        }
+      } else if a.cwd > b.cwd {
         -1
       } else {
         1

@@ -118,6 +118,7 @@ fn routes_with(regions : Array[@html.Patch], seen : Array[String]) -> Routes {
     prompt: text => seen.push("prompt:\{text}"),
     abort: () => seen.push("abort"),
     switch_session: path => seen.push("session:\{path}"),
+    new_session: dir => seen.push("new:\{dir}"),
   }
 }
 
@@ -180,17 +181,19 @@ async test "a prompt is handed off rather than run in the request" {
 }
 
 ///|
-/// Abort and session switching reach the application too, and are just as
-/// fire-and-forget.
-async test "abort and session switch reach the application" {
+/// Abort, opening a session and starting one reach the application too, and are all
+/// just as fire-and-forget.
+async test "abort, open and new reach the application" {
   let seen : Array[String] = []
   let routes = routes_with([], seen)
   with_server(routes, async fn(port) {
     ignore(read_response(port, post_request("/abort", ""), 3000))
     let path = "/tmp/store/--tmp--/session.jsonl"
     ignore(read_response(port, post_request("/session", path), 3000))
+    let cwd = "/tmp/another-project"
+    ignore(read_response(port, post_request("/new", cwd), 3000))
     @async.sleep(50)
-    assert_eq(seen, ["abort", "session:\{path}"])
+    assert_eq(seen, ["abort", "session:\{path}", "new:\{cwd}"])
   })
 }
 

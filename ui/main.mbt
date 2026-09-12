@@ -27,8 +27,10 @@ struct AbortFlag {
 enum Job {
   /// A user message to run as a turn.
   Prompt(String)
-  /// Open another session. An empty path means a new one.
+  /// Open this session file, wherever its workspace is.
   Switch(String)
+  /// Start a new session in this working directory.
+  New(String)
 }
 
 ///|
@@ -233,28 +235,61 @@ async fn find_by_id(root : String, cwd : String, id : String) -> String? {
 }
 
 ///|
-/// The sidebar's view of the store: every session for this directory, newest
-/// first, described from the top of each file.
+/// The sidebar's view of the store: every workspace that has sessions, newest
+/// first, each described from the top of its newest file.
 ///
-/// Bounded per file on purpose. The label is near the top, and a sidebar that
-/// reads every session in full would make opening the UI cost as much as
-/// replaying all of them.
-async fn session_items(
+/// Bounded per file and per workspace on purpose. Describing a workspace means
+/// reading one header, and a sidebar that read every session in full would make
+/// opening the UI cost as much as replaying all of them.
+async fn workspace_items(
   root : String,
   cwd : String,
-  current : String,
-) -> Array[@html.SessionItem] {
-  let items : Array[@html.SessionItem] = []
-  for stored in @platform.list_sessions(@core.session_dir_for(root, cwd)) {
-    let prefix = @platform.read_prefix(stored.path, 64 * 1024)
-    items.push({
-      path: stored.path,
-      label: @core.session_label(prefix),
-      modified: stored.modified,
-      current: stored.path == current,
+  current_session : String,
+) -> Array[@html.WorkspaceItem] {
+  let out : Array[@html.WorkspaceItem] = []
+  for stored in @platform.list_workspaces(root, sidebar_sessions()) {
+    let sessions : Array[@html.SessionItem] = []
+    for session in stored.sessions {
+      let prefix = @platform.read_prefix(session.path, 64 * 1024)
+      sessions.push({
+        path: session.path,
+        label: @core.session_label(prefix),
+        modified: session.modified,
+        current: session.path == current_session,
+      })
+    }
+    out.push({
+      cwd: stored.cwd,
+      name: workspace_name(stored.cwd),
+      active: stored.cwd == cwd,
+      sessions,
+      hidden: stored.total - sessions.length(),
     })
   }
-  items
+  out
+}
+
+///|
+/// How many sessions a workspace shows before it just says how many more there are.
+fn sidebar_sessions() -> Int {
+  10
+}
+
+///|
+/// The last path component, which is what a reader recognises a project by.
+fn workspace_name(cwd : String) -> String {
+  let parts = cwd.split("/")
+  let mut name = cwd
+  for part in parts {
+    if part != "" {
+      name = part.to_owned()
+    }
+  }
+  if name == "" {
+    cwd
+  } else {
+    name
+  }
 }
 
 ///|
@@ -448,9 +483,11 @@ async fn main {
   let opened = open_session(args, root, cwd)
   let mut session = opened.0
   let mut session_path = opened.1
+  // Which directory the agent works in. Not a constant: opening a session from
+  // another workspace moves the agent there, tools included.
+  let mut cwd = cwd
 
   let tools = @core.builtin_tools()
-  let system_prompt = @core.build_system_prompt(cwd, tools)
   let hub = @server.Hub::new()
   // Shared with the running turn. A cell rather than a `Ref` so there is nothing
   // to import, and mutable rather than a channel because the check has to be
@@ -472,7 +509,8 @@ async fn main {
   }
   let sessions = async fn() {
     let now = @env.now().reinterpret_as_int64()
-    @html.render_sessions(session_items(root, cwd, session_path), now).render()
+    let items = workspace_items(root, cwd, session_path)
+    @html.render_sessions(items, now).render()
   }
   // Everything that can change while a browser is watching. One definition, used
   // by the first frame of every connection and after a session switch: a reconnect
@@ -512,6 +550,7 @@ async fn main {
     },
     abort: () => aborting.value = true,
     switch_session: path => ignore(queue_try_put(jobs, Switch(path))),
+    new_session: dir => ignore(queue_try_put(jobs, New(dir))),
   }
 
   log("pi-mb   http://127.0.0.1:\{args.port}")
@@ -529,16 +568,29 @@ async fn main {
             Switch(path) => {
               // A switch while a turn runs waits its turn in the queue, so this
               // never interrupts a turn that is writing to the session.
-              let (next_session, next_path) = if path == "" ||
-                !@platform.path_exists(path) {
+              let (next_session, next_path) = if !@platform.path_exists(path) {
                 create_session(root, cwd)
               } else {
                 (open_path(path), path)
               }
               session = next_session
               session_path = next_path
+              // Opening a session moves the agent into its workspace: the session
+              // records where it lived, which is the only trustworthy answer.
+              cwd = next_session.header.cwd
               aborting.value = false
-              status_line = "opened \{next_session.context().messages.length()} messages"
+              status_line = "opened \{next_session.context().messages.length()} messages in \{cwd}"
+              for patch in (routes.regions)() {
+                hub.broadcast(patch.to_sse())
+              }
+            }
+            New(dir) => {
+              let (next_session, next_path) = create_session(root, dir)
+              session = next_session
+              session_path = next_path
+              cwd = dir
+              aborting.value = false
+              status_line = "new session in \{cwd}"
               for patch in (routes.regions)() {
                 hub.broadcast(patch.to_sse())
               }
@@ -561,7 +613,7 @@ async fn main {
                 session_path~,
                 cwd~,
                 api_key=key,
-                system_prompt~,
+                system_prompt=@core.build_system_prompt(cwd, tools),
                 tools~,
                 model=args.model,
               )

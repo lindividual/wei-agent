@@ -251,3 +251,22 @@ fn context_text(message : ContextMessage) -> String {
     _ => ""
   }
 }
+
+///|
+/// The workspace of a session comes from its header, not from its directory name.
+test "cwd_of_session_file reads the header" {
+  let lines = [header().to_line(), entry_for("a", None, "hello").to_line()]
+  assert_eq(cwd_of_session_file(lines.join("\n")), Some("/tmp"))
+}
+
+///|
+test "cwd_of_session_file tolerates a truncated or unreadable start" {
+  // A byte-bounded read can cut the header line in half.
+  assert_eq(
+    cwd_of_session_file("{\"type\":\"session\",\"id\":\"s\",\"cwd\""),
+    None,
+  )
+  assert_eq(cwd_of_session_file(""), None)
+  // Blank leading lines are skipped rather than treated as the header.
+  assert_eq(cwd_of_session_file("\n\n" + header().to_line()), Some("/tmp"))
+}
