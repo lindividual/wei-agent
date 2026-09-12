@@ -27,4 +27,5 @@ description = ""
 
 import {
   "moonbit-community/rabbita@0.15.7",
+  "moonbit-community/cmark@0.4.8",
 }

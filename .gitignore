@@ -5,7 +5,7 @@ target
 .mooncakes/
 .moonagent/
 # build output
-dist/*.js
+dist/
 
 # 方案C 的 spike 记录（已弃用，仅存档）
 spike-native/

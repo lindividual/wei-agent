@@ -1,9 +1,10 @@
 import {
+  "moonbit-community/cmark/cmark_html",
   "moonbit-community/rabbita",
   "moonbit-community/rabbita/cmd",
   "moonbit-community/rabbita/html",
-  "moonbit-community/rabbita/sub",
   "moonbit-community/rabbita/websocket",
+  "moonbitlang/core/json",
 }
 
 options(
