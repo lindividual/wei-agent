@@ -478,9 +478,7 @@ async fn run_tools(
     // should still leave an aborted turn in the log.
     let output = @async.with_task_group(group => {
       let task = group.spawn(() => {
-        try {
-          @platform.execute_tool(name, arguments, ctx.cwd)
-        } catch {
+        try @platform.execute_tool(name, arguments, ctx.cwd) catch {
           err =>
             // A cancelled tool is an answer too: the model is told the command was stopped
             // rather than the turn dying with an exception.
@@ -493,11 +491,15 @@ async fn run_tools(
           result => result
         }
       })
-      (publish)(
-        Some({ name, detail: @core.tool_summary(arguments), stop: () => task.cancel() }),
+      publish(
+        Some({
+          name,
+          detail: @core.tool_summary(arguments),
+          stop: () => task.cancel(),
+        }),
       )
       let finished = task.wait()
-      (publish)(None)
+      publish(None)
       finished
     })
     report({
@@ -669,12 +671,7 @@ pub async fn run_turn(
       break
     }
     let (after_tools, executed) = run_tools(
-      ctx,
-      session,
-      message,
-      timestamp,
-      tool_report,
-      publish,
+      ctx, session, message, timestamp, tool_report, publish,
     )
     session = after_tools
     tool_calls += executed

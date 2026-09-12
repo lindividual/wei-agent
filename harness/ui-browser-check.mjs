@@ -368,6 +368,26 @@ async function main() {
     );
     const status = await cdp.eval("document.getElementById('status').textContent");
     check(/\$\d/.test(status), "the status line reports a cost", status);
+    // The information bar reports what the session has used, from the log.
+    const bar = await cdp.eval("document.getElementById('bar').textContent");
+    check(/tokens/.test(bar) && /cost/.test(bar) && /context/.test(bar), "the bar reports usage, cost and context", bar);
+    const costText = await cdp.eval(
+      "[...document.querySelectorAll('#bar .chip')].find(c => c.textContent.startsWith('cost')).textContent",
+    );
+    check(/\$\d+\.\d{4,}/.test(costText), "the cost has enough digits to be non-zero", costText);
+    const costDetail = await cdp.eval(
+      "[...document.querySelectorAll('#bar .chip')].find(c => c.textContent.startsWith('cost')).title",
+    );
+    check(
+      /input \$/.test(costDetail) && /output \$/.test(costDetail),
+      "the breakdown is one hover away",
+      costDetail,
+    );
+    check(
+      (await cdp.eval("document.querySelectorAll('#bar .chip .meter').length")) === 1,
+      "the context figure is a proportion of the window",
+    );
+
     const replyHtml = await cdp.eval(
       "document.querySelector('#transcript .blocks .text').innerHTML",
     );

@@ -240,7 +240,10 @@ test "tool_summary names the interesting argument" {
     tool_summary(@json.parse("{\"command\":\"sleep 300\",\"cwd\":\"/tmp\"}")),
     "sleep 300",
   )
-  assert_eq(tool_summary(@json.parse("{\"path\":\"core/tool_exec.mbt\"}")), "core/tool_exec.mbt")
+  assert_eq(
+    tool_summary(@json.parse("{\"path\":\"core/tool_exec.mbt\"}")),
+    "core/tool_exec.mbt",
+  )
   assert_eq(tool_summary(@json.parse("{\"pattern\":\"TODO\"}")), "TODO")
   // Unknown shapes still say something rather than nothing.
   assert_true(tool_summary(@json.parse("{\"weird\":1}")).contains("weird"))
@@ -254,8 +257,5 @@ test "tool_summary collapses whitespace and clips" {
   let summary = tool_summary(@json.parse(long))
   assert_eq(summary.length(), 121)
   assert_true(summary.has_suffix("…"), msg=summary)
-  assert_eq(
-    tool_summary(@json.parse("{\"command\":\"a\\n\\n  b\"}")),
-    "a b",
-  )
+  assert_eq(tool_summary(@json.parse("{\"command\":\"a\\n\\n  b\"}")), "a b")
 }

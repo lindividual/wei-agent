@@ -438,9 +438,12 @@ pub fn render_reply(index : Int, start : Int, pieces : Array[Piece]) -> Node {
 /// A region of its own rather than part of the transcript, because it changes for reasons
 /// the transcript does not (a figure updating, a session being switched) and replacing the
 /// whole conversation to refresh a number would be absurd.
-pub fn render_bar(children : Array[Node]) -> Node {
-  let out : Array[Node] = children
-  out.push(el("span", attrs=[cls("spacer")], children=[]))
+pub fn render_bar(left : Array[Node], right? : Array[Node]) -> Node {
+  let children : Array[Node] = left
+  children.push(el("span", attrs=[cls("spacer")], children=[]))
+  for node in right.unwrap_or([]) {
+    children.push(node)
+  }
   el("div", attrs=[cls("bar"), attr("id", "bar")], children~)
 }
 

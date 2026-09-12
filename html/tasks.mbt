@@ -70,12 +70,16 @@ pub fn render_tasks(items : Array[TaskItem]) -> Node {
           el("span", attrs=[cls("label"), attr("title", item.path)], children=[
             txt(label),
           ]),
-          el("button", attrs=[
-            cls("stop"),
-            attr("type", "button"),
-            attr("data-stop", item.path),
-            attr("title", "stop this session"),
-          ], children=[txt("Stop")]),
+          el(
+            "button",
+            attrs=[
+              cls("stop"),
+              attr("type", "button"),
+              attr("data-stop", item.path),
+              attr("title", "stop this session"),
+            ],
+            children=[txt("Stop")],
+          ),
         ]),
         el("div", attrs=[cls("tool")], children=meta),
       ]),
@@ -83,9 +87,9 @@ pub fn render_tasks(items : Array[TaskItem]) -> Node {
   }
   // Nothing running: an empty container, not an empty heading. A section that is usually
   // empty should not take up space or attention.
-  el("div", attrs=[attr("id", "tasks")], children=if rows.is_empty() {
-    []
-  } else {
-    [panel("Running", rows)]
-  })
+  el(
+    "div",
+    attrs=[attr("id", "tasks")],
+    children=if rows.is_empty() { [] } else { [panel("Running", rows)] },
+  )
 }

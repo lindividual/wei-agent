@@ -78,6 +78,13 @@ POST /abort    停掉正在跑的 turn
 **状态行说清一轮发生了什么**：模型调用数、工具调用数、token 进出、花费。花费保留
 6 位小数，因为一轮对话的成本是「零点几毫厘美元」，四舍五入到分就永远是 $0.00。
 
+**顶部信息条说清整个会话**（口径照 pi 的 footer）：会话 id、模型、token 进出、
+cache 读、总花费、上下文占用。数字来自日志（`Session::usage`：assistant 消息 +
+压缩调用），所以重启之后和重启之前一致 —— 而且**已�被压缩替代的那些调用仍然计入**
+（钱已经花了；一个会因为压缩而变小的总额没人能信）。上下文占用是唯一会影响「接下来
+发生什么」的数字：它和压缩阈值比较，接近时整个 chip 变红，鼠标悬停说明「下一轮会压缩
+旧历史」。每项都带 tooltip 给明细（input/output/reasoning、cache 读与写、花费拆分）。
+
 **turn 进行中必须一直有东西在动。** 这条是用户实测出来的：一次提问可能让模型跑
 19 次模型调用、25 次工具调用，而页面当时只推流「正文」——模型大部分时间在思考，于是
 几分钟里屏幕上一片空白，看起来就是卡死。现在推的是三样东西：正文（`SetText`）、
@@ -193,11 +200,11 @@ entry 之间（模型、工具），四十条 entry 共用一个时间戳的日�
 
 ```bash
 moon test                    # 全包
-moon test -p core            # 178 个测试
+moon test -p core            # 182 个测试
 moon test -p platform        # 24 个测试，工具与存储在真实文件系统上
 moon test -p html            # 32 个测试，含侧边栏结构与 4 个 HTML 注入测试
 moon test -p server          # 8 个测试，起真 socket 验传输
-moon test -p agent           # 4 个测试，假模型端到端跑 turn
+moon test -p agent           # 7 个测试，假模型端到端跑 turn（含停下时杀掉命令）
 moon run verify              # 全量：160 个文件、46,399 条 entry 往返
 moon run cli -- "hello"      # 打一次真实 DeepSeek，端到端
 node harness/ui-browser-check.mjs   # 真实浏览器验收（自己起 headless Chrome）

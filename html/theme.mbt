@@ -41,7 +41,7 @@ pub fn stylesheet() -> String {
     // ── layout ──────────────────────────────────────────────────────────────
      ".layout { display: flex; align-items: flex-start; gap: var(--space-5); max-width: 82rem; margin: 0 auto; }",
     ".column { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 100vh; }",
-    ".bar { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-4); background: var(--bg); border-bottom: 1px solid var(--line); }",
+    ".bar { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); padding: var(--space-2) var(--space-4); background: var(--bg); border-bottom: 1px solid var(--line); }",
     ".bar .spacer { flex: 1 1 auto; }", "#transcript { flex: 1 1 auto; padding: var(--space-5) var(--space-4) var(--space-6); }",
     // ── sidebar ─────────────────────────────────────────────────────────────
      ".sidebar { flex: 0 0 var(--sidebar-width); position: sticky; top: 0; max-height: 100vh; overflow-y: auto; padding: var(--space-4) var(--space-2) var(--space-6) var(--space-4); font-size: var(--text-sm); }",
@@ -61,7 +61,7 @@ pub fn stylesheet() -> String {
     ".sidebar button:hover { background: var(--surface); }", ".sidebar button.new { color: var(--muted); font-size: var(--text-sm); }",
     ".btn-row { display: flex; gap: var(--space-1); align-items: center; }",
     // ── chips: a label and a number, for facts about the session ────────────
-     ".chip { display: inline-flex; align-items: baseline; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: var(--text-xs); color: var(--muted); }",
+     ".chip { display: inline-flex; align-items: baseline; gap: .3rem; padding: .1rem .4rem; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: var(--text-xs); color: var(--muted); white-space: nowrap; }",
     ".chip b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }",
     ".chip.warn b { color: var(--danger); }", ".chip .meter { display: inline-block; width: 4rem; height: .35rem; border-radius: 999px; background: var(--surface-strong); overflow: hidden; }",
     ".chip .meter > i { display: block; height: 100%; background: var(--accent); }",
@@ -72,11 +72,9 @@ pub fn stylesheet() -> String {
     ".panel .task .row { display: flex; align-items: center; gap: var(--space-2); }",
     // `min-width: 0` on the flexible half, or a long session label refuses to shrink and
     // squeezes the button next to it down to an ellipsis.
-    ".panel .task .label { min-width: 0; }",
-    ".panel .task .label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+     ".panel .task .label { min-width: 0; }", ".panel .task .label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
     ".panel .task .tool { font-family: var(--mono); font-size: var(--text-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
-    ".panel .task form { display: flex; }",
-    ".panel .task button { flex: 0 0 auto; width: auto; border-color: var(--line-strong); padding: var(--space-1) var(--space-2); }",
+    ".panel .task form { display: flex; }", ".panel .task button { flex: 0 0 auto; width: auto; border-color: var(--line-strong); padding: var(--space-1) var(--space-2); }",
     ".panel input[type=text] { width: 100%; font: inherit; font-size: var(--text-sm); color: inherit; background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: var(--space-2); }",
     // ── conversation ────────────────────────────────────────────────────────
      ".exchange { margin-bottom: var(--space-5); }", ".user { background: var(--surface); border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-3); white-space: pre-wrap; }",
@@ -111,6 +109,20 @@ pub fn chip(
     attrs.push(attr("title", detail))
   }
   el("span", attrs~, children=[txt(label), el("b", children=[txt(value)])])
+}
+
+///|
+/// A count as a reader reads it: thousands abbreviated, because a bar with `18422` in it is a
+/// number nobody parses at a glance.
+pub fn compact_number(value : Int) -> String {
+  let n = value.to_double()
+  if value < 1000 {
+    "\{value}"
+  } else if value < 1000000 {
+    "\{(n / 1000.0 * 10.0).round() / 10.0}k"
+  } else {
+    "\{(n / 1000000.0 * 10.0).round() / 10.0}M"
+  }
 }
 
 ///|
@@ -158,6 +170,8 @@ pub fn chip_meter(
   value : String,
   fraction : Double,
   warn? : Bool = false,
+  /// Goes in the tooltip, like `chip`'s: what the number means and where it came from.
+  detail? : String = "",
 ) -> Node {
   let percent = if fraction < 0.0 {
     0.0
@@ -170,7 +184,7 @@ pub fn chip_meter(
     "span",
     attrs=[
       cls(if warn { "chip warn" } else { "chip" }),
-      attr("title", "\{label} \{value}"),
+      attr("title", if detail != "" { detail } else { "\{label} \{value}" }),
     ],
     children=[
       txt(label),

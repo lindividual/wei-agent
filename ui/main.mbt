@@ -307,6 +307,9 @@ fn Runner::is_running(self : Runner) -> Bool {
 struct App {
   root : String
   model : String
+  /// The model's context window, from the same catalog as the pricing: the number that turns
+  /// "the conversation is 24k tokens" into "and that is 2% of what it can hold".
+  context_window : Int
   api_key : String
   tools : Array[@core.ToolDef]
   hub : @server.Hub
@@ -616,7 +619,7 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
     runner.waiting = 0
   }
   if runner.aborting.value && my_epoch != runner.epoch {
-    (runner.turns).release()
+    runner.turns.release()
     return
   }
   runner.busy = true
@@ -654,10 +657,7 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
   // the page can work out itself.
   let refresh_tasks = async fn() {
     app.hub.broadcast(
-      @html.Patch::Replace(
-        target="tasks",
-        html=render_tasks(app, app.shown()),
-      ).to_sse(),
+      @html.Patch::Replace(target="tasks", html=render_tasks(app, app.shown())).to_sse(),
     )
   }
   let status = async fn(label : String) {
@@ -670,8 +670,20 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
       ),
     )
   }
+  // The bar's figures are per session and come from the log, so they are recomputed when a
+  // turn changes them rather than on every frame.
+  let refresh_bar = async fn() {
+    app.hub.broadcast(
+      @html.Patch::Replace(
+        target="bar",
+        html=bar_node(app, app.shown()).render(),
+      ).to_sse(),
+    )
+  }
   status("working…")
   refresh_sidebar()
+  refresh_tasks()
+  refresh_bar()
 
   // The reader's message appears at once, then a throwaway container everything the
   // model produces lands in. When the turn ends the container is replaced by the
@@ -822,7 +834,7 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
           None => "waiting for the model"
         }
         runner.tool = handle
-        (refresh_tasks)()
+        refresh_tasks()
       },
     )
     runner.session = result.session
@@ -858,6 +870,7 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
   runner.busy = false
   refresh_sidebar()
   refresh_tasks()
+  refresh_bar()
 }
 
 ///|
@@ -910,13 +923,73 @@ fn render_tasks(app : App, _shown : Runner) -> String {
 /// What is open: the session, the model, and — once the turn reporting fills them in — the
 /// token and cost figures for it.
 fn bar_node(app : App, shown : Runner) -> @html.Node {
-  @html.render_bar([
-    @html.chip("workspace", workspace_name(shown.cwd)),
-    // The id rather than the file name: the timestamp in the name is noise in a bar that is
-    // read at a glance, and the full path is one hover away.
-    @html.chip("session", short_id(shown.path), detail=shown.path),
-    @html.chip("model", app.model),
-  ])
+  @html.render_bar(
+    [
+      // No workspace chip: the sidebar already marks which one is active, and repeating it cost
+      // the width that kept the figures on the same line.
+      // The id rather than the file name: the timestamp in the name is noise in a bar that is
+      // read at a glance, and the full path is one hover away.
+      @html.chip("session", short_id(shown.path), detail=shown.path),
+      @html.chip(
+        "model",
+        app.model,
+        detail="\{workspace_name(shown.cwd)} · \{shown.cwd}",
+      ),
+    ],
+    right=usage_chips(app, shown),
+  )
+}
+
+///|
+/// What the session has used and spent, and how full its context is.
+///
+/// The totals come from the log (`Session::usage`), so they are the same after a restart as
+/// before one. The context figure is the one that changes what happens next: it is compared
+/// against the point where compaction would kick in, and marked when that is close.
+fn usage_chips(app : App, shown : Runner) -> Array[@html.Node] {
+  let usage = shown.session.usage()
+  let window = app.context_window
+  let context = @core.estimate_context_tokens(
+    shown.session.prepared_context().messages,
+  )
+  let compact_soon = @core.should_compact(
+    context,
+    window,
+    reserve_tokens=@core.CompactionSettings::for_window(window).reserve_tokens,
+  )
+  let tokens_detail = "input \{usage.input} · output \{usage.output}" +
+    (if usage.reasoning > 0 { " · reasoning \{usage.reasoning}" } else { "" }) +
+    " · over \{usage.replies} reply/ies"
+  let cache_detail = "read \{usage.cache_read} · written \{usage.cache_write}" +
+    " · a cache read is billed at a fraction of fresh input"
+  let cost_detail = "input $\{format_cost(usage.cost.input)}" +
+    " · output $\{format_cost(usage.cost.output)}" +
+    " · cache read $\{format_cost(usage.cost.cache_read)}" +
+    " · total $\{format_cost(usage.cost.total)}"
+  [
+    @html.chip(
+      "tokens",
+      "\{@html.compact_number(usage.input)} in / \{@html.compact_number(usage.output)} out",
+      detail=tokens_detail,
+    ),
+    @html.chip(
+      "cache",
+      @html.compact_number(usage.cache_read),
+      detail=cache_detail,
+    ),
+    @html.chip("cost", "$\{format_cost(usage.cost.total)}", detail=cost_detail),
+    @html.chip_meter(
+      "context",
+      "\{@html.compact_number(context)} / \{@html.compact_number(window)}",
+      context.to_double() / window.to_double(),
+      warn=compact_soon,
+      detail=if compact_soon {
+        "compaction will summarize the older half of this conversation on the next turn"
+      } else {
+        "estimated from the messages the next request would send"
+      },
+    ),
+  ]
 }
 
 ///|
@@ -993,6 +1066,7 @@ async fn main {
   let app : App = {
     root,
     model: args.model,
+    context_window: @core.deepseek_v4_flash_context_window(),
     api_key: key,
     tools: @core.builtin_tools(),
     hub: @server.Hub::new(),
@@ -1042,8 +1116,7 @@ async fn main {
           @html.composer(),
         ])
         let body = @html.el("div", attrs=[@html.cls("layout")], children=[
-          sidebar,
-          column,
+          sidebar, column,
         ])
         @html.render_page("pi", @html.stylesheet(), client_script(), [body]).render()
       },

@@ -116,7 +116,7 @@ fn routes_with(regions : Array[@html.Patch], seen : Array[String]) -> Routes {
     page: fn() { "<html><body><div id=\"transcript\"></div></body></html>" },
     regions: fn() { regions },
     prompt: text => seen.push("prompt:\{text}"),
-    abort: async fn(path) { seen.push("abort:\{path}") },
+    abort: fn(path) { seen.push("abort:\{path}") },
     switch_session: path => seen.push("session:\{path}"),
     new_session: dir => seen.push("new:\{dir}"),
   }
@@ -187,16 +187,19 @@ async test "abort, open and new reach the application" {
   let seen : Array[String] = []
   let routes = routes_with([], seen)
   with_server(routes, async fn(port) {
-    ignore(read_response(port, post_request("/abort", "/tmp/store/a.jsonl"), 3000))
+    ignore(
+      read_response(port, post_request("/abort", "/tmp/store/a.jsonl"), 3000),
+    )
     let path = "/tmp/store/--tmp--/session.jsonl"
     ignore(read_response(port, post_request("/session", path), 3000))
     let cwd = "/tmp/another-project"
     ignore(read_response(port, post_request("/new", cwd), 3000))
     @async.sleep(50)
-    assert_eq(
-      seen,
-      ["abort:/tmp/store/a.jsonl", "session:\{path}", "new:\{cwd}"],
-    )
+    assert_eq(seen, [
+      "abort:/tmp/store/a.jsonl",
+      "session:\{path}",
+      "new:\{cwd}",
+    ])
   })
 }
 
