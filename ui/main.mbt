@@ -359,16 +359,25 @@ fn App::others_running(self : App, shown : Runner) -> Int {
 }
 
 ///|
-/// The status line the page shows: what is being looked at, plus a note when work is
-/// happening somewhere the reader cannot see. Otherwise a background turn is invisible,
-/// which is the problem this whole design exists to avoid.
-fn App::status_line(self : App, shown : Runner) -> String {
-  let others = self.others_running(shown)
+/// A status line for one session: its own state, plus a note when work is happening
+/// somewhere the reader cannot see. Otherwise a background turn is invisible, which is the
+/// problem this whole design exists to avoid.
+///
+/// Used both for the snapshot and for the live patches, so the note cannot be present in
+/// one and missing from the other.
+fn App::label_for(self : App, runner : Runner, label : String) -> String {
+  let others = self.others_running(runner)
   if others == 0 {
-    shown.status
+    label
   } else {
-    "\{shown.status} · \{others} other session(s) running"
+    "\{label} · \{others} other session(s) running"
   }
+}
+
+///|
+/// The status line the page shows.
+fn App::status_line(self : App, shown : Runner) -> String {
+  self.label_for(shown, shown.status)
 }
 
 // ── The sidebar's view ─────────────────────────────────────────────────────
@@ -403,6 +412,34 @@ async fn workspace_items(
       active: stored.cwd == shown.cwd,
       sessions,
       hidden: stored.total - sessions.length(),
+    })
+  }
+  // A session that has not been written yet is not in the store, and neither is its
+  // workspace: a store knows nothing about a conversation until there is one. Showing the
+  // workspace anyway keeps the reader oriented, and it keeps "+ new session" reachable —
+  // in an empty store that button would otherwise not exist at all, which is the state
+  // the very first prompt has to be typed into.
+  let mut listed = false
+  for item in out {
+    if item.cwd == shown.cwd {
+      listed = true
+    }
+  }
+  if !listed {
+    out.insert(0, {
+      cwd: shown.cwd,
+      name: workspace_name(shown.cwd),
+      active: true,
+      sessions: [
+        {
+          path: shown.path,
+          label: "",
+          modified: @env.now().reinterpret_as_int64(),
+          current: true,
+          running: shown.is_running(),
+        },
+      ],
+      hidden: 0,
     })
   }
   out
@@ -548,6 +585,14 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
         app.hub.broadcast(
           @html.Patch::Replace(target="sessions", html~).to_sse(),
         )
+        // A turn starting or ending changes what the *displayed* session's line should
+        // say, even when it is a different one that started: that is the difference
+        // between "idle" and "1 other session running".
+        app.hub.broadcast(
+          @html.Patch::Status(text=app.label_for(visible, visible.status)).to_scoped_sse(
+            visible.path,
+          ),
+        )
       }
       None => ()
     }
@@ -556,7 +601,11 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
     runner.status = label
     // Only the reader who is looking at this session needs its progress; the sidebar
     // refresh is what tells everyone else that work is happening.
-    app.hub.broadcast(@html.Patch::Status(text=label).to_scoped_sse(session))
+    app.hub.broadcast(
+      @html.Patch::Status(text=app.label_for(runner, label)).to_scoped_sse(
+        session,
+      ),
+    )
   }
   status("working…")
   refresh_sidebar()
