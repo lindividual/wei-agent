@@ -7,4 +7,9 @@ import {
   "moonbitlang/core/encoding/utf8",
 }
 
+// The tests start the server and stop it again, which needs the runtime itself.
+import {
+  "moonbitlang/async",
+} for "test"
+
 supported_targets = "+native"

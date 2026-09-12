@@ -5,9 +5,11 @@ import {
   "lindividual/pi-web-shell/platform",
   "lindividual/pi-web-shell/server",
   "moonbitlang/async",
+  "moonbitlang/async/aqueue",
   "moonbitlang/async/stdio",
   "moonbitlang/core/env",
   "moonbitlang/core/json",
+  "moonbitlang/core/string",
 }
 
 supported_targets = "+native"

@@ -108,24 +108,169 @@ pub fn render_piece(id : String, piece : Piece) -> Node {
   match piece {
     Plain(block~) => render_block(id, block)
     Tool(call~, result~) => render_tool(id, call, result)
+    Note(text~) =>
+      el("details", attrs=[cls("compaction"), attr("id", id)], children=[
+        el("summary", children=[txt("context compacted")]),
+        el("div", attrs=[cls("body")], children=[markdown_or_text(text)]),
+      ])
   }
 }
 
 ///|
 /// A user message plus everything the assistant produced in response.
+///
+/// `user` is optional because a resumed transcript can start mid-conversation:
+/// a compaction replaces the beginning, so the first thing on screen may be the
+/// summary and the tail that was kept after it.
 pub fn render_exchange(
   index : Int,
-  user : String,
+  user : String?,
   pieces : Array[Piece],
 ) -> Node {
   let blocks : Array[Node] = []
   for i in 0..<pieces.length() {
     blocks.push(render_piece("b\{index}-\{i}", pieces[i]))
   }
-  el("section", attrs=[cls("exchange"), attr("id", "exchange-\{index}")], children=[
-    el("div", attrs=[cls("user")], children=[markdown_or_text(user)]),
-    el("div", attrs=[cls("blocks")], children=blocks),
-  ])
+  let children : Array[Node] = []
+  match user {
+    Some(text) =>
+      children.push(
+        el("div", attrs=[cls("user")], children=[markdown_or_text(text)]),
+      )
+    None => ()
+  }
+  children.push(el("div", attrs=[cls("blocks")], children=blocks))
+  el(
+    "section",
+    attrs=[cls("exchange"), attr("id", "exchange-\{index}")],
+    children~,
+  )
+}
+
+///|
+/// The whole conversation, as sections.
+///
+/// Anchors are per user message, which is the unit a reader remembers. Compaction
+/// summaries are shown where they happened: hiding them would make the transcript
+/// look like it skipped a stretch of work for no reason, and the reader is the one
+/// who has to know that older detail is now a summary.
+///
+/// Blocks are paired with their tool results at each boundary rather than once at
+/// the end, because a summary can land in the middle — and pairing is what
+/// guarantees a result is never shown without the call it answered.
+pub fn render_transcript(messages : Array[@core.ContextMessage]) -> Node {
+  let sections : Array[Node] = []
+  let mut user : String? = None
+  let mut pieces : Array[Piece] = []
+  let blocks : Array[@core.Content] = []
+  let results : Array[@core.ToolResultMessage] = []
+  let mut index = 0
+  for message in messages {
+    match message {
+      @core.User(m) => {
+        drain(pieces, blocks, results)
+        push_exchange(sections, index, user, pieces)
+        index += 1
+        user = Some(user_text(m))
+        pieces = []
+      }
+      @core.Assistant(assistant) =>
+        for block in assistant.content {
+          blocks.push(block)
+        }
+      @core.ToolResult(result) => results.push(result)
+      @core.CompactionSummary(summary~, ..) => {
+        drain(pieces, blocks, results)
+        pieces.push(Note(text=summary))
+      }
+      _ => ()
+    }
+  }
+  drain(pieces, blocks, results)
+  push_exchange(sections, index, user, pieces)
+  el("div", attrs=[attr("id", "transcript")], children=sections)
+}
+
+///|
+/// The pieces of the reply that follows the last user message.
+///
+/// The tail is all that is needed to redraw one exchange when a turn ends: the
+/// earlier turns are already on screen, and re-sending them would duplicate them.
+pub fn reply_pieces(messages : Array[@core.ContextMessage]) -> Array[Piece] {
+  let mut start = 0
+  for i in 0..<messages.length() {
+    if messages[i] is @core.User(_) {
+      start = i
+    }
+  }
+  let blocks : Array[@core.Content] = []
+  let results : Array[@core.ToolResultMessage] = []
+  for i in start..<messages.length() {
+    match messages[i] {
+      @core.Assistant(assistant) =>
+        for block in assistant.content {
+          blocks.push(block)
+        }
+      @core.ToolResult(result) => results.push(result)
+      _ => ()
+    }
+  }
+  pair_tools(blocks, results)
+}
+
+///|
+/// Move the collected blocks and results into `pieces`, paired.
+///
+/// Arrays are references, so this empties the accumulators it was given: the next
+/// stretch of the conversation starts clean without the caller having to remember
+/// to reset them.
+fn drain(
+  pieces : Array[Piece],
+  blocks : Array[@core.Content],
+  results : Array[@core.ToolResultMessage],
+) -> Unit {
+  for piece in pair_tools(blocks, results) {
+    pieces.push(piece)
+  }
+  blocks.clear()
+  results.clear()
+}
+
+///|
+fn push_exchange(
+  sections : Array[Node],
+  index : Int,
+  user : String?,
+  pieces : Array[Piece],
+) -> Unit {
+  if user is None && pieces.is_empty() {
+    return
+  }
+  sections.push(render_exchange(index, user, pieces))
+}
+
+///|
+/// The text of a user message, joined across its parts.
+pub fn user_text(message : @core.UserMessage) -> String {
+  let out = StringBuilder()
+  for block in message.content {
+    match block {
+      @core.Text(text) => {
+        if out.to_string() != "" {
+          out.write_string("\n")
+        }
+        out.write_string(text)
+      }
+      @core.Image(..) => {
+        if out.to_string() != "" {
+          out.write_string("\n")
+        }
+        out.write_string("(image attachment)")
+      }
+      _ => ()
+    }
+  }
+  out.to_string()
 }
 
 ///|
@@ -173,11 +318,24 @@ pub fn blocks_id(index : Int) -> String {
 
 ///|
 /// The user's message plus an empty container for the reply to land in.
-pub fn render_exchange_start(index : Int, user : String) -> Node {
-  el("section", attrs=[cls("exchange"), attr("id", exchange_id(index))], children=[
-    el("div", attrs=[cls("user")], children=[markdown_or_text(user)]),
-    el("div", attrs=[cls("blocks"), attr("id", blocks_id(index))]),
-  ])
+///
+/// `user` is optional for the same reason `render_exchange` takes one: a resumed
+/// transcript can start with a summary rather than with something the user typed.
+pub fn render_exchange_start(index : Int, user : String?) -> Node {
+  let children : Array[Node] = []
+  match user {
+    Some(text) =>
+      children.push(
+        el("div", attrs=[cls("user")], children=[markdown_or_text(text)]),
+      )
+    None => ()
+  }
+  children.push(el("div", attrs=[cls("blocks"), attr("id", blocks_id(index))]))
+  el(
+    "section",
+    attrs=[cls("exchange"), attr("id", exchange_id(index))],
+    children~,
+  )
 }
 
 ///|

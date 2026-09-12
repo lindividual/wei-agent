@@ -52,7 +52,7 @@ pub async fn post_sse(
   body : String,
   on_chunk : async (String) -> Unit,
   should_stop? : () -> Bool,
-) -> Unit raise {
+) -> Unit {
   // A cancelled turn stops reading rather than draining a response nobody wants.
   // Whatever arrived is still parsed by the caller, so the transcript keeps the
   // prefix the user already saw.
@@ -86,7 +86,7 @@ pub async fn post_sse(
     for i in 0..<count {
       piece[i] = buffer[i]
     }
-    let combined = carry + Bytes::from_fixedarray(piece)
+    let combined = carry + Bytes::from_array(piece)
     // Everything up to the last newline is safe to decode; the rest is carried
     // forward until its line completes.
     let mut last = -1
@@ -101,10 +101,10 @@ pub async fn post_sse(
     } else {
       let complete = combined[:last + 1].to_owned()
       carry = combined[last + 1:].to_owned()
-      (on_chunk)(@utf8.decode_lossy(complete))
+      on_chunk(@utf8.decode_lossy(complete))
     }
   }
   if carry.length() > 0 {
-    (on_chunk)(@utf8.decode_lossy(carry))
+    on_chunk(@utf8.decode_lossy(carry))
   }
 }

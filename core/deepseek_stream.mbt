@@ -525,7 +525,6 @@ pub fn StreamParser::new(
   }
 }
 
-
 ///|
 /// Feed one chunk of bytes. Returns whatever became visible because of it.
 ///
@@ -659,11 +658,25 @@ pub fn StreamParser::is_done(self : StreamParser) -> Bool {
 /// Call this even when the connection dropped: whatever arrived is what the
 /// caller gets, which is the same behaviour as the one-shot parse and what makes
 /// a cancelled request leave a usable transcript.
-pub fn StreamParser::finish(self : StreamParser) -> Message {
+///
+/// `aborted` says the caller stopped reading on purpose. A stream cut short that
+/// way is recorded the way pi records it — `aborted` with "Operation aborted" —
+/// rather than as a transport failure. The distinction is not cosmetic: on resume
+/// an `error` assistant message reads as a broken connection, which invites
+/// retrying work the user deliberately cancelled.
+pub fn StreamParser::finish(
+  self : StreamParser,
+  aborted? : Bool = false,
+) -> Message {
   self.accum.finish_tool_calls()
   if !self.accum.has_finish_reason && !self.accum.failed {
-    self.accum.stop_reason = Error
-    self.accum.error_message = Some("Stream ended without finish_reason")
+    if aborted {
+      self.accum.stop_reason = Aborted
+      self.accum.error_message = Some("Operation aborted")
+    } else {
+      self.accum.stop_reason = Error
+      self.accum.error_message = Some("Stream ended without finish_reason")
+    }
   }
   let usage = match self.accum.usage {
     Some(u) => u.with_cost(self.pricing)

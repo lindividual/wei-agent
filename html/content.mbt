@@ -13,6 +13,13 @@ pub(all) enum Piece {
   Plain(block~ : @core.Content)
   /// A tool call with the result that answered it, if one has arrived.
   Tool(call~ : @core.Content, result~ : @core.ToolResultMessage?)
+  /// Something the server put in the transcript that no message produced —
+  /// currently a compaction summary.
+  ///
+  /// It is not a `Content` because it never came from the model, and mixing it
+  /// into the content array would mean every other renderer had to learn to skip
+  /// it.
+  Note(text~ : String)
 } derive(Eq, Debug)
 
 ///|

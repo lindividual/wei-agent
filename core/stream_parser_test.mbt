@@ -137,7 +137,9 @@ test "the done sentinel produces no event" {
 /// kind of thing a proxy injects.
 test "comment lines are ignored" {
   let stream = parser()
-  let events = stream.feed(": keep-alive\n\ndata: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}\n\n")
+  let events = stream.feed(
+    ": keep-alive\n\ndata: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}\n\n",
+  )
   assert_eq(events, [Text(delta="x")])
 }
 

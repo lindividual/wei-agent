@@ -5,11 +5,106 @@
 /// The server is the only writer of the document. The browser applies patches and
 /// posts prompts; it holds no model of the conversation, so there is nothing for
 /// it and the server to disagree about.
+///
+/// ## One turn at a time
+///
+/// Every request that changes the conversation — a prompt, a session switch —
+/// becomes a job on a single queue, and one worker drains it. That is the whole
+/// concurrency story, and it is load-bearing: two tabs sending a prompt at the
+/// same moment must produce two turns in order, not two turns sharing one session
+/// and interleaving their writes into one file. Ordering is the queue's, not the
+/// HTTP layer's, so a switch issued mid-turn waits for that turn instead of
+/// swapping the session out from under it.
 
 ///|
 /// A one-way flag the running turn polls.
 struct AbortFlag {
   mut value : Bool
+}
+
+///|
+/// One queued piece of work.
+enum Job {
+  /// A user message to run as a turn.
+  Prompt(String)
+  /// Open another session. An empty path means a new one.
+  Switch(String)
+}
+
+///|
+/// Where the process should start.
+enum Start {
+  New
+  /// The most recently written session for this directory.
+  Continue
+  /// A path, or a session id to look up under this directory.
+  Session(String)
+}
+
+///|
+/// A parsed command line.
+struct Args {
+  port : Int
+  model : String
+  start : Start
+  store : String
+}
+
+///|
+fn usage() -> String {
+  "usage: ui [--port N] [--model M] [--continue | --resume <path|id>] [--store DIR]"
+}
+
+///|
+fn parse_args(argv : Array[String]) -> Args raise {
+  let mut port = 8790
+  let mut model = "deepseek-v4-flash"
+  let mut start = Start::New
+  let mut store = ""
+  let mut index = 1
+  while index < argv.length() {
+    let flag = argv[index]
+    let needs_value = flag == "--port" ||
+      flag == "--model" ||
+      flag == "--resume" ||
+      flag == "--store"
+    if needs_value && index + 1 >= argv.length() {
+      raise Failure::Failure("\{flag} needs a value\n\{usage()}")
+    }
+    match flag {
+      "--port" => {
+        port = try @string.parse_int(argv[index + 1]) catch {
+          _ => raise Failure::Failure("--port needs a number")
+        } noraise {
+          value => value
+        }
+        index += 2
+      }
+      "--model" => {
+        model = argv[index + 1]
+        index += 2
+      }
+      "--resume" => {
+        start = Session(argv[index + 1])
+        index += 2
+      }
+      "--store" => {
+        store = argv[index + 1]
+        index += 2
+      }
+      "--continue" | "-c" => {
+        start = Continue
+        index += 1
+      }
+      "--new" => {
+        start = New
+        index += 1
+      }
+      "--help" | "-h" => raise Failure::Failure(usage())
+      _ => raise Failure::Failure("unknown argument: \{flag}\n\{usage()}")
+    }
+  }
+  { port, model, start, store, }
 }
 
 ///|
@@ -42,255 +137,463 @@ async fn api_key(home : String) -> String? {
 }
 
 ///|
-/// The assistant output produced after the last user message.
-///
-/// Only the tail is needed: earlier turns are already on screen, and re-sending
-/// them would duplicate the transcript.
-fn last_reply(session : @core.Session) -> Array[@html.Piece] {
-  let messages = session.context().messages
-  let mut start = 0
-  for i in 0..<messages.length() {
-    match messages[i] {
-      @core.User(_) => start = i
-      _ => ()
-    }
+fn home_dir() -> String raise {
+  match @env.get_env_var("HOME") {
+    Some(home) if home != "" => home
+    _ => raise Failure::Failure("HOME is not set")
   }
-  // Collect the assistant blocks and the tool results that answer them.
-  let blocks : Array[@core.Content] = []
-  let results : Array[@core.ToolResultMessage] = []
-  for i in start..<messages.length() {
-    match messages[i] {
-      @core.Assistant(assistant) =>
-        for block in assistant.content {
-          blocks.push(block)
-        }
-      @core.ToolResult(result) => results.push(result)
-      _ => ()
-    }
-  }
-  @html.pair_tools(blocks, results)
 }
 
 ///|
-/// The whole conversation, for the initial page load and for reconnects.
-fn render_transcript(session : @core.Session) -> @html.Node {
-  let messages = session.context().messages
-  let sections : Array[@html.Node] = []
-  let mut index = 0
-  let mut pending_user : String? = None
-  let mut blocks : Array[@core.Content] = []
-  let mut results : Array[@core.ToolResultMessage] = []
-
-  fn flush(
-    sections : Array[@html.Node],
-    index : Int,
-    user : String?,
-    blocks : Array[@core.Content],
-    results : Array[@core.ToolResultMessage],
-  ) -> Unit {
-    match user {
-      None => ()
-      Some(text) =>
-        sections.push(
-          @html.render_exchange(index, text, @html.pair_tools(blocks, results)),
-        )
-    }
-  }
-
-  for message in messages {
-    match message {
-      @core.User(user) => {
-        flush(sections, index, pending_user, blocks, results)
-        index += 1
-        pending_user = Some(
-          match user.content {
-            [@core.Text(text), ..] => text
-            _ => ""
-          },
-        )
-        blocks = []
-        results = []
-      }
-      @core.Assistant(assistant) =>
-        for block in assistant.content {
-          blocks.push(block)
-        }
-      @core.ToolResult(result) => results.push(result)
-      _ => ()
-    }
-  }
-  flush(sections, index, pending_user, blocks, results)
-  @html.el("div", attrs=[@html.attr("id", "transcript")], children=sections)
+/// Create a session with a fresh id, on disk and in memory.
+async fn create_session(root : String, cwd : String) -> (@core.Session, String) {
+  let now = @env.now().reinterpret_as_int64()
+  let id = @core.new_entry_id()
+  let path = @core.session_file_path(root, cwd, now, id)
+  let header = new_header(id, cwd, now)
+  @platform.create_session(path, header)
+  (@core.Session::new(header, []), path)
 }
 
 ///|
-async fn main raise {
-  let home = match @env.get_env_var("HOME") {
-    Some(home) => home
-    None => abort("HOME is not set")
+/// Open a path, closing an interrupted turn if there is one.
+async fn open_path(path : String) -> @core.Session {
+  let session = @platform.load_session(path)
+  let entries = session.repair_entries(@env.now().reinterpret_as_int64())
+  if entries.is_empty() {
+    return session
   }
-  let key = match api_key(home) {
-    Some(key) => key
-    None => abort("no DeepSeek key: set DEEPSEEK_API_KEY or log in with pi")
-  }
-  let port = 8790
+  // The closers go into the log, not only into memory: a repair that exists only
+  // until the process exits is not a repair.
+  @platform.append_entries(path, entries)
+  session.add_entries(entries)
+}
 
-  let cwd = @platform.current_dir()
-  let started = @env.now().reinterpret_as_int64()
-  let session_id = @core.new_entry_id()
-  let session_path = @core.session_file_path(
-    "\{home}/.pi-mb/sessions",
-    cwd,
-    started,
-    session_id,
-  )
-  let header : @core.SessionHeader = {
-    id: session_id,
-    timestamp: @core.format_iso_utc(started),
+///|
+/// A session header for a brand new conversation.
+fn new_header(
+  id : String,
+  cwd : String,
+  timestamp : Int64,
+) -> @core.SessionHeader {
+  {
+    id,
+    timestamp: @core.format_iso_utc(timestamp),
     cwd,
     parent_session: None,
     version: Some(3),
   }
-  @platform.create_session(session_path, header)
+}
+
+///|
+/// Open the session the command line asked for, creating one when needed.
+///
+/// Resuming is where the format work pays off: the file was written by whatever
+/// ran last — this process, an older build, or pi itself — and it is read back
+/// through the same parser the round-trip verifier exercises.
+async fn open_session(
+  args : Args,
+  root : String,
+  cwd : String,
+) -> (@core.Session, String) {
+  match args.start {
+    New => create_session(root, cwd)
+    Continue =>
+      match @platform.newest_session(root, cwd) {
+        None => create_session(root, cwd)
+        Some(path) => (open_path(path), path)
+      }
+    Session(value) => {
+      let path = if value.contains("/") {
+        value
+      } else {
+        match find_by_id(root, cwd, value) {
+          Some(found) => found
+          None => raise Failure::Failure("no session \{value} in \{root}")
+        }
+      }
+      if !@platform.path_exists(path) {
+        raise Failure::Failure("no session file at \{path}")
+      }
+      (open_path(path), path)
+    }
+  }
+}
+
+///|
+/// A session file whose name carries this id.
+async fn find_by_id(root : String, cwd : String, id : String) -> String? {
+  let dir = @core.session_dir_for(root, cwd)
+  for name in @platform.list_entries(dir) {
+    if name.has_suffix("_\{id}.jsonl") {
+      return Some("\{dir}/\{name}")
+    }
+  }
+  None
+}
+
+///|
+/// The sidebar's view of the store: every session for this directory, newest
+/// first, described from the top of each file.
+///
+/// Bounded per file on purpose. The label is near the top, and a sidebar that
+/// reads every session in full would make opening the UI cost as much as
+/// replaying all of them.
+async fn session_items(
+  root : String,
+  cwd : String,
+  current : String,
+) -> Array[@html.SessionItem] {
+  let items : Array[@html.SessionItem] = []
+  for stored in @platform.list_sessions(@core.session_dir_for(root, cwd)) {
+    let prefix = @platform.read_prefix(stored.path, 64 * 1024)
+    items.push({
+      path: stored.path,
+      label: @core.session_label(prefix),
+      modified: stored.modified,
+      current: stored.path == current,
+    })
+  }
+  items
+}
+
+///|
+fn status_text(result : @agent.TurnResult, aborted : Bool) -> String {
+  let out = StringBuilder()
+  if aborted {
+    out.write_string("stopped after \{result.model_calls} model calls")
+  } else if !result.settled {
+    // The model kept asking for tools until the limit. Said plainly, because the
+    // reader is the one who has to decide what to do about it.
+    out.write_string(
+      "gave up after \{result.model_calls} model calls without a final answer",
+    )
+  } else {
+    let plural = if result.model_calls == 1 { "" } else { "s" }
+    out.write_string(
+      "\{result.model_calls} model call\{plural}, \{result.tool_calls} tool calls",
+    )
+  }
+  if result.compactions > 0 {
+    out.write_string(", \{result.compactions} compacted")
+  }
+  let usage = result.usage
+  if usage.total_tokens > 0 {
+    out.write_string(
+      " · \{usage.input} in / \{usage.output} out" +
+      " · $\{format_cost(usage.cost.total)}",
+    )
+  }
+  out.to_string()
+}
+
+///|
+/// A cost with enough digits to be non-zero without being unreadable.
+///
+/// Cents are the wrong unit for a turn: a short one costs a few hundredths of a
+/// millicent, and rounding to cents would print every turn as $0.00. Below a tenth
+/// of a dollar the extra digits are the information.
+fn format_cost(value : Double) -> String {
+  let decimals = if value < 0.1 { 6 } else { 4 }
+  let scale = if decimals == 6 { 1000000.0 } else { 10000.0 }
+  let scaled = (value * scale).round().to_int()
+  let text = "\{scaled}"
+  let padded = if text.length() >= decimals {
+    text
+  } else {
+    zeroes(decimals - text.length()) + text
+  }
+  "0." + padded
+}
+
+///|
+fn zeroes(count : Int) -> String {
+  let out = StringBuilder()
+  for _ in 0..<count {
+    out.write_char('0')
+  }
+  out.to_string()
+}
+
+///|
+/// Run one turn and describe it on the status line.
+///
+/// Shared by the initial prompt and by every queued one, so a turn behaves the
+/// same however it was started.
+async fn run_and_report(
+  hub : @server.Hub,
+  ctx : @agent.AgentContext,
+  text : String,
+  index : Int,
+  aborting : AbortFlag,
+) -> @agent.TurnResult {
+  hub.broadcast(
+    @html.append_node(
+      "transcript",
+      @html.render_exchange_start(index, Some(text)),
+    ).to_sse(),
+  )
+  hub.broadcast(@html.Patch::Status(text="working…").to_sse())
+
+  // Streaming text lands in a throwaway container inside the section. When the
+  // turn ends, the whole container is replaced by the properly rendered reply —
+  // reasoning collapsed, tool calls paired, markdown parsed. The reader sees text
+  // appear as it is written and then settle into its final shape, and nothing has
+  // to be re-rendered incrementally to get there.
+  let stream_root = "streams-\{index}"
+  hub.broadcast(
+    @html.append_node(
+      @html.blocks_id(index),
+      @html.el("div", attrs=[@html.attr("id", stream_root)], children=[]),
+    ).to_sse(),
+  )
+
+  // A turn makes several model calls when it uses tools, and each one writes its
+  // own text. A block is opened lazily, on the first text delta, so a call that
+  // only thinks does not leave an empty element behind.
+  let mut open_block : @html.StreamBuffer? = None
+  let mut stream_seq = 0
+  let report : async (@core.StreamEvent) -> Unit = event => {
+    match event {
+      @core.Text(delta~) => {
+        let buffer = match open_block {
+          Some(existing) => existing
+          None => {
+            stream_seq += 1
+            let id = "stream-\{index}-\{stream_seq}"
+            hub.broadcast(
+              @html.append_node(
+                stream_root,
+                @html.el(
+                  "div",
+                  attrs=[@html.cls("text"), @html.attr("id", id)],
+                  children=[],
+                ),
+              ).to_sse(),
+            )
+            // A small threshold: a short reply is only a few dozen characters, and
+            // waiting for 64 of them would mean the reader sees nothing until the
+            // turn is over — which is what streaming is for.
+            let fresh = @html.StreamBuffer::new(id, threshold=8)
+            open_block = Some(fresh)
+            fresh
+          }
+        }
+        match buffer.push(delta) {
+          Some(patch) => hub.broadcast(patch.to_sse())
+          None => ()
+        }
+      }
+      // Reasoning is not streamed: it is collapsed anyway, and pushing it live
+      // would put text on screen that the reader is not meant to read.
+      @core.Thinking(_) => ()
+    }
+  }
+
+  let result = @agent.run_turn(
+    ctx,
+    text,
+    @env.now().reinterpret_as_int64(),
+    thinking_level="high",
+    on_delta=report,
+    should_stop=() => aborting.value,
+  )
+  // Replace the streamed text with the finished rendering. Doing it in one patch
+  // is why the streaming path can be simple: it never has to decide what the final
+  // markup looks like.
+  hub.broadcast(
+    @html.replace_node(
+      @html.blocks_id(index),
+      @html.el(
+        "div",
+        attrs=[@html.cls("blocks"), @html.attr("id", @html.blocks_id(index))],
+        children=[
+          @html.render_reply(
+            index,
+            0,
+            @html.reply_pieces(result.session.context().messages),
+          ),
+        ],
+      ),
+    ).to_sse(),
+  )
+  hub.broadcast(
+    @html.Patch::Status(text=status_text(result, aborting.value)).to_sse(),
+  )
+  result
+}
+
+///|
+async fn main {
+  let argv = @env.args()
+  let args = parse_args(argv)
+  let home = home_dir()
+  let key = match api_key(home) {
+    Some(key) => key
+    None =>
+      raise Failure::Failure(
+        "no DeepSeek key: set DEEPSEEK_API_KEY or log in with pi",
+      )
+  }
+  let root = if args.store == "" {
+    "\{home}/.pi-mb/sessions"
+  } else {
+    args.store
+  }
+  let cwd = @platform.current_dir()
+  let opened = open_session(args, root, cwd)
+  let mut session = opened.0
+  let mut session_path = opened.1
 
   let tools = @core.builtin_tools()
   let system_prompt = @core.build_system_prompt(cwd, tools)
   let hub = @server.Hub::new()
-  let mut session = @core.Session::new(header, [])
-  let mut turn = 0
   // Shared with the running turn. A cell rather than a `Ref` so there is nothing
   // to import, and mutable rather than a channel because the check has to be
   // synchronous — it runs inside a read loop.
-  let aborting : AbortFlag = { value: false }
+  let aborting : AbortFlag = { value: false, }
+  // Jobs instead of direct calls: the worker below is the only thing that touches
+  // `session`, so two requests can never overlap on it.
+  let jobs : @aqueue.Queue[Job] = @aqueue.Queue(kind=@aqueue.Kind::Unbounded)
+  let mut busy = false
+  let mut turn = 0
+
+  let transcript = () => {
+    @html.render_transcript(session.context().messages).render()
+  }
+  let sessions = async fn() {
+    let now = @env.now().reinterpret_as_int64()
+    @html.render_sessions(session_items(root, cwd, session_path), now).render()
+  }
+  // Everything that can change while a browser is watching. One definition, used
+  // by the first frame of every connection and after a session switch: a reconnect
+  // and a switch therefore cannot disagree about what has to be re-sent.
+  let regions = async fn() {
+    [
+      @html.Patch::Replace(target="transcript", html=transcript()),
+      @html.Patch::Replace(target="sessions", html=sessions()),
+    ]
+  }
 
   let routes : @server.Routes = {
-    page: () => {
+    page: async fn() {
+      let row = @html.el("div", attrs=[@html.cls("layout")], children=[
+        @html.raw(sessions()),
+        @html.raw(transcript()),
+      ])
       @html.render_page("pi", stylesheet(), client_script(), [
-        render_transcript(session),
+        row,
         composer(),
         @html.render_status(""),
       ]).render()
     },
-    prompt: text => {
-      aborting.value = false
-      turn += 1
-      let index = turn
-      // The user's own message appears at once; waiting for the turn to finish
-      // before showing what was typed reads as a dropped input.
-      hub.broadcast(
-        @html.append_node(
-          "transcript",
-          @html.render_exchange_start(index, text),
-        ).to_sse(),
-      )
-      hub.broadcast(@html.Patch::Status(text="working…").to_sse())
-
-      // Streaming text lands in a throwaway container inside the section. When
-      // the turn ends, the whole container is replaced by the properly rendered
-      // reply — reasoning collapsed, tool calls paired, markdown parsed. The
-      // reader sees text appear as it is written and then settle into its final
-      // shape, and nothing has to be re-rendered incrementally to get there.
-      let stream_root = "streams-\{index}"
-      hub.broadcast(
-        @html.append_node(
-          @html.blocks_id(index),
-          @html.el(
-            "div",
-            attrs=[@html.attr("id", stream_root)],
-            children=[],
-          ),
-        ).to_sse(),
-      )
-
-      // A turn makes several model calls when it uses tools, and each one writes
-      // its own text. A block is opened lazily, on the first text delta, so a
-      // call that only thinks does not leave an empty element behind.
-      let mut open_block : @html.StreamBuffer? = None
-      let mut stream_seq = 0
-      let report : async (@core.StreamEvent) -> Unit = (event) => {
-        match event {
-          @core.Text(delta~) => {
-            let buffer = match open_block {
-              Some(existing) => existing
-              None => {
-                stream_seq += 1
-                let id = "stream-\{index}-\{stream_seq}"
-                hub.broadcast(
-                  @html.append_node(
-                    stream_root,
-                    @html.el(
-                      "div",
-                      attrs=[@html.cls("text"), @html.attr("id", id)],
-                      children=[],
-                    ),
-                  ).to_sse(),
-                )
-                // A small threshold: a short reply is only a few dozen characters, and
-                // waiting for 64 of them would mean the reader sees nothing
-                // until the turn is over — which is what streaming is for.
-                let fresh = @html.StreamBuffer::new(id, threshold=8)
-                open_block = Some(fresh)
-                fresh
-              }
-            }
-            match buffer.push(delta) {
-              Some(patch) => hub.broadcast(patch.to_sse())
-              None => ()
-            }
-          }
-          // Reasoning is not streamed: it is collapsed anyway, and pushing it
-          // live would put text on screen that the reader is not meant to read.
-          @core.Thinking(_) => ()
-        }
+    regions,
+    prompt: async fn(text) {
+      // Answered before the turn starts, so the browser is not left waiting on a
+      // request that may take minutes.
+      if busy {
+        hub.broadcast(
+          @html.Patch::Status(text="queued behind the running turn").to_sse(),
+        )
       }
-
-      let ctx : @agent.AgentContext = {
-        session,
-        session_path,
-        cwd,
-        api_key: key,
-        base_url: "https://api.deepseek.com",
-        model: "deepseek-v4-flash",
-        pricing: @core.deepseek_v4_flash_pricing(),
-        system_prompt,
-        tools,
-      }
-      let result = @agent.run_turn(
-        ctx,
-        text,
-        @env.now().reinterpret_as_int64(),
-        thinking_level="high",
-        on_delta=report,
-        should_stop=() => aborting.value,
-      )
-      session = result.session
-      // Replace the streamed text with the finished rendering. Doing it in one
-      // patch is why the streaming path can be simple: it never has to decide
-      // what the final markup looks like.
-      hub.broadcast(
-        @html.replace_node(
-          @html.blocks_id(index),
-          @html.el(
-            "div",
-            attrs=[@html.cls("blocks"), @html.attr("id", @html.blocks_id(index))],
-            children=[
-              @html.render_reply(index, 0, last_reply(session)),
-            ],
-          ),
-        ).to_sse(),
-      )
-      let summary = if aborting.value {
-        "stopped after \{result.model_calls} model calls"
-      } else {
-        "model calls \{result.model_calls}, tool calls \{result.tool_calls}"
-      }
-      hub.broadcast(@html.Patch::Status(text=summary).to_sse())
+      ignore(queue_try_put(jobs, Prompt(text)))
     },
     abort: () => aborting.value = true,
+    switch_session: path => ignore(queue_try_put(jobs, Switch(path))),
   }
 
-  log("pi-mb   http://127.0.0.1:\{port}")
+  log("pi-mb   http://127.0.0.1:\{args.port}")
+  log("model   \{args.model}")
   log("cwd     \{cwd}")
   log("session \{session_path}")
-  @server.serve(port, hub, routes)
+  log("store   \{root}")
+
+  @async.with_task_group(group => {
+    ignore(
+      group.spawn(() => {
+        while true {
+          let job = jobs.get()
+          match job {
+            Switch(path) => {
+              // A switch while a turn runs waits its turn in the queue, so this
+              // never interrupts a turn that is writing to the session.
+              let (next_session, next_path) = if path == "" ||
+                !@platform.path_exists(path) {
+                create_session(root, cwd)
+              } else {
+                (open_path(path), path)
+              }
+              session = next_session
+              session_path = next_path
+              aborting.value = false
+              for patch in (routes.regions)() {
+                hub.broadcast(patch.to_sse())
+              }
+              hub.broadcast(
+                @html.Patch::Status(
+                  text="opened \{next_session.context().messages.length()} messages",
+                ).to_sse(),
+              )
+            }
+            Prompt(text) => {
+              busy = true
+              aborting.value = false
+              turn += 1
+              let index = turn
+              // A session that has never had a turn shows as "(empty session)" in
+              // the sidebar. Only that case needs the list refreshed afterwards:
+              // re-reading every prefix after every turn would be paying for a
+              // label that did not change.
+              let relabel = @core.session_label(
+                  @platform.read_prefix(session_path, 64 * 1024),
+                ) ==
+                ""
+              let ctx = @agent.AgentContext::new(
+                session~,
+                session_path~,
+                cwd~,
+                api_key=key,
+                system_prompt~,
+                tools~,
+                model=args.model,
+              )
+              // A failed turn must not take the process down: the session is on
+              // disk, and the reader needs to see what happened rather than a
+              // dead page.
+              try run_and_report(hub, ctx, text, index, aborting) catch {
+                err => {
+                  hub.broadcast(
+                    @html.Patch::Status(text="failed: \{err}").to_sse(),
+                  )
+                  log("turn failed: \{err}")
+                }
+              } noraise {
+                result => session = result.session
+              }
+              if relabel {
+                hub.broadcast(
+                  @html.Patch::Replace(target="sessions", html=sessions()).to_sse(),
+                )
+              }
+              busy = false
+            }
+          }
+        }
+      }),
+    )
+    @server.serve(args.port, hub, routes)
+  })
+}
+
+///|
+/// Enqueue without blocking, reporting whether it worked.
+///
+/// The queue is unbounded and never closed, so this cannot fail in practice; the
+/// wrapper exists so the call site does not have to say so.
+fn queue_try_put(jobs : @aqueue.Queue[Job], job : Job) -> Bool {
+  try jobs.try_put(job) catch {
+    _ => false
+  } noraise {
+    queued => queued
+  }
 }

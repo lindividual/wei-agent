@@ -67,17 +67,14 @@ async fn main {
   @platform.create_session(path, header)
 
   let tools = @core.builtin_tools()
-  let ctx : @agent.AgentContext = {
-    session: @core.Session::new(header, []),
-    session_path: path,
-    cwd,
-    api_key: key,
-    base_url: "https://api.deepseek.com",
-    model: "deepseek-v4-flash",
-    pricing: @core.deepseek_v4_flash_pricing(),
-    system_prompt: @core.build_system_prompt(cwd, tools),
-    tools,
-  }
+  let ctx = @agent.AgentContext::new(
+    session=@core.Session::new(header, []),
+    session_path=path,
+    cwd~,
+    api_key=key,
+    system_prompt=@core.build_system_prompt(cwd, tools),
+    tools~,
+  )
 
   println("prompt   \{prompt}")
   println("cwd      \{cwd}")

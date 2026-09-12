@@ -57,6 +57,25 @@ pub fn deepseek_v4_flash_pricing() -> Pricing {
 }
 
 ///|
+/// The context window of `deepseek-v4-flash`, from the same catalog.
+///
+/// Needed for the compaction decision, which compares an estimate of the next
+/// request against this number. Kept beside the pricing because both are
+/// properties of the model rather than of the agent.
+pub fn deepseek_v4_flash_context_window() -> Int {
+  1000000
+}
+
+///|
+/// The most the model will emit in one response, from the same catalog.
+///
+/// Not sent as `max_tokens`: pi does not send it either (the captured request
+/// bodies have no such field), so it is only a bound to reason about.
+pub fn deepseek_v4_flash_max_tokens() -> Int {
+  384000
+}
+
+///|
 /// The DeepSeek catalog entry for `deepseek-v4-flash`.
 ///
 /// `minimal` and `medium` are null in the catalog, meaning the model has no

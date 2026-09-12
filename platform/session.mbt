@@ -1,9 +1,11 @@
 ///|
 /// Session files on disk.
 ///
-/// Appends rewrite the whole file rather than opening it in append mode. A
-/// session is small enough that the difference does not matter, and rewriting
-/// means a reader never observes a half-written line.
+/// Appends are real appends. Rewriting the whole file instead would make every
+/// entry a read-modify-write, which loses entries as soon as two writers overlap
+/// (a browser tab and the CLI, or two tabs) and costs O(n²) over a session. A
+/// single `write` of one line is what a reader can safely race with: it either
+/// sees the line or it does not.
 
 ///|
 /// Load a session from a file.
@@ -28,8 +30,7 @@ pub async fn create_session(
 /// The entry's parent is expected to be the current leaf, which the caller
 /// controls: the session is append-only and the driver decides where the leaf is.
 pub async fn append_entry(path : String, entry : @core.Entry) -> Unit {
-  let existing = if path_exists(path) { read_text(path) } else { "" }
-  write_text(path, existing + entry.to_line())
+  append_text(path, entry.to_line())
 }
 
 ///|
@@ -42,36 +43,79 @@ pub async fn append_entries(
     return
   }
   let out = StringBuilder()
-  let existing = if path_exists(path) { read_text(path) } else { "" }
-  out.write_string(existing)
   for entry in entries {
     out.write_string(entry.to_line())
   }
-  write_text(path, out.to_string())
+  append_text(path, out.to_string())
 }
 
 ///|
-/// The most recently modified session file under a directory, or `None` when
-/// there is none.
-pub async fn newest_session(dir : String) -> String? {
+/// A session file on disk, with when it was last written.
+pub(all) struct StoredSession {
+  path : String
+  /// Milliseconds since the epoch.
+  modified : Int64
+} derive(Eq, Debug)
+
+///|
+/// Session files directly inside a directory, newest first.
+///
+/// `dir` is one working directory's slice of the store — `session_dir_for(root,
+/// cwd)` — not the store root: what a picker offers is the sessions for the
+/// directory the agent works in, and nothing else.
+///
+/// Sorted by modification time rather than by name: the name carries the session's
+/// *start* time, so a session resumed today would sort behind one that merely
+/// started later and was abandoned. A missing directory is an empty list — a fresh
+/// install has no sessions, which is not a failure.
+pub async fn list_sessions(dir : String) -> Array[StoredSession] {
   if !path_exists(dir) {
-    return None
+    return []
   }
-  let names = list_entries(dir)
-  let mut best : String? = None
-  for name in names {
+  let out : Array[StoredSession] = []
+  for name in list_entries(dir) {
     if !name.has_suffix(".jsonl") {
       continue
     }
-    // Names are `<timestamp>_<id>.jsonl`, so lexical order is time order and the
-    // last one wins without touching any file's metadata.
-    best = match best {
-      Some(current) => if name > current { Some(name) } else { Some(current) }
-      None => Some(name)
+    let file = "\{dir}/\{name}"
+    // Checked rather than assumed: a directory can carry a `.jsonl` name, and an
+    // entry that cannot be read is worse than one that is not listed.
+    if is_directory(file) {
+      continue
     }
+    let (seconds, nanos) = @fs.mtime(file)
+    out.push({
+      path: file,
+      modified: seconds * 1000L + nanos.to_int64() / 1000000L,
+    })
   }
-  match best {
-    Some(name) => Some("\{dir}/\{name}")
-    None => None
+  if out.length() > 1 {
+    out.sort_by((a, b) => {
+      if a.modified != b.modified {
+        // Newest first, and ties broken by path so the order is deterministic.
+        if a.modified > b.modified {
+          -1
+        } else {
+          1
+        }
+      } else if a.path > b.path {
+        -1
+      } else {
+        1
+      }
+    })
+  }
+  out
+}
+
+///|
+/// The newest session file for one working directory, which is what
+/// `--continue` means.
+pub async fn newest_session(root : String, cwd : String) -> String? {
+  let sessions = list_sessions(@core.session_dir_for(root, cwd))
+  if sessions.is_empty() {
+    None
+  } else {
+    Some(sessions[0].path)
   }
 }

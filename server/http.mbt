@@ -1,24 +1,40 @@
 ///|
 /// The HTTP surface.
 ///
-/// Three routes, and the smallest one that can work:
+/// Four routes, and the smallest set that can work:
 ///
-/// - `GET /`         the page, with whatever conversation already exists
-/// - `GET /events`   an SSE stream of patches
-/// - `POST /prompt`  a user message, which runs a turn to completion
+/// - `GET /`          the page, with whatever conversation already exists
+/// - `GET /events`    an SSE stream of patches
+/// - `POST /prompt`   a user message
+/// - `POST /session`  switch to another saved session, or start a new one
+/// - `POST /abort`    stop the running turn
 ///
-/// `POST /prompt` blocks until the turn finishes and its output goes out over the
-/// SSE stream rather than as the response body. The browser sends it without
-/// awaiting, so a long turn never looks like a hung request.
+/// The POST routes answer immediately and the work happens behind them. A turn
+/// can take minutes; a request that waits for it to finish makes the browser look
+/// hung and, worse, invites the client to treat "still working" as "failed". The
+/// transport therefore never owns the turn — it hands it to the application and
+/// returns.
 
 ///|
 /// Everything the transport needs from the application.
 pub(all) struct Routes {
-  /// Renders the page as it stands. Called for the initial request and whenever a
-  /// client reconnects, which is what makes a reconnect recover the full state
-  /// without a separate snapshot protocol.
-  page : () -> String
-  /// Runs one turn. Output is expected to reach clients through the hub.
+  /// Renders the page as it stands. Called for the initial request.
+  ///
+  /// Async because rendering the sidebar reads the store: describing the saved
+  /// sessions is the one part of the page that is not a pure function of the
+  /// in-memory conversation.
+  page : async () -> String
+  /// Patches that bring a connected client up to date: the transcript, the
+  /// session list, the status line.
+  ///
+  /// One definition of what can change, used both for the first frame of every
+  /// connection and after any change too large to describe as a smaller patch.
+  /// Without it a reconnect would need a second, parallel notion of the page, and
+  /// the two would drift.
+  regions : async () -> Array[@html.Patch]
+  /// Queues one user message. Doesn't wait for the turn to run.
+  ///
+  /// Async only because broadcasting a frame is; nothing here blocks on the turn.
   prompt : async (String) -> Unit
   /// Asks the running turn to stop.
   ///
@@ -26,6 +42,9 @@ pub(all) struct Routes {
   /// while reading the model's response, so the process never abandons a tool that
   /// has already started.
   abort : () -> Unit
+  /// Switches the session every client is looking at. An empty path means a new
+  /// session.
+  switch_session : (String) -> Unit
 }
 
 ///|
@@ -39,11 +58,19 @@ async fn not_found(conn : @http.ServerConnection) -> Unit {
 }
 
 ///|
+/// Answer a request whose work happens elsewhere.
+async fn ok(conn : @http.ServerConnection) -> Unit {
+  conn.send_response(200, "OK", extra_headers={ "Content-Type": "text/plain" })
+  conn.write_string("ok")
+  conn.end_response()
+}
+
+///|
 /// Serve one SSE subscriber until it goes away.
 ///
-/// The first frame is the whole page body, so a client that connects mid-turn —
-/// or reconnects after the process restarted — converges on the current state
-/// rather than missing everything that happened before it arrived.
+/// The first frames are the whole mutable page, so a client that connects
+/// mid-turn — or reconnects after the process restarted — converges on the current
+/// state rather than missing everything that happened before it arrived.
 async fn stream_events(
   conn : @http.ServerConnection,
   hub : Hub,
@@ -55,10 +82,12 @@ async fn stream_events(
     "Connection": "keep-alive",
   })
   let (id, queue) = hub.subscribe()
-  // Send the current document first, before any patch can arrive.
-  conn.write_string(
-    @html.Patch::Replace(target="transcript", html=(routes.page)()).to_sse(),
-  )
+  // Before any live patch can arrive: subscribing first would let a broadcast
+  // overtake the snapshot and be overwritten by it.
+  let snapshot = (routes.regions)()
+  for patch in snapshot {
+    conn.write_string(patch.to_sse())
+  }
   conn.flush()
   // A failure here means the browser went away; there is nothing to report, only
   // a subscriber to remove.
@@ -108,20 +137,17 @@ pub async fn serve(port : Int, hub : Hub, routes : Routes) -> Unit {
       (Get, "/events") => stream_events(conn, hub, routes)
       (Post, "/abort") => {
         (routes.abort)()
-        conn.send_response(200, "OK", extra_headers={ "Content-Type": "text/plain" })
-        conn.write_string("ok")
-        conn.end_response()
+        ok(conn)
       }
       (Post, "/prompt") => {
         let prompt = read_body(body)
-        conn.send_response(200, "OK", extra_headers={
-          "Content-Type": "text/plain",
-        })
-        conn.write_string("ok")
-        conn.end_response()
-        // After the response, so the browser is not left waiting on a turn that
-        // takes a minute.
+        ok(conn)
         (routes.prompt)(prompt)
+      }
+      (Post, "/session") => {
+        let path = read_body(body)
+        ok(conn)
+        (routes.switch_session)(path)
       }
       _ => not_found(conn)
     }

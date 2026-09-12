@@ -94,6 +94,26 @@ pub fn Session::path(self : Session) -> Array[Entry] {
 }
 
 ///|
+/// A copy of this session with entries appended, leaf moved to the last of them.
+///
+/// Appending in memory mirrors what was just written to the file. Anything else
+/// would make the in-memory session and the log disagree, and the log is the one
+/// that survives a restart.
+pub fn Session::add_entries(self : Session, entries : Array[Entry]) -> Session {
+  if entries.is_empty() {
+    return self
+  }
+  let all : Array[Entry] = []
+  for entry in self.entries {
+    all.push(entry)
+  }
+  for entry in entries {
+    all.push(entry)
+  }
+  Session::new(self.header, all)
+}
+
+///|
 /// The path ending at a specific entry. `None` yields an empty path, which is
 /// how "no leaf" is distinguished from "the current leaf".
 pub fn Session::path_to(self : Session, leaf_id : String?) -> Array[Entry] {
@@ -232,6 +252,153 @@ pub fn Session::context(self : Session) -> SessionContext {
     }
   }
   { messages, thinking_level, model, }
+}
+
+///|
+/// The conversation a compaction would replace: everything before
+/// `first_kept_entry_id` on the active path, in model-visible form.
+///
+/// Honours the newest compaction exactly as `context_entries` does, so a second
+/// compaction summarizes the previous summary plus what came after it, rather
+/// than the history that summary already replaced.
+///
+/// An empty result means there is nothing to summarize — either the cut is at the
+/// very start of the conversation, or the id is not on this path. Both cases
+/// should stop the compaction rather than produce a summary of nothing.
+pub fn Session::messages_before(
+  self : Session,
+  first_kept_entry_id : String,
+) -> Array[ContextMessage] {
+  let out : Array[ContextMessage] = []
+  let mut found = false
+  for entry in self.context_entries() {
+    if entry.id == first_kept_entry_id {
+      found = true
+      break
+    }
+    for message in context_messages_of(entry) {
+      out.push(message)
+    }
+  }
+  if found {
+    out
+  } else {
+    []
+  }
+}
+
+// ── What the model actually receives ──────────────────────────────────────
+
+///|
+/// The framing pi puts around a summary when replaying it to the model.
+///
+/// Copied verbatim rather than paraphrased. These strings are part of the wire
+/// format the model has seen, and `harness/gen-deepseek-requests.mjs` captures
+/// them from pi-ai, so the pair is checked against the oracle instead of trusted
+/// to memory.
+pub fn compaction_summary_prefix() -> String {
+  "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
+}
+
+///|
+pub fn compaction_summary_suffix() -> String {
+  "\n</summary>"
+}
+
+///|
+pub fn branch_summary_prefix() -> String {
+  "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n"
+}
+
+///|
+pub fn branch_summary_suffix() -> String {
+  "</summary>"
+}
+
+///|
+/// A summary as the model reads it: framed, and attributed to the user.
+pub fn framed_summary(summary : String, branch~ : Bool) -> String {
+  if branch {
+    branch_summary_prefix() + summary + branch_summary_suffix()
+  } else {
+    compaction_summary_prefix() + summary + compaction_summary_suffix()
+  }
+}
+
+///|
+/// One context message as the model sees it.
+///
+/// summaries and custom messages are not user or assistant output, but the model
+/// has to see them as turns. pi's mapping is the reference here: a summary
+/// arrives as a user turn wrapped in `<summary>` framing, and a custom message as
+/// a user turn carrying its own content.
+pub fn ContextMessage::to_message(self : ContextMessage) -> Message {
+  match self {
+    User(m) => Message::User(m)
+    Assistant(m) => Message::Assistant(m)
+    ToolResult(m) => Message::ToolResult(m)
+    CompactionSummary(summary~, timestamp~, ..) =>
+      Message::User({
+        content: [Text(framed_summary(summary, branch=false))],
+        timestamp,
+      })
+    BranchSummary(summary~, timestamp~, ..) =>
+      Message::User({
+        content: [Text(framed_summary(summary, branch=true))],
+        timestamp,
+      })
+    Custom(content~, timestamp~, ..) =>
+      Message::User({ content: custom_blocks(content), timestamp, })
+  }
+}
+
+///|
+/// The blocks of an extension-injected message.
+///
+/// pi passes a string through as one text part and an array through unchanged.
+/// Anything else has no part shape to preserve, so the JSON is shown as text
+/// rather than dropped: a message the model cannot read is worse than one it
+/// reads awkwardly.
+fn custom_blocks(content : Json) -> Array[Content] {
+  match content {
+    String(value) => [Text(value)]
+    Array(items) => {
+      let blocks : Array[Content] = []
+      let mut usable = true
+      for item in items {
+        // A part that will not decode makes the whole content unusable, so the
+        // JSON is kept as text rather than half-rendered.
+        try Content::from_json(item) catch {
+          _ => usable = false
+        } noraise {
+          block => if usable { blocks.push(block) }
+        }
+      }
+      if usable {
+        blocks
+      } else {
+        [Text(content.stringify())]
+      }
+    }
+    _ => [Text(content.stringify())]
+  }
+}
+
+///|
+/// The whole conversation in the shape the request builder expects.
+pub fn SessionContext::messages_for_model(
+  self : SessionContext,
+) -> Array[Message] {
+  context_messages_for_model(self.messages)
+}
+
+///|
+/// The same conversion for a slice of conversation — the prefix a compaction is
+/// about to replace, for instance.
+pub fn context_messages_for_model(
+  messages : Array[ContextMessage],
+) -> Array[Message] {
+  messages.map(message => ContextMessage::to_message(message))
 }
 
 // ── Serialization ──────────────────────────────────────────────────────────

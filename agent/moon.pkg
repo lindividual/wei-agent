@@ -5,4 +5,11 @@ import {
   "moonbitlang/core/json",
 }
 
+// The tests run the driver against a scripted model behind a real socket.
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/socket",
+  "moonbitlang/core/encoding/utf8",
+} for "test"
+
 supported_targets = "+native"
