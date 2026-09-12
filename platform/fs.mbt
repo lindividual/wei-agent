@@ -39,6 +39,13 @@ pub async fn append_text(path : String, content : String) -> Unit {
 /// and mid-line; the lossy decode and the caller's tolerance of an unparsable last
 /// line are what make a byte-bounded read usable for a line-oriented file.
 pub async fn read_prefix(path : String, max_bytes : Int) -> String {
+  // A missing file reads as empty rather than raising. Everything that calls this is
+  // describing a file — a session's label, its workspace — and "there is nothing there"
+  // is a description. Raising instead turned a session that had not been written yet
+  // into a failure of whatever happened to be asking.
+  if !path_exists(path) {
+    return ""
+  }
   let file = @fs.open(path, mode=@fs.Mode::ReadOnly)
   defer file.close()
   let size = file.size()

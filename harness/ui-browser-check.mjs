@@ -389,6 +389,9 @@ async function main() {
     );
 
     console.log("\nsidebar (a new session, then going back to the old one)");
+    const rowsBefore = await cdp.eval(
+      "document.querySelectorAll('#sessions [data-session]').length",
+    );
     check(
       (await cdp.eval("document.querySelectorAll('#sessions [data-new]').length")) === 1,
       "the open workspace offers a new session",
@@ -399,10 +402,32 @@ async function main() {
       "a new session to clear the transcript",
       30000,
     );
-    check(
-      (await cdp.eval("document.querySelectorAll('#sessions [data-session]').length")) >= 2,
-      "the sidebar lists the new session next to the old one",
+    const rowsAfter = await cdp.eval(
+      "document.querySelectorAll('#sessions [data-session]').length",
     );
+    check(
+      rowsAfter === rowsBefore,
+      "a new session adds no sidebar row until it has something in it",
+      `rows went from ${rowsBefore} to ${rowsAfter}: ${await cdp.eval(
+        "JSON.stringify([...document.querySelectorAll('#sessions [data-session]')].map(r => r.textContent))",
+      )}`,
+    );
+    // Which is the point of writing the file on the first entry: a store used for a
+    // week should not be a list of sessions nobody ever typed into.
+    await cdp.eval(
+      `(() => {
+        const input = document.getElementById('prompt');
+        input.value = ${JSON.stringify("Reply with exactly: browser-ok")};
+        document.getElementById('composer').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.querySelectorAll('#sessions [data-session]').length === ${rowsBefore + 1}`,
+      "the session to appear once it has a message",
+      60000,
+    );
+    check(true, "the session shows up in the sidebar once it has content");
     const back = await cdp.eval(
       `(() => {
         const rows = [...document.querySelectorAll('#sessions [data-session]')];
@@ -572,12 +597,18 @@ async function main() {
     server.kill("SIGKILL");
     chrome?.kill("SIGKILL");
     if (!KEEP) {
-      rmSync(store, { recursive: true, force: true });
-      rmSync(`${store}-another-project-with-a-long-name`, {
-        recursive: true,
-        force: true,
-      });
-      rmSync(profile, { recursive: true, force: true });
+      // Cleanup must not be able to fail the run: Chrome keeps writing to its profile
+      // for a moment after being killed.
+      const remove = (path) => {
+        try {
+          rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+          /* a temporary directory that outlives the run is not a failure */
+        }
+      };
+      remove(store);
+      remove(`${store}-another-project-with-a-long-name`);
+      remove(profile);
     } else {
       console.log(`kept store ${store} and profile ${profile}`);
     }

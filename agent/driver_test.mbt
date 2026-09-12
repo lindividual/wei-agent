@@ -32,6 +32,7 @@ async fn serve_scripted(
   port : Int,
   responses : Array[String],
   seen : Array[String],
+  delay_ms : Int,
 ) -> Unit {
   let server = @socket.TcpServer(@socket.Addr::parse("127.0.0.1:\{port}"))
   let mut index = 0
@@ -43,6 +44,9 @@ async fn serve_scripted(
     }
     let body = read_request_body(tcp, headers)
     seen.push(body)
+    if delay_ms > 0 {
+      @async.sleep(delay_ms)
+    }
     let reply = responses[if index < responses.length() {
         index
       } else {
@@ -144,13 +148,17 @@ async fn with_fake_model(
   responses : Array[String],
   seen : Array[String],
   body : async (String) -> Unit,
+  delay_ms? : Int = 0,
 ) -> Unit {
   let port = fake_model_port()
   @async.with_task_group(group => {
     // `no_wait`: the accept loop only ends when it is cancelled, so a group that
     // waited for it would never finish the test.
     ignore(
-      group.spawn(() => serve_scripted(port, responses, seen), no_wait=true),
+      group.spawn(
+        () => serve_scripted(port, responses, seen, delay_ms),
+        no_wait=true,
+      ),
     )
     @async.sleep(30)
     body("http://127.0.0.1:\{port}")
@@ -432,4 +440,101 @@ async test "a model that never settles is stopped by the round limit" {
     // call, so a resumed session does not need repairing.
     assert_false(result.session.needs_repair())
   })
+}
+
+///|
+/// Every entry carries the time it happened, not the time the turn started.
+///
+/// A turn spends its time between entries — in the model, in the tools — and a log where
+/// forty entries share one timestamp cannot be read back to see where the minutes went.
+/// The fake model is slowed down here because a fast one would make the two times equal
+/// by accident.
+async test "entries are timestamped when they happen" {
+  let dir = scratch("times")
+  @platform.write_text("\{dir}/note.txt", "hello\n")
+  let seen : Array[String] = []
+  with_fake_model(
+    [read_tool_call_sse("note.txt"), text_sse("done")],
+    seen,
+    async fn(base_url) {
+      let ctx = context_for(dir, base_url, [])
+      let result = @agent.run_turn(
+        ctx,
+        "read it",
+        FIXED_TIME,
+        thinking_level="high",
+      )
+      let session = logged(ctx.session_path)
+      let mut asked : Int64 = 0
+      let mut answered : Int64 = 0
+      let mut tooled : Int64 = 0
+      for entry in session.entries {
+        match entry.kind {
+          @core.Message(message~) =>
+            match message {
+              @core.User(_) =>
+                asked = @core.parse_iso_utc(entry.timestamp).unwrap()
+              @core.ToolResult(_) =>
+                tooled = @core.parse_iso_utc(entry.timestamp).unwrap()
+              @core.Assistant(_) =>
+                answered = @core.parse_iso_utc(entry.timestamp).unwrap()
+            }
+          _ => ()
+        }
+      }
+      // The model was made to take ~30ms per response, so "different" is measurable
+      // rather than lucky.
+      assert_true(
+        answered > asked,
+        msg="assistant \{answered} vs user \{asked}",
+      )
+      assert_true(tooled > 0L)
+      assert_eq(result.tool_calls, 1)
+    },
+    delay_ms=30,
+  )
+}
+
+///|
+/// A turn reports each tool as it finishes, and its counts as they grow.
+///
+/// This is what a page renders to look alive during a long turn, so the events and the
+/// progress numbers are part of the driver's contract rather than a detail of the UI.
+async test "tools and progress are reported as the turn runs" {
+  let dir = scratch("live")
+  @platform.write_text("\{dir}/note.txt", "live-output\n")
+  let seen : Array[String] = []
+  let events : Array[(String, String, Bool)] = []
+  let progress : Array[(Int, Int)] = []
+  with_fake_model(
+    [
+      read_tool_call_sse("note.txt"),
+      read_tool_call_sse("missing.txt"),
+      text_sse("done"),
+    ],
+    seen,
+    async fn(base_url) {
+      let ctx = context_for(dir, base_url, [])
+      let result = @agent.run_turn(
+        ctx,
+        "read two files",
+        FIXED_TIME,
+        thinking_level="high",
+        on_tool=event => events.push((event.name, event.output, event.is_error)),
+        on_progress=(calls, tools) => progress.push((calls, tools)),
+      )
+      assert_eq(result.model_calls, 3)
+      assert_eq(events.length(), 2)
+      let (first_name, first_output, first_error) = events[0]
+      assert_eq(first_name, "read")
+      assert_true(first_output.contains("live-output"), msg=first_output)
+      assert_false(first_error)
+      // A tool that fails is reported as failing, not left out.
+      let (_, _, second_error) = events[1]
+      assert_true(second_error)
+      // The counts grow, and the last report is the finished turn's.
+      assert_true(progress.length() >= 2, msg="\{progress.length()} reports")
+      assert_eq(progress[progress.length() - 1], (3, 2))
+    },
+  )
 }

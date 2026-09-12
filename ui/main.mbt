@@ -147,13 +147,15 @@ fn home_dir() -> String raise {
 }
 
 ///|
-/// Create a session with a fresh id, on disk and in memory.
-async fn create_session(root : String, cwd : String) -> (@core.Session, String) {
+/// A fresh session in this workspace, in memory and not yet on disk.
+///
+/// The file appears when the first entry is written, which is what keeps a store from
+/// filling up with header-only sessions that a picker then has to show.
+fn create_session(root : String, cwd : String) -> (@core.Session, String) {
   let now = @env.now().reinterpret_as_int64()
   let id = @core.new_entry_id()
   let path = @core.session_file_path(root, cwd, now, id)
   let header = new_header(id, cwd, now)
-  @platform.create_session(path, header)
   (@core.Session::new(header, []), path)
 }
 
@@ -339,6 +341,27 @@ fn zeroes(count : Int) -> String {
 }
 
 ///|
+/// Tell a running turn to stop, and say so, when the reader asks to go elsewhere.
+///
+/// Waiting for the turn would be the safe thing and the wrong one: a turn can run for
+/// minutes, and someone who clicks another session has already decided they want to be
+/// somewhere else. The turn stops at its next checkpoint and the log keeps whatever it
+/// had already written, including — if it was mid-tool — a gap that `session_repair`
+/// closes on the next open.
+async fn ask_to_leave(
+  hub : @server.Hub,
+  aborting : AbortFlag,
+  busy : Bool,
+) -> Unit {
+  if busy {
+    aborting.value = true
+    hub.broadcast(
+      @html.Patch::Status(text="stopping the running turn…").to_sse(),
+    )
+  }
+}
+
+///|
 /// Run one turn and describe it on the status line.
 ///
 /// Shared by the initial prompt and by every queued one, so a turn behaves the
@@ -375,15 +398,16 @@ async fn run_and_report(
     ).to_sse(),
   )
 
-  // A turn makes several model calls when it uses tools, and each one writes its
-  // own text. A block is opened lazily, on the first text delta, so a call that
-  // only thinks does not leave an empty element behind.
-  let mut open_block : @html.StreamBuffer? = None
+  // A turn makes several model calls when it uses tools, and each one writes its own
+  // text. Both containers are opened lazily, on the first delta, so a call that only
+  // thinks does not leave an empty text element behind.
+  let mut open_text : @html.StreamBuffer? = None
+  let mut open_thinking : @html.StreamBuffer? = None
   let mut stream_seq = 0
   let report : async (@core.StreamEvent) -> Unit = event => {
     match event {
       @core.Text(delta~) => {
-        let buffer = match open_block {
+        let buffer = match open_text {
           Some(existing) => existing
           None => {
             stream_seq += 1
@@ -402,7 +426,7 @@ async fn run_and_report(
             // waiting for 64 of them would mean the reader sees nothing until the
             // turn is over — which is what streaming is for.
             let fresh = @html.StreamBuffer::new(id, threshold=8)
-            open_block = Some(fresh)
+            open_text = Some(fresh)
             fresh
           }
         }
@@ -411,10 +435,72 @@ async fn run_and_report(
           None => ()
         }
       }
-      // Reasoning is not streamed: it is collapsed anyway, and pushing it live
-      // would put text on screen that the reader is not meant to read.
-      @core.Thinking(_) => ()
+      @core.Thinking(delta~) => {
+        // Reasoning is streamed too, into a collapsed container. Not streaming it
+        // was a mistake: with a model that thinks before every tool call, the page
+        // then showed nothing at all for minutes, which reads as a hang. The reader
+        // sees "thinking…" and how the text grows if they open it, and the finished
+        // turn re-renders it properly.
+        let buffer = match open_thinking {
+          Some(existing) => existing
+          None => {
+            stream_seq += 1
+            let id = "thinking-\{index}-\{stream_seq}"
+            let body = "\{id}-body"
+            hub.broadcast(
+              @html.append_node(
+                stream_root,
+                @html.render_thinking_stream(id, body),
+              ).to_sse(),
+            )
+            // A larger threshold than text: this is collapsed, so the only thing a
+            // frame buys is the sense that something is happening.
+            let fresh = @html.StreamBuffer::new(body, threshold=64)
+            open_thinking = Some(fresh)
+            fresh
+          }
+        }
+        match buffer.push(delta) {
+          Some(patch) => hub.broadcast(patch.to_sse())
+          None => ()
+        }
+      }
     }
+  }
+
+  // Each finished tool is shown where it happened, so a long turn reads as work
+  // being done rather than as silence. The nodes are throwaway, like the streamed
+  // text: the end of the turn replaces the whole container with the paired rendering.
+  let mut tool_seq = 0
+  let on_tool = (event : @agent.ToolEvent) => {
+    tool_seq += 1
+    let call : @core.Content = @core.ToolCall(
+      id=event.call_id,
+      name=event.name,
+      arguments=event.arguments,
+    )
+    let result : @core.ToolResultMessage = {
+      tool_call_id: event.call_id,
+      tool_name: event.name,
+      content: [@core.Text(event.output)],
+      is_error: event.is_error,
+      timestamp: 0L,
+      details: None,
+    }
+    hub.broadcast(
+      @html.append_node(
+        stream_root,
+        @html.render_tool("live-tool-\{index}-\{tool_seq}", call, Some(result)),
+      ).to_sse(),
+    )
+  }
+
+  // The counts are the cheapest possible "still alive" signal, and the one a reader
+  // watches when a turn is taking minutes.
+  let on_progress = (calls : Int, tools : Int) => {
+    let label = "working… \{calls} model call(s), \{tools} tool call(s)"
+    set_status(label)
+    hub.broadcast(@html.Patch::Status(text=label).to_sse())
   }
 
   let result = @agent.run_turn(
@@ -424,6 +510,8 @@ async fn run_and_report(
     thinking_level="high",
     on_delta=report,
     should_stop=() => aborting.value,
+    on_tool~,
+    on_progress~,
   )
   // Replace the streamed text with the finished rendering. Doing it in one patch
   // is why the streaming path can be simple: it never has to decide what the final
@@ -468,6 +556,15 @@ async fn main {
     args.store
   }
   let cwd = @platform.current_dir()
+  // Header-only sessions accumulate from every start that never got used. Ten minutes
+  // is long enough that a session another instance is writing right now is safe.
+  let pruned = @platform.prune_empty_sessions(
+    @core.session_dir_for(root, cwd),
+    10L * 60L * 1000L,
+  )
+  if pruned > 0 {
+    log("pruned   \{pruned} empty session(s)")
+  }
   let opened = open_session(args, root, cwd)
   let mut session = opened.0
   let mut session_path = opened.1
@@ -486,11 +583,15 @@ async fn main {
   let jobs : @aqueue.Queue[Job] = @aqueue.Queue(kind=@aqueue.Kind::Unbounded)
   let mut busy = false
   let mut turn = 0
-  // The status line belongs to the snapshot, not only to the patches that set it
-  // during a turn. Otherwise a reconnecting browser keeps showing the summary of a
-  // turn that the process it just reconnected to knows nothing about — and after a
-  // restart it would advertise work that never happened.
-  let mut status_line = ""
+  // The status line belongs to the snapshot, not only to the patches that set it during
+  // a turn: a reconnecting browser must not keep showing the summary of a turn that the
+  // process it just reconnected to knows nothing about. It starts by saying what is
+  // open — including a new session, which has no sidebar row until it is written.
+  let mut status_line = if session.entries.length() == 0 {
+    "new session in \{cwd}"
+  } else {
+    "opened \{session.context().messages.length()} messages in \{cwd}"
+  }
 
   let transcript = () => {
     @html.render_transcript(session.context().messages).render()
@@ -537,8 +638,14 @@ async fn main {
       ignore(queue_try_put(jobs, Prompt(text)))
     },
     abort: () => aborting.value = true,
-    switch_session: path => ignore(queue_try_put(jobs, Switch(path))),
-    new_session: dir => ignore(queue_try_put(jobs, New(dir))),
+    switch_session: async fn(path) {
+      ask_to_leave(hub, aborting, busy)
+      ignore(queue_try_put(jobs, Switch(path)))
+    },
+    new_session: async fn(dir) {
+      ask_to_leave(hub, aborting, busy)
+      ignore(queue_try_put(jobs, New(dir)))
+    },
   }
 
   log("pi-mb   http://127.0.0.1:\{args.port}")
@@ -552,83 +659,96 @@ async fn main {
       group.spawn(() => {
         while true {
           let job = jobs.get()
-          match job {
-            Switch(path) => {
-              // A switch while a turn runs waits its turn in the queue, so this
-              // never interrupts a turn that is writing to the session.
-              let (next_session, next_path) = if !@platform.path_exists(path) {
-                create_session(root, cwd)
-              } else {
-                (open_path(path), path)
-              }
-              session = next_session
-              session_path = next_path
-              // Opening a session moves the agent into its workspace: the session
-              // records where it lived, which is the only trustworthy answer.
-              cwd = next_session.header.cwd
-              aborting.value = false
-              status_line = "opened \{next_session.context().messages.length()} messages in \{cwd}"
-              for patch in (routes.regions)() {
-                hub.broadcast(patch.to_sse())
-              }
-            }
-            New(dir) => {
-              let (next_session, next_path) = create_session(root, dir)
-              session = next_session
-              session_path = next_path
-              cwd = dir
-              aborting.value = false
-              status_line = "new session in \{cwd}"
-              for patch in (routes.regions)() {
-                hub.broadcast(patch.to_sse())
-              }
-            }
-            Prompt(text) => {
-              busy = true
-              aborting.value = false
-              turn += 1
-              let index = turn
-              // A session that has never had a turn shows as "(empty session)" in
-              // the sidebar. Only that case needs the list refreshed afterwards:
-              // re-reading every prefix after every turn would be paying for a
-              // label that did not change.
-              let relabel = @core.session_label(
-                  @platform.read_prefix(session_path, 64 * 1024),
-                ) ==
-                ""
-              let ctx = @agent.AgentContext::new(
-                session~,
-                session_path~,
-                cwd~,
-                api_key=key,
-                system_prompt=@core.build_system_prompt(cwd, tools),
-                tools~,
-                model=args.model,
-              )
-              // A failed turn must not take the process down: the session is on
-              // disk, and the reader needs to see what happened rather than a
-              // dead page.
-              try
-                run_and_report(hub, ctx, text, index, aborting, text => {
-                  status_line = text
-                })
-              catch {
-                err => {
-                  hub.broadcast(
-                    @html.Patch::Status(text="failed: \{err}").to_sse(),
-                  )
-                  log("turn failed: \{err}")
+          // Every job is guarded. These run inside a task group whose other member is
+          // the server, so an error escaping here cancels the listener — one unreadable
+          // session file would stop the process from serving anything at all, which
+          // looks exactly like a frozen page. Reported instead, and the queue continues.
+          try {
+            match job {
+              Switch(path) => {
+                // A switch while a turn runs waits its turn in the queue, so this
+                // never interrupts a turn that is writing to the session.
+                let (next_session, next_path) = if !@platform.path_exists(path) {
+                  create_session(root, cwd)
+                } else {
+                  (open_path(path), path)
                 }
-              } noraise {
-                result => session = result.session
+                session = next_session
+                session_path = next_path
+                // Opening a session moves the agent into its workspace: the session
+                // records where it lived, which is the only trustworthy answer.
+                cwd = next_session.header.cwd
+                aborting.value = false
+                status_line = "opened \{next_session.context().messages.length()} messages in \{cwd}"
+                for patch in (routes.regions)() {
+                  hub.broadcast(patch.to_sse())
+                }
               }
-              if relabel {
-                hub.broadcast(
-                  @html.Patch::Replace(target="sessions", html=sessions()).to_sse(),
+              New(dir) => {
+                let (next_session, next_path) = create_session(root, dir)
+                session = next_session
+                session_path = next_path
+                cwd = dir
+                aborting.value = false
+                status_line = "new session in \{cwd}"
+                for patch in (routes.regions)() {
+                  hub.broadcast(patch.to_sse())
+                }
+              }
+              Prompt(text) => {
+                busy = true
+                aborting.value = false
+                turn += 1
+                let index = turn
+                // A session that has never had a turn shows as "(empty session)" in
+                // the sidebar. Only that case needs the list refreshed afterwards:
+                // re-reading every prefix after every turn would be paying for a
+                // label that did not change.
+                let relabel = @core.session_label(
+                    @platform.read_prefix(session_path, 64 * 1024),
+                  ) ==
+                  ""
+                let ctx = @agent.AgentContext::new(
+                  session~,
+                  session_path~,
+                  cwd~,
+                  api_key=key,
+                  system_prompt=@core.build_system_prompt(cwd, tools),
+                  tools~,
+                  model=args.model,
                 )
+                // A failed turn must not take the process down: the session is on
+                // disk, and the reader needs to see what happened rather than a
+                // dead page.
+                try
+                  run_and_report(hub, ctx, text, index, aborting, text => {
+                    status_line = text
+                  })
+                catch {
+                  err => {
+                    hub.broadcast(
+                      @html.Patch::Status(text="failed: \{err}").to_sse(),
+                    )
+                    log("turn failed: \{err}")
+                  }
+                } noraise {
+                  result => session = result.session
+                }
+                if relabel {
+                  hub.broadcast(
+                    @html.Patch::Replace(target="sessions", html=sessions()).to_sse(),
+                  )
+                }
+                busy = false
               }
-              busy = false
             }
+          } catch {
+            err => {
+              log("job failed: \{err}")
+              hub.broadcast(@html.Patch::Status(text="failed: \{err}").to_sse())
+            }
+          } noraise {
+            _ => ()
           }
         }
       }),

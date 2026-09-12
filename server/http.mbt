@@ -44,11 +44,14 @@ pub(all) struct Routes {
   /// has already started.
   abort : () -> Unit
   /// Opens the session at this path, and moves the agent into its workspace.
-  switch_session : (String) -> Unit
+  ///
+  /// Async for the same reason `prompt` is: leaving one session for another is
+  /// something the reader may need to be told about while it happens.
+  switch_session : async (String) -> Unit
   /// Starts a new session in this working directory. Separate from opening one
   /// because "a directory" and "a session file" would otherwise have to be told
   /// apart by inspecting the path.
-  new_session : (String) -> Unit
+  new_session : async (String) -> Unit
 }
 
 ///|

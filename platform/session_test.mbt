@@ -207,3 +207,49 @@ async test "find_session searches every workspace" {
   assert_eq(find_session(root, ""), None)
   assert_eq(find_session("\{root}/nope", "aaaa1111"), None)
 }
+
+///|
+/// The header is written once, with the first entry.
+async test "ensure_session writes the header only when it is missing" {
+  let dir = session_scratch("ensure")
+  let path = "\{dir}/session.jsonl"
+  assert_false(path_exists(path))
+  ensure_session(path, header("abc", "/tmp"))
+  assert_true(path_exists(path))
+  let first = read_text(path)
+  let entry = user_entry("hello", None)
+  append_entry(path, entry)
+  // A second call must not rewrite the header over what is already there.
+  ensure_session(path, header("another", "/elsewhere"))
+  let text = read_text(path)
+  assert_true(text.has_prefix(first), msg=text)
+  assert_eq(@core.parse_session_file(text).entries.length(), 1)
+}
+
+///|
+/// Empty sessions are removed, and nothing else is.
+async test "prune_empty_sessions removes only stale header-only files" {
+  let dir = session_scratch("prune")
+  let empty = "\{dir}/2020-01-01T00-00-00.000Z_empty.jsonl"
+  let used = "\{dir}/2020-01-02T00-00-00.000Z_used.jsonl"
+  let recent = "\{dir}/2020-01-03T00-00-00.000Z_recent.jsonl"
+  create_session(empty, header("empty", "/tmp"))
+  create_session(used, header("used", "/tmp"))
+  append_entry(used, user_entry("a real conversation", None))
+  create_session(recent, header("recent", "/tmp"))
+  // Backdate the two that are meant to look abandoned. The empty file is only
+  // removable because it is old, so the test has to be able to age it.
+  for path in [empty, used] {
+    ignore(@process.run("touch", ["-t", "202001010000", path]))
+  }
+
+  let removed = prune_empty_sessions(dir, 10L * 60L * 1000L)
+  // The freshly created one survives even though it is empty: an instance that is
+  // mid-session must not have its file deleted from under it.
+  assert_eq(removed, 1)
+  assert_false(path_exists(empty))
+  assert_true(path_exists(recent))
+  assert_true(path_exists(used))
+  // A missing directory is not an error.
+  assert_eq(prune_empty_sessions("\{dir}/nope", 0L), 0)
+}

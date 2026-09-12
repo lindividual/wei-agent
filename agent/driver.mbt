@@ -61,6 +61,22 @@ pub fn AgentContext::new(
 }
 
 ///|
+/// A tool that has just finished, reported as it happens.
+///
+/// The reason this exists at all: a turn can spend minutes in tool rounds, and a page
+/// that only learns what happened when the turn ends looks frozen for exactly that
+/// long. Reporting each result as it lands is what makes the wait legible.
+pub(all) struct ToolEvent {
+  name : String
+  /// The call and its arguments, as the model wrote them.
+  call_id : String
+  arguments : Json
+  /// The result text, already truncated by the tool.
+  output : String
+  is_error : Bool
+} derive(Eq, Debug)
+
+///|
 /// What one turn cost, in the units a reader cares about.
 pub(all) struct TurnResult {
   session : @core.Session
@@ -124,7 +140,17 @@ fn tool_calls_of(message : @core.Message) -> Array[@core.Content] {
 }
 
 ///|
+/// The wall clock, as the log records it.
+fn now_ms() -> Int64 {
+  @env.now().reinterpret_as_int64()
+}
+
+///|
 /// Append one entry to the session, both in memory and on disk.
+///
+/// `timestamp` is the moment the entry describes, not the start of the turn: a turn
+/// can spend minutes in tool rounds, and a log that claims every entry of it happened
+/// at the same instant cannot be read back to see where the time went.
 async fn commit(
   session : @core.Session,
   path : String,
@@ -137,6 +163,10 @@ async fn commit(
     timestamp: @core.format_iso_utc(timestamp),
     kind,
   }
+  // The header goes in with the first entry, not when the session is opened: a
+  // session that is opened and never used is not worth a file, and one that leaves a
+  // header-only file behind makes the picker harder to read.
+  @platform.ensure_session(path, session.header)
   @platform.append_entry(path, entry)
   // Rebuilding the index per append is fine at this size and keeps the in-memory
   // session a faithful copy of the file.
@@ -239,9 +269,28 @@ async fn call_model(
     session,
     ctx.session_path,
     @core.Message(message~),
-    timestamp,
+    // When the response finished, not when the request went out.
+    now_ms(),
   )
   (updated, message)
+}
+
+///|
+/// The text of a tool result, for callers that only show it.
+fn tool_output_text(output : @core.ToolOutput) -> String {
+  let out = StringBuilder()
+  for block in output.content {
+    match block {
+      Text(text) => {
+        if out.to_string() != "" {
+          out.write_string("\n")
+        }
+        out.write_string(text)
+      }
+      _ => ()
+    }
+  }
+  out.to_string()
 }
 
 ///|
@@ -361,7 +410,7 @@ async fn compact_if_needed(
       usage=Some(usage_of(message)),
       from_hook=Some(false),
     ),
-    timestamp,
+    now_ms(),
   )
   (updated, usage_of(message), true)
 }
@@ -379,6 +428,7 @@ async fn run_tools(
   session : @core.Session,
   message : @core.Message,
   timestamp : Int64,
+  report : async (ToolEvent) -> Unit,
 ) -> (@core.Session, Int) {
   let calls = tool_calls_of(message)
   if calls.is_empty() {
@@ -407,6 +457,13 @@ async fn run_tools(
       _ => ("", "", Json::object(Map([])))
     }
     let output = @platform.execute_tool(name, arguments, ctx.cwd)
+    report({
+      name,
+      call_id: id,
+      arguments,
+      output: tool_output_text(output),
+      is_error: output.is_error,
+    })
     // A note is a request to persist something, so it becomes a session entry
     // rather than a tool result the model reads back.
     if name == "note" && !output.is_error {
@@ -421,7 +478,7 @@ async fn run_tools(
                   custom_type=@core.agent_note_type(),
                   data=Some(Json::object(Map([("text", Json::string(text))]))),
                 ),
-                timestamp,
+                now_ms(),
               )
             _ => ()
           }
@@ -440,7 +497,7 @@ async fn run_tools(
       current,
       ctx.session_path,
       @core.Message(message=result_message),
-      timestamp,
+      now_ms(),
     )
   }
   (current, calls.length())
@@ -460,6 +517,13 @@ pub async fn run_turn(
   max_rounds? : Int = 40,
   on_delta? : async (@core.StreamEvent) -> Unit,
   should_stop? : () -> Bool,
+  /// Called after each tool finishes, for a caller rendering the turn live.
+  ///
+  /// Async because rendering means writing to a socket, and the same shape as
+  /// `on_delta` for the same reason.
+  on_tool? : async (ToolEvent) -> Unit,
+  /// Called after each round with (model calls, tool calls) so far.
+  on_progress? : async (Int, Int) -> Unit,
 ) -> TurnResult {
   // Streaming is optional: a caller that only wants the finished turn passes
   // nothing, and a caller rendering live passes the same callback this loop uses.
@@ -470,6 +534,16 @@ pub async fn run_turn(
   let stopping = match should_stop {
     Some(check) => check
     None => fn() { false }
+  }
+  // A caller that does not render live gets a callback that does nothing; the
+  // annotation is left off because a body with nothing to await does not need it.
+  let tool_report : async (ToolEvent) -> Unit = match on_tool {
+    Some(callback) => callback
+    None => fn(_event) { () }
+  }
+  let progress : async (Int, Int) -> Unit = match on_progress {
+    Some(callback) => callback
+    None => fn(_calls, _tools) { () }
   }
   let level = thinking_level
   // Record the model and thinking level before anything else. pi derives these
@@ -544,10 +618,18 @@ pub async fn run_turn(
     if tool_calls_of(message).is_empty() || stopping() {
       break
     }
-    let (after_tools, executed) = run_tools(ctx, session, message, timestamp)
+    let (after_tools, executed) = run_tools(
+      ctx, session, message, timestamp, tool_report,
+    )
     session = after_tools
     tool_calls += executed
+    // After the round, not before: the counts are what the reader watches to tell
+    // "still working on something" from "stuck".
+    progress(model_calls, tool_calls)
   }
+  // One last report, so a caller that only watches progress sees the finished counts
+  // rather than the ones from before the final model call.
+  progress(model_calls, tool_calls)
   {
     session,
     replies,

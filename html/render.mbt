@@ -339,6 +339,19 @@ pub fn render_exchange_start(index : Int, user : String?) -> Node {
 }
 
 ///|
+/// A container for reasoning that is still arriving.
+///
+/// Reasoning is collapsed, but a model that thinks for a minute must not look like a
+/// frozen page: the summary says what is happening, and the text is there for a
+/// reader who opens it while it is still being written.
+pub fn render_thinking_stream(id : String, body_id : String) -> Node {
+  el("details", attrs=[cls("thinking"), attr("id", id)], children=[
+    el("summary", children=[txt("thinking…")]),
+    el("div", attrs=[cls("body"), attr("id", body_id)], children=[]),
+  ])
+}
+
+///|
 /// The reply, ready to be appended inside a section's blocks container.
 ///
 /// `start` offsets the block ids so a second append into the same section cannot

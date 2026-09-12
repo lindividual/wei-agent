@@ -46,12 +46,17 @@ pub async fn post_json(
 /// The read buffer is small on purpose. A large one would sit waiting for it to
 /// fill before the first delta reached the browser, which is precisely the
 /// latency streaming exists to remove.
+///
+/// `idle_timeout_ms` bounds both waits that can hang — for the response to start, and
+/// for each subsequent read. It is per wait rather than for the whole request, so a
+/// long answer is never cut off for taking a long time; only silence is.
 pub async fn post_sse(
   url : String,
   headers : Map[String, String],
   body : String,
   on_chunk : async (String) -> Unit,
   should_stop? : () -> Bool,
+  idle_timeout_ms? : Int = 120000,
 ) -> Unit {
   // A cancelled turn stops reading rather than draining a response nobody wants.
   // Whatever arrived is still parsed by the caller, so the transcript keeps the
@@ -67,7 +72,18 @@ pub async fn post_sse(
   let client = @http.post_stream(url, headers=http_headers)
   defer client.close()
   client.write(body)
-  let response = client.end_request()
+  // Waiting for the response headers is its own chance to hang: `end_request` blocks
+  // until the status line arrives, which is *before* the first byte of the body. A
+  // timeout around the read loop alone would leave the most likely stall — a
+  // connection that was accepted and then forgotten — unbounded.
+  let response = match
+    @async.with_timeout_opt(idle_timeout_ms, () => client.end_request()) {
+    Some(response) => response
+    None =>
+      raise Failure::Failure(
+        "model endpoint sent no response within \{idle_timeout_ms}ms",
+      )
+  }
   if response.code != 200 {
     raise Failure::Failure("model endpoint returned HTTP \{response.code}")
   }
@@ -78,7 +94,20 @@ pub async fn post_sse(
     if stopping() {
       break
     }
-    let count = client.read(buffer, offset=0, max_len=buffer.length())
+    // A stream that goes quiet is the one failure a reader cannot tell from a model
+    // that is thinking: without this, a dropped connection leaves the turn — and
+    // every request queued behind it — waiting forever. The timeout is per read, so
+    // a slow but live response is never cut off.
+    let count = match
+      @async.with_timeout_opt(idle_timeout_ms, () => {
+        client.read(buffer, offset=0, max_len=buffer.length())
+      }) {
+      Some(count) => count
+      None =>
+        raise Failure::Failure(
+          "model stream sent nothing for \{idle_timeout_ms}ms",
+        )
+    }
     if count <= 0 {
       break
     }

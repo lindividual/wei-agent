@@ -25,6 +25,22 @@ pub async fn create_session(
 }
 
 ///|
+/// Make sure a session file exists, with its header.
+///
+/// Sessions are created empty and filled in later, so the file is written by
+/// whoever appends the first entry. That keeps a store from filling up with
+/// header-only files for sessions nobody ever used, which is what a picker would
+/// otherwise have to show and a reader would have to scroll past.
+pub async fn ensure_session(
+  path : String,
+  header : @core.SessionHeader,
+) -> Unit {
+  if !path_exists(path) {
+    create_session(path, header)
+  }
+}
+
+///|
 /// Append one entry.
 ///
 /// The entry's parent is expected to be the current leaf, which the caller
@@ -47,6 +63,55 @@ pub async fn append_entries(
     out.write_string(entry.to_line())
   }
   append_text(path, out.to_string())
+}
+
+///|
+/// Delete the sessions in this directory that hold nothing.
+///
+/// A header-only file is what an opened-but-unused session looks like. They used to be
+/// written on every start, and a picker full of them is worse than useless: it hides
+/// the conversations that exist behind rows that lead nowhere.
+///
+/// Two guards keep this from touching anything real. Only files small enough to be a
+/// header are considered, so a long conversation is never even read; and only files
+/// older than `min_age_ms`, so a session another instance is creating right now is
+/// left alone. Returns how many were removed.
+pub async fn prune_empty_sessions(dir : String, min_age_ms : Int64) -> Int {
+  if !path_exists(dir) {
+    return 0
+  }
+  let now = @env.now().reinterpret_as_int64()
+  let mut removed = 0
+  for name in list_entries(dir) {
+    if !name.has_suffix(".jsonl") {
+      continue
+    }
+    let file = "\{dir}/\{name}"
+    let prefix = read_prefix(file, 4096)
+    // A file with any message in it is a conversation, whatever else it holds.
+    let mut has_message = false
+    for raw in prefix.split("\n") {
+      let line = raw.trim()
+      if line.contains("\"role\"") {
+        has_message = true
+        break
+      }
+    }
+    if has_message {
+      continue
+    }
+    let (seconds, nanos) = @fs.mtime(file)
+    let modified = seconds * 1000L + nanos.to_int64() / 1000000L
+    if now - modified < min_age_ms {
+      continue
+    }
+    try @fs.remove(file) catch {
+      _ => ()
+    } noraise {
+      _ => removed += 1
+    }
+  }
+  removed
 }
 
 ///|
