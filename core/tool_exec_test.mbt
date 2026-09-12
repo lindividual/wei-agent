@@ -232,3 +232,30 @@ test "an offset past the slice yields an empty body" {
     _ => fail("expected one text block")
   }
 }
+
+///|
+/// A tool call summarised for a reader watching it happen.
+test "tool_summary names the interesting argument" {
+  assert_eq(
+    tool_summary(@json.parse("{\"command\":\"sleep 300\",\"cwd\":\"/tmp\"}")),
+    "sleep 300",
+  )
+  assert_eq(tool_summary(@json.parse("{\"path\":\"core/tool_exec.mbt\"}")), "core/tool_exec.mbt")
+  assert_eq(tool_summary(@json.parse("{\"pattern\":\"TODO\"}")), "TODO")
+  // Unknown shapes still say something rather than nothing.
+  assert_true(tool_summary(@json.parse("{\"weird\":1}")).contains("weird"))
+  // Nothing to say must not read as an empty command.
+  assert_eq(tool_summary(@json.parse("{}")), "")
+}
+
+///|
+test "tool_summary collapses whitespace and clips" {
+  let long = "{\"command\":\"" + "x".repeat(200) + "\"}"
+  let summary = tool_summary(@json.parse(long))
+  assert_eq(summary.length(), 121)
+  assert_true(summary.has_suffix("…"), msg=summary)
+  assert_eq(
+    tool_summary(@json.parse("{\"command\":\"a\\n\\n  b\"}")),
+    "a b",
+  )
+}

@@ -59,7 +59,15 @@ pub fn render_sessions(workspaces : Array[WorkspaceItem], now : Int64) -> Node {
       el("div", attrs=[cls("empty")], children=[txt("no saved sessions yet")]),
     )
   }
-  el("aside", attrs=[cls("sidebar"), attr("id", "sessions")], children=body)
+  el("div", attrs=[attr("id", "sessions")], children=body)
+}
+
+///|
+/// The sidebar holds two independent regions: what is running, and what exists. They change
+/// for different reasons — a tool starting versus a session being written — so they are
+/// replaced separately rather than as one block.
+pub fn render_sidebar(tasks : Node, sessions : Node) -> Node {
+  el("aside", attrs=[cls("sidebar")], children=[tasks, sessions])
 }
 
 ///|

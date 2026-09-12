@@ -42,7 +42,8 @@ pub(all) struct Routes {
   /// A request rather than a cancellation: the turn checks it between steps and
   /// while reading the model's response, so the process never abandons a tool that
   /// has already started.
-  abort : () -> Unit
+  /// Async like the rest: asking a session to stop tells everyone watching about it.
+  abort : async (String) -> Unit
   /// Opens the session at this path, and moves the agent into its workspace.
   ///
   /// Async for the same reason `prompt` is: leaving one session for another is
@@ -143,7 +144,9 @@ pub async fn serve(port : Int, hub : Hub, routes : Routes) -> Unit {
       }
       (Get, "/events") => stream_events(conn, hub, routes)
       (Post, "/abort") => {
-        (routes.abort)()
+        // The body names the session to stop; empty means the one on screen.
+        let target = read_body(body)
+        (routes.abort)(target.trim().to_owned())
         ok(conn)
       }
       (Post, "/prompt") => {

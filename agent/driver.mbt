@@ -61,6 +61,21 @@ pub fn AgentContext::new(
 }
 
 ///|
+/// A tool that is running, with the means to stop it.
+///
+/// The process is the reason this exists. A `bash` tool can run for minutes, and an abort
+/// that only sets a flag leaves the reader waiting for a command they already asked to stop
+/// — the flag is checked between steps, and the step in progress *is* the command. Cancelling
+/// the task the tool runs in is what reaches the child: the runtime's process cancellation
+/// handler is the only thing that knows about it, and it escalates from `SIGTERM` to a kill.
+pub(all) struct ToolHandle {
+  name : String
+  /// One line of what it is doing, for a reader watching.
+  detail : String
+  stop : () -> Unit
+}
+
+///|
 /// A tool that has just finished, reported as it happens.
 ///
 /// The reason this exists at all: a turn can spend minutes in tool rounds, and a page
@@ -429,6 +444,8 @@ async fn run_tools(
   message : @core.Message,
   timestamp : Int64,
   report : async (ToolEvent) -> Unit,
+  /// Told what is running, so a stop can reach it. `None` when nothing is.
+  publish : async (ToolHandle?) -> Unit,
 ) -> (@core.Session, Int) {
   let calls = tool_calls_of(message)
   if calls.is_empty() {
@@ -456,7 +473,33 @@ async fn run_tools(
       @core.ToolCall(id~, name~, arguments~) => (id, name, arguments)
       _ => ("", "", Json::object(Map([])))
     }
-    let output = @platform.execute_tool(name, arguments, ctx.cwd)
+    // Run the tool in a task of its own so that it can be cancelled on its own: cancelling
+    // the turn would abandon the partial answer the reader has already seen, and a stop
+    // should still leave an aborted turn in the log.
+    let output = @async.with_task_group(group => {
+      let task = group.spawn(() => {
+        try {
+          @platform.execute_tool(name, arguments, ctx.cwd)
+        } catch {
+          err =>
+            // A cancelled tool is an answer too: the model is told the command was stopped
+            // rather than the turn dying with an exception.
+            if @async.is_cancellation_error(err) {
+              @core.ToolOutput::error("stopped before it finished")
+            } else {
+              raise err
+            }
+        } noraise {
+          result => result
+        }
+      })
+      (publish)(
+        Some({ name, detail: @core.tool_summary(arguments), stop: () => task.cancel() }),
+      )
+      let finished = task.wait()
+      (publish)(None)
+      finished
+    })
     report({
       name,
       call_id: id,
@@ -522,6 +565,9 @@ pub async fn run_turn(
   /// Async because rendering means writing to a socket, and the same shape as
   /// `on_delta` for the same reason.
   on_tool? : async (ToolEvent) -> Unit,
+  /// Called with the tool that is running, then with `None` when it stops. Async because the
+  /// caller usually has to tell someone.
+  on_tool_process? : async (ToolHandle?) -> Unit,
   /// Called after each round with (model calls, tool calls) so far.
   on_progress? : async (Int, Int) -> Unit,
 ) -> TurnResult {
@@ -544,6 +590,10 @@ pub async fn run_turn(
   let progress : async (Int, Int) -> Unit = match on_progress {
     Some(callback) => callback
     None => fn(_calls, _tools) { () }
+  }
+  let publish : async (ToolHandle?) -> Unit = match on_tool_process {
+    Some(callback) => callback
+    None => fn(_handle) { () }
   }
   let level = thinking_level
   // Record the model and thinking level before anything else. pi derives these
@@ -619,7 +669,12 @@ pub async fn run_turn(
       break
     }
     let (after_tools, executed) = run_tools(
-      ctx, session, message, timestamp, tool_report,
+      ctx,
+      session,
+      message,
+      timestamp,
+      tool_report,
+      publish,
     )
     session = after_tools
     tool_calls += executed

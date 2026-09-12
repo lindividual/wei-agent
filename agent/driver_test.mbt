@@ -181,6 +181,14 @@ fn read_tool_call_sse(path : String) -> String {
 }
 
 ///|
+/// One chunk of SSE carrying a `bash` tool call.
+fn bash_tool_call_sse(command : String) -> String {
+  "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"" +
+  command +
+  "\\\"}\"}}]},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\ndata: [DONE]\n\n"
+}
+
+///|
 /// One chunk of SSE carrying a text reply and a clean stop.
 fn text_sse(text : String) -> String {
   "data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" +
@@ -537,4 +545,77 @@ async test "tools and progress are reported as the turn runs" {
       assert_eq(progress[progress.length() - 1], (3, 2))
     },
   )
+}
+
+///|
+/// Stopping a turn reaches the command that is running.
+///
+/// The abort flag alone would not: it is checked between steps, and the step in progress *is*
+/// the command. Without cancelling the tool, a `sleep 30` would keep the turn — and the
+/// session's turn slot — busy for its full duration after the reader asked it to stop.
+async test "stopping a turn kills the tool that is running" {
+  let dir = scratch("stop-tool")
+  let seen : Array[String] = []
+  with_fake_model([bash_tool_call_sse("sleep 30")], seen, async fn(base_url) {
+    let ctx = context_for(dir, base_url, [])
+    let mut stop = false
+    let mut handle : @agent.ToolHandle? = None
+    let started = @env.now()
+    let result = @async.with_task_group(group => {
+      ignore(
+        group.spawn(
+          () => {
+            // Wait for the command to be running, then stop it the way the button does.
+            while handle is None {
+              @async.sleep(10)
+            }
+            @async.sleep(200)
+            stop = true
+            match handle {
+              Some(running) => (running.stop)()
+              None => ()
+            }
+          },
+          no_wait=true,
+        ),
+      )
+      @agent.run_turn(
+        ctx,
+        "run something long",
+        FIXED_TIME,
+        thinking_level="high",
+        should_stop=() => stop,
+        on_tool_process=published => handle = published,
+      )
+    })
+    let elapsed = (@env.now() - started).reinterpret_as_int64()
+    // `sleep 30` minus the kill: the assertion is that the stop was quick, not that it was
+    // recorded.
+    assert_true(elapsed < 5000L, msg="took \{elapsed}ms")
+    assert_eq(result.tool_calls, 1)
+    // The model is told the command was stopped, rather than the turn dying.
+    let session = logged(ctx.session_path)
+    let mut told = ""
+    let mut is_error = false
+    for entry in session.entries {
+      match entry.kind {
+        @core.Message(message~) =>
+          match message {
+            @core.ToolResult(result) => {
+              is_error = result.is_error
+              for block in result.content {
+                match block {
+                  @core.Text(text) => told = told + text
+                  _ => ()
+                }
+              }
+            }
+            _ => ()
+          }
+        _ => ()
+      }
+    }
+    assert_true(told.contains("stopped"), msg=told)
+    assert_true(is_error)
+  })
 }

@@ -70,9 +70,13 @@ pub fn stylesheet() -> String {
      ".panel { margin-bottom: var(--space-3); }", ".panel > h2 { margin: 0 0 var(--space-2); font-size: var(--text-xs); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }",
     ".panel .task { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space-2); margin-bottom: var(--space-2); }",
     ".panel .task .row { display: flex; align-items: center; gap: var(--space-2); }",
+    // `min-width: 0` on the flexible half, or a long session label refuses to shrink and
+    // squeezes the button next to it down to an ellipsis.
+    ".panel .task .label { min-width: 0; }",
     ".panel .task .label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
     ".panel .task .tool { font-family: var(--mono); font-size: var(--text-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
-    ".panel .task form { display: flex; }", ".panel .task button { width: auto; border-color: var(--line-strong); padding: var(--space-1) var(--space-2); }",
+    ".panel .task form { display: flex; }",
+    ".panel .task button { flex: 0 0 auto; width: auto; border-color: var(--line-strong); padding: var(--space-1) var(--space-2); }",
     ".panel input[type=text] { width: 100%; font: inherit; font-size: var(--text-sm); color: inherit; background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: var(--space-2); }",
     // ── conversation ────────────────────────────────────────────────────────
      ".exchange { margin-bottom: var(--space-5); }", ".user { background: var(--surface); border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-3); white-space: pre-wrap; }",

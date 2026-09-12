@@ -667,6 +667,59 @@ async function main() {
       "the work done out of sight is on screen when the session comes back",
     );
 
+    console.log("\nstopping a background turn from the panel");
+    // The parallel section left a long turn running in the session it opened last.
+    check(
+      (await cdp.eval("document.querySelectorAll('#tasks .task').length")) >= 1,
+      "the running turn is listed in the tasks panel",
+    );
+    check(
+      /running |waiting for the model/.test(
+        await cdp.eval("document.querySelector('#tasks .task .tool').textContent"),
+      ),
+      "the panel says what it is doing",
+      await cdp.eval("document.querySelector('#tasks .task .tool').textContent"),
+    );
+    check(
+      (await cdp.eval("document.querySelectorAll('#tasks [data-stop]').length")) >= 1,
+      "the panel offers a way to stop it",
+    );
+    check(
+      (await cdp.eval("document.querySelectorAll('#tasks [data-since]').length")) >= 1,
+      "and how long it has been running",
+    );
+    const taskSession = await cdp.eval(
+      "document.querySelector('#tasks [data-stop]').dataset.stop",
+    );
+    const beforeStop = await cdp.eval("document.getElementById('transcript').innerHTML.length");
+    await cdp.eval("document.querySelector('#tasks [data-stop]').click()");
+    await cdp.waitFor(
+      `document.querySelectorAll('#tasks .task').length === 0`,
+      "the stopped turn to leave the panel",
+      30000,
+    );
+    check(true, "clicking Stop ends the background turn");
+    check(
+      (await cdp.eval("document.querySelectorAll('#sessions .dot').length")) === 0,
+      "and the sidebar stops marking it as running",
+    );
+    check(
+      (await cdp.eval("document.getElementById('transcript').innerHTML.length")) >= beforeStop,
+      "the work it had already done is still on screen",
+    );
+    // Stopping one session must not touch another.
+    check(
+      !!(await openSession("second-ok")),
+      "the other session is still there",
+    );
+    await cdp.waitFor(
+      `document.getElementById('transcript').textContent.includes('second-ok')`,
+      "and still shows its own conversation",
+      30000,
+    );
+    check(true, "stopping one session leaves the others alone");
+    void taskSession;
+
     console.log("\nno uncaught exceptions");
     check(
       cdp.exceptions.length === 0,

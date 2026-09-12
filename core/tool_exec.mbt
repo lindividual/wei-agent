@@ -302,3 +302,59 @@ pub fn apply_edits(
   out.write_string(content[cursor:].to_owned())
   Ok(out.to_string())
 }
+
+///|
+/// One line describing what a tool call is doing, for a reader watching it run.
+///
+/// Deliberately not the whole argument object: the point is to answer "what is it doing
+/// right now" at a glance — the command, the file, the pattern — where JSON would bury that
+/// in punctuation. Falls back to the whole object when nothing recognisable is there, so an
+/// unfamiliar tool still says something rather than nothing.
+pub fn tool_summary(arguments : Json) -> String {
+  for key in ["command", "path", "pattern", "query", "url"] {
+    match arg_string(arguments, key) {
+      Some(value) if value != "" => return clip_one_line(value, 120)
+      _ => ()
+    }
+  }
+  let text = arguments.stringify()
+  if text == "{}" || text == "null" {
+    ""
+  } else {
+    clip_one_line(text, 120)
+  }
+}
+
+///|
+fn clip_one_line(text : String, limit : Int) -> String {
+  let out = StringBuilder()
+  let mut count = 0
+  let mut started = false
+  let mut gap = false
+  let mut clipped = false
+  for c in text {
+    let is_space = c == ' ' || c == '\n' || c == '\t' || c == '\r'
+    if is_space {
+      if started {
+        gap = true
+      }
+      continue
+    }
+    if count >= limit {
+      clipped = true
+      break
+    }
+    if gap {
+      out.write_char(' ')
+      count += 1
+      gap = false
+    }
+    out.write_char(c)
+    count += 1
+    started = true
+  }
+  if clipped {
+    out.write_string("…")
+  }
+  out.to_string()
+}

@@ -247,6 +247,16 @@ struct Runner {
   mut waiting : Int
   mut busy : Bool
   aborting : AbortFlag
+  /// What the running turn is doing, for the tasks panel.
+  mut phase : String
+  /// When the running turn started, for the tasks panel's elapsed time.
+  mut since : Int64
+  /// The tool that is running, so a stop can reach its process.
+  mut tool : @agent.ToolHandle?
+  /// Bumped by a stop. A queued prompt captured the epoch when it was accepted, so a stop
+  /// drops everything that had not started yet — the reader who stops a session means the
+  /// session, not just the turn that happened to be running.
+  mut epoch : Int
   /// Turns started, which is what the exchange anchors are numbered by.
   mut turn : Int
   /// Output of the running turn as it has arrived. Kept so a browser that switches back
@@ -275,6 +285,10 @@ fn Runner::new(session : @core.Session, path : String) -> Runner {
     waiting: 0,
     busy: false,
     aborting: { value: false, },
+    phase: "",
+    since: 0L,
+    tool: None,
+    epoch: 0,
     turn: 0,
     live: [],
     prompt: "",
@@ -344,6 +358,22 @@ fn App::display(self : App, runner : Runner) -> Unit {
     Some(_) => ()
   }
   self.displayed = runner.path
+}
+
+///|
+/// Ask a session to stop: the turn that is running, the command it is running, and the
+/// prompts that have not started.
+///
+/// All three, because they are one intention. Setting the flag alone would leave the reader
+/// waiting for a `sleep 300` to finish; dropping the queue is what makes "stop" mean the
+/// session rather than the one turn that happened to be in flight.
+fn Runner::stop(self : Runner) -> Unit {
+  self.aborting.value = true
+  self.epoch += 1
+  match self.tool {
+    Some(running) => (running.stop)()
+    None => ()
+  }
 }
 
 ///|
@@ -580,8 +610,19 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
   runner.turns.acquire()
   defer runner.turns.release()
   runner.waiting -= 1
+  let my_epoch = runner.epoch
+  // A queued prompt that a stop has already answered does not run at all.
+  if runner.waiting < 0 {
+    runner.waiting = 0
+  }
+  if runner.aborting.value && my_epoch != runner.epoch {
+    (runner.turns).release()
+    return
+  }
   runner.busy = true
   runner.aborting.value = false
+  runner.phase = "waiting for the model"
+  runner.since = @env.now().reinterpret_as_int64()
   runner.turn += 1
   runner.live = []
   runner.prompt = text
@@ -607,6 +648,17 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
       }
       None => ()
     }
+  }
+  // The tasks panel is refreshed when the phase changes, not on a timer: the elapsed time in
+  // it is counted by the browser, so a second-by-second frame would be paying for a number
+  // the page can work out itself.
+  let refresh_tasks = async fn() {
+    app.hub.broadcast(
+      @html.Patch::Replace(
+        target="tasks",
+        html=render_tasks(app, app.shown()),
+      ).to_sse(),
+    )
   }
   let status = async fn(label : String) {
     runner.status = label
@@ -764,6 +816,14 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
       should_stop=() => runner.aborting.value,
       on_tool~,
       on_progress~,
+      on_tool_process=handle => {
+        runner.phase = match handle {
+          Some(running) => "running \{running.name}: \{running.detail}"
+          None => "waiting for the model"
+        }
+        runner.tool = handle
+        (refresh_tasks)()
+      },
     )
     runner.session = result.session
     app.hub.broadcast(
@@ -792,8 +852,12 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
     _ => ()
   }
   runner.live = []
+  runner.prompt = ""
+  runner.phase = ""
+  runner.tool = None
   runner.busy = false
   refresh_sidebar()
+  refresh_tasks()
 }
 
 ///|
@@ -822,6 +886,25 @@ async fn workspace_items_and_render(app : App, shown : Runner) -> String {
 }
 
 // ── The page ───────────────────────────────────────────────────────────────
+
+///|
+/// The tasks panel, as HTML. Empty when nothing is running.
+fn render_tasks(app : App, _shown : Runner) -> String {
+  let items : Array[@html.TaskItem] = []
+  for runner in app.registry {
+    if runner.is_running() {
+      items.push({
+        path: runner.path,
+        label: @html.clip_label(runner.prompt),
+        session: short_id(runner.path),
+        phase: runner.phase,
+        since: runner.since,
+        queued: runner.waiting,
+      })
+    }
+  }
+  @html.render_tasks(items).render()
+}
 
 ///|
 /// What is open: the session, the model, and — once the turn reporting fills them in — the
@@ -930,6 +1013,7 @@ async fn main {
         html=transcript_node(app, shown).render(),
       ),
       @html.Patch::Replace(target="sessions", html=sidebar),
+      @html.Patch::Replace(target="tasks", html=render_tasks(app, shown)),
       @html.Patch::Replace(target="bar", html=bar_node(app, shown).render()),
       @html.Patch::Status(text=app.status_line(shown)),
     ]
@@ -945,7 +1029,12 @@ async fn main {
     let routes : @server.Routes = {
       page: async fn() {
         let shown = app.shown()
-        let sidebar = @html.raw(workspace_items_and_render(app, shown))
+        // The sidebar holds two regions with different reasons to change: what is running, and
+        // what exists.
+        let sidebar = @html.render_sidebar(
+          @html.raw(render_tasks(app, shown)),
+          @html.raw(workspace_items_and_render(app, shown)),
+        )
         let column = @html.el("div", attrs=[@html.cls("column")], children=[
           bar_node(app, shown),
           transcript_node(app, shown),
@@ -953,7 +1042,8 @@ async fn main {
           @html.composer(),
         ])
         let body = @html.el("div", attrs=[@html.cls("layout")], children=[
-          sidebar, column,
+          sidebar,
+          column,
         ])
         @html.render_page("pi", @html.stylesheet(), client_script(), [body]).render()
       },
@@ -971,9 +1061,26 @@ async fn main {
         // is unaffected, which is the whole point.
         ignore(group.spawn(() => run_prompt(app, shown, text)))
       },
-      abort: () => {
-        let shown = app.shown()
-        shown.aborting.value = true
+      abort: (path : String) => {
+        // Empty means the session on screen, which is what the Stop button next to the
+        // composer sends.
+        let target = if path == "" {
+          app.shown()
+        } else {
+          match app.runner(path) {
+            Some(runner) => runner
+            None => app.shown()
+          }
+        }
+        target.stop()
+        // The panel and the sidebar both change the moment a stop is asked for, rather than
+        // when the turn finally notices.
+        app.hub.broadcast(
+          @html.Patch::Replace(
+            target="tasks",
+            html=render_tasks(app, app.shown()),
+          ).to_sse(),
+        )
       },
       switch_session: fn(path) { ignore(queue_try_put(jobs, Switch(path))) },
       new_session: fn(dir) { ignore(queue_try_put(jobs, New(dir))) },
