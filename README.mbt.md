@@ -108,6 +108,45 @@ cache 读、总花费、上下文占用。数字来自日志（`Session::usage`�
 `Raw` 是唯一逃生口且只用于 markdown 渲染器的输出。`html/escape_test.mbt` 有四个
 专门的注入测试（script 标签、事件处理器属性、属性逃逸、提前闭合标签）。
 
+## 后台任务：调用结束之后还在跑的东西
+
+一个命令可以在**工具调用结束时仍然活着**：`npm run dev &`、`sleep 300 &`、`some-server &`。
+工具调用结束了，turn 结束了，侧边栏那个「正在跑什么」的面板里什么都没有 —— 只有一个没人在看
+的进程。这正是「怕忘记关」的来源，所以它需要自己的记录。
+
+这部分是照 [dsh](https://github.com/deepseek-ai/deepseek-harness) 的 background task runtime
+做的（`docs/subsystems/jobs.md`），它的模型是：
+
+| dsh 的做法 | 我们是否采用 |
+|---|---|
+| job 有 id（`<kind>-N`）、kind、label（命令）、status（running/stopping/completed/killed/failed）、startedAt/finishedAt | ✅ 同一个状态机与同一行格式（`<id> [<kind>] <status> — <label>`） |
+| **job 属于会话**，访问按 owner session 划界 | ✅ 按会话记录；面板跨会话一起列出（"还剩什么在跑"是跨会话的问题） |
+| 每个 owner 上限 10 个（默认），超了报错让调用方先清理 | ✅ 同一个数字与同一句话：**拒绝发生在启动之前** |
+| 给模型三个工具：`job_list` / `job_output` / `job_kill` | ⏳ 未做（下一步）；目前是给**人**看的面板 |
+| 完成时给 owner 注入通知（busy 下一步注入，idle 可能唤醒，唤醒有次数上限） | ⏳ 未做；我们的等价物是面板里那一行从 running 变成 completed |
+| owner 销毁时 cancel 并 await；teardown 的 cancel 把记录标成 reported | 部分：进程退出时 `kill 全部 live job`；我们没有 session 关闭这个动作 |
+| 杀进程用 **managed process group**：Linux 临时 user-systemd scope（连 `setsid`/被重新父化的后代都收），Windows Job 对象，macOS 退化为 detached 进程组并**明确承认逃出进程组的后代可能管不住** | 见下 |
+
+**机制上我们和 dsh 不同，原因是运行时不同，而且我先做了实测**：MoonBit 的 async 运行时没有
+`setsid`，也没有「给任意 pid 发信号」的接口；实测子进程**继承我们自己的进程组**（没有新 session），
+所以整组杀会把服务器自己杀掉。于是改成两件可移植的事：
+
+1. **让 shell 在退出前自报进程表**：命令后面追加 `ps -eo pid=,ppid=` 写进临时文件。这是后台子进程
+   仍然挂在 shell 上的最后时刻；此后它被重新父化，但**我们记住了 pid**（重新父化不改 pid）。
+2. **一个退避采样器**（0.3s/1s/3s/10s/30s，最多 5 次）覆盖 shell 自己来不及上报的情况：命令被
+   超时杀掉，或者命令自己 `exit` 了。超时那一刻最后采到的进程树就是要去清理的东西。
+
+杀进程走 `/bin/kill`（`-TERM` → 3 秒宽限 → `-KILL`），存活检查走 `kill -0` —— 都是进程，不需要 FFI。
+**已知边界**（和 dsh 在 macOS 上承认的是同一类）：在最后一次采样之后才启动、并且父进程已被杀掉的
+后代可能查不到。要根治得像 dsh 那样有一个真正的会话/进程组所有者（Linux 上 systemd scope）。
+
+还有一个陷阱值得记下来：**输出不能走管道**。后台子进程会继承 stdout 管道，于是「读到 EOF」要等到
+那个后台进程结束 —— `sleep 60 &` 会把工具调用阻塞一分钟，正好抵消了背景化。所以输出重定向到临时
+文件，子进程可以继续往里写而不阻塞任何人（这也是 `npm run dev > log 2>&1 &` 之所以是常规写法的原因）。
+
+模型也会被告知：工具结果里追加一行「this command left N process(es) running (pid …)」，因为决定
+背景化的是它，而它看不到侧边栏。
+
 ## 同一会话内一次只跑一个 turn
 
 会话之间并行，但**同一个会话内的 turn 严格串行**（每个会话一个 turn 槽位）。这条是
@@ -205,11 +244,11 @@ entry 之间（模型、工具），四十条 entry 共用一个时间戳的日�
 
 ```bash
 moon test                    # 全包
-moon test -p core            # 182 个测试
-moon test -p platform        # 29 个测试，工具、存储与工作区注册表在真实文件系统上
+moon test -p core            # 190 个测试
+moon test -p platform        # 36 个测试，工具、存储、工作区注册表与后台进程在真实系统上
 moon test -p html            # 35 个测试，含侧边栏结构与 4 个 HTML 注入测试
 moon test -p server          # 8 个测试，起真 socket 验传输
-moon test -p agent           # 7 个测试，假模型端到端跑 turn（含停下时杀掉命令）
+moon test -p agent           # 10 个测试，假模型端到端跑 turn（含停下时杀掉命令、后台任务登记）
 moon run verify              # 全量：160 个文件、46,399 条 entry 往返
 moon run cli -- "hello"      # 打一次真实 DeepSeek，端到端
 node harness/ui-browser-check.mjs   # 真实浏览器验收（自己起 headless Chrome）

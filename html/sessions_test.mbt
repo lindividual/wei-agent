@@ -187,10 +187,10 @@ test "a titled workspace and the add row" {
     sessions: [],
     hidden: 0,
   }
-  let html = render_sidebar(
+  let html = render_sidebar([
     el("div", attrs=[attr("id", "tasks")], children=[]),
     frag([render_sessions([titled], 1_700_000_000_000L), render_add_workspace()]),
-  ).render()
+  ]).render()
   assert_true(html.contains(">the app<"), msg=html)
   // The path stays reachable even when a title is shown instead.
   assert_true(html.contains("title=\"/Users/x/src/app\""), msg=html)

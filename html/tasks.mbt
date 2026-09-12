@@ -93,3 +93,108 @@ pub fn render_tasks(items : Array[TaskItem]) -> Node {
     children=if rows.is_empty() { [] } else { [panel("Running", rows)] },
   )
 }
+
+///|
+/// One background job: work that outlived the tool call that started it.
+pub(all) struct JobItem {
+  id : String
+  /// The command, as it was asked.
+  label : String
+  kind : String
+  status : String
+  /// How long it has been running, or how long it ran.
+  age_ms : Int64
+  /// The processes still alive for it, so a reader can recognise them in `ps`.
+  pids : Array[Int]
+  live : Bool
+  /// How it ended, once it has.
+  detail : String
+} derive(Eq, Debug)
+
+///|
+/// The background panel: nothing at all when nothing is running.
+///
+/// Separate from the turn panel above it because the two answer different questions: a turn is
+/// work the reader is waiting on, a job is work that is still there after they stopped waiting.
+/// That second thing is the one that gets forgotten.
+pub fn render_jobs(items : Array[JobItem], now : Int64) -> Node {
+  let rows : Array[Node] = []
+  for item in items {
+    let meta : Array[Node] = [
+      txt(
+        if item.detail == "" {
+          item.status
+        } else {
+          "\{item.status} · \{item.detail}"
+        },
+      ),
+      txt(" · "),
+      el("time", attrs=[attr("data-since", "\{now - item.age_ms}")], children=[
+        txt(duration_label(item.age_ms)),
+      ]),
+    ]
+    if !item.pids.is_empty() {
+      meta.push(txt(" · pid \{pid_text(item.pids)}"))
+    }
+    let head : Array[Node] = [
+      el("span", attrs=[cls("label"), attr("title", item.label)], children=[
+        txt(item.label),
+      ]),
+    ]
+    if item.live {
+      head.push(
+        el(
+          "button",
+          attrs=[
+            cls("stop"),
+            attr("type", "button"),
+            attr("data-kill", item.id),
+            attr("title", "stop this job and everything it started"),
+          ],
+          children=[txt("Kill")],
+        ),
+      )
+    }
+    let children : Array[Node] = [
+      el("div", attrs=[cls("row")], children=head),
+      el("div", attrs=[cls("tool")], children=meta),
+    ]
+    rows.push(
+      el(
+        "div",
+        attrs=[cls(if item.live { "task" } else { "task done" })],
+        children~,
+      ),
+    )
+  }
+  el(
+    "div",
+    attrs=[attr("id", "jobs")],
+    children=if rows.is_empty() { [] } else { [panel("Background", rows)] },
+  )
+}
+
+///|
+/// A duration the way a reader says it.
+pub fn duration_label(ms : Int64) -> String {
+  let seconds = ms / 1000L
+  if seconds < 60L {
+    "\{seconds}s"
+  } else if seconds < 3600L {
+    "\{seconds / 60L}m \{seconds % 60L}s"
+  } else {
+    "\{seconds / 3600L}h \{(seconds % 3600L) / 60L}m"
+  }
+}
+
+///|
+fn pid_text(pids : Array[Int]) -> String {
+  let out = StringBuilder()
+  for pid in pids {
+    if out.to_string() != "" {
+      out.write_string(", ")
+    }
+    out.write_string("\{pid}")
+  }
+  out.to_string()
+}

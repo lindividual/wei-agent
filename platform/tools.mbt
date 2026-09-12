@@ -40,9 +40,11 @@ pub async fn execute_tool(
   name : String,
   arguments : Json,
   cwd : String,
+  /// Only `bash` reports one: what it started, and what is still running when it returned.
+  watcher? : ExecWatcher,
 ) -> @core.ToolOutput {
   match name {
-    "bash" => run_bash(arguments, cwd)
+    "bash" => run_bash(arguments, cwd, watcher?)
     "read" => run_read(arguments, cwd)
     "write" => run_write(arguments, cwd)
     "edit" => run_edit(arguments, cwd)
@@ -64,7 +66,23 @@ pub async fn execute_tool(
 // ── bash ───────────────────────────────────────────────────────────────────
 
 ///|
-async fn run_bash(arguments : Json, cwd : String) -> @core.ToolOutput {
+/// What the tool layer tells its caller about a command it ran.
+///
+/// Two moments rather than one because they answer different needs: the pids as they are
+/// discovered are what a stop has to signal, and the final outcome is what a record has to say.
+pub(all) struct ExecWatcher {
+  /// Pids seen in the command's process tree, as they are found.
+  started : (Array[Int]) -> Unit
+  /// The command returned (or timed out): what it left behind.
+  finished : (ExecOutcome) -> Unit
+}
+
+///|
+async fn run_bash(
+  arguments : Json,
+  cwd : String,
+  watcher? : ExecWatcher,
+) -> @core.ToolOutput {
   let command = @core.arg_required_string(arguments, "command")
   if command.trim() == "" {
     return @core.ToolOutput::error("The command is empty.")
@@ -74,8 +92,57 @@ async fn run_bash(arguments : Json, cwd : String) -> @core.ToolOutput {
     Some(seconds) if seconds > 0 => Some(seconds * 1000)
     _ => None
   }
-  let result = exec(command, cwd, timeout)
-  @core.format_exec_result(result, cwd)
+  let mut lingering : Array[Int] = []
+  let outcome = exec_managed(
+    command,
+    cwd~,
+    timeout_ms?=timeout,
+    on_shell_pid=pid => {
+      match watcher {
+        Some(watch) => (watch.started)([pid])
+        None => ()
+      }
+    },
+    on_sample=pids => {
+      match watcher {
+        Some(watch) => (watch.started)(pids)
+        None => ()
+      }
+    },
+  )
+  match watcher {
+    Some(watch) => (watch.finished)(outcome)
+    None => ()
+  }
+  lingering = outcome.lingering
+  let formatted = @core.format_exec_result(outcome.result, cwd)
+  if lingering.is_empty() {
+    return formatted
+  }
+  // Said in the tool result as well as in the panel: a command that returned while its work
+  // continues is invisible to the model otherwise, and the model is who decided to background it.
+  // `Text` alone is ambiguous with `StreamEvent::Text`, hence the qualified form.
+  let note : @core.Content = @core.Content::Text(
+    "\n\n[this command left \{lingering.length()} process(es) running (pid \{pids_text(lingering)}). They keep running until stopped, and are listed in the sidebar under Background.]",
+  )
+  let content : Array[@core.Content] = []
+  for block in formatted.content {
+    content.push(block)
+  }
+  content.push(note)
+  { content, is_error: formatted.is_error, details: formatted.details, }
+}
+
+///|
+fn pids_text(pids : Array[Int]) -> String {
+  let out = StringBuilder()
+  for pid in pids {
+    if out.to_string() != "" {
+      out.write_string(", ")
+    }
+    out.write_string("\{pid}")
+  }
+  out.to_string()
 }
 
 // ── read ───────────────────────────────────────────────────────────────────

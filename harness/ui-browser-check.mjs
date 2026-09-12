@@ -272,6 +272,7 @@ async function main() {
   const profile = mkdtempSync(join(tmpdir(), "pws-chrome-"));
   mkdirSync(join(profile, "Default"), { recursive: true });
 
+  let backgroundPids = [];
   let server = startServer(store);
   let chrome = null;
   try {
@@ -741,6 +742,68 @@ async function main() {
     check(true, "stopping one session leaves the others alone");
     void taskSession;
 
+    console.log("\nbackground jobs (work that outlives its tool call)");
+    // A command that returns immediately and leaves a process behind: the case that gets
+    // forgotten, and the one this whole panel exists for.
+    await cdp.eval(
+      `(() => {
+        const input = document.getElementById('prompt');
+        input.value = "Run this bash command exactly with the bash tool: /bin/sleep 300 & echo started. Do not wait for it, do not kill it.";
+        document.getElementById('composer').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.querySelectorAll('#jobs .task').length >= 1`,
+      "the background process to be listed",
+      120000,
+    );
+    const jobText = await cdp.eval("document.getElementById('jobs').textContent");
+    check(/running/.test(jobText), "the job is listed as running", jobText);
+    check(
+      (await cdp.eval("document.querySelectorAll('#jobs [data-kill]').length")) >= 1,
+      "the job offers a way to stop it",
+    );
+    // The pids shown are the ones to check: a panel that says it killed something has to be
+    // right about it.
+    backgroundPids = (jobText.match(/(\d+)/g) ?? []).map(Number).filter((n) => n > 1000);
+    const aliveBefore = backgroundPids.filter((pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    check(
+      aliveBefore.length >= 1,
+      "the listed pids are real processes",
+      `pids=${backgroundPids.join(",")}`,
+    );
+
+    await cdp.eval("document.querySelector('#jobs [data-kill]').click()");
+    await cdp.waitFor(
+      `document.querySelectorAll('#jobs [data-kill]').length === 0`,
+      "the job to stop being listed as live",
+      30000,
+    );
+    check(true, "killing it from the panel settles the job");
+    await sleep(500);
+    const aliveAfter = backgroundPids.filter((pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    check(
+      aliveAfter.length === 0,
+      "and the processes are actually gone",
+      `still alive: ${aliveAfter.join(",")}`,
+    );
+    backgroundPids = [];
+
     console.log("\nworkspaces (adding a directory)");
     // A project directory the server has never seen, with nothing in it.
     const fresh = `${store}-added-project`;
@@ -846,6 +909,15 @@ async function main() {
     await cdp.screenshot(shot);
     console.log(`\nscreenshot: ${shot}`);
   } finally {
+    // A failed check must not leave the process it started behind — that is precisely the
+    // failure the check is about.
+    for (const pid of backgroundPids) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
     server.kill("SIGKILL");
     chrome?.kill("SIGKILL");
     if (!KEEP) {

@@ -90,8 +90,8 @@ pub fn render_add_workspace() -> Node {
 /// The sidebar holds two independent regions: what is running, and what exists. They change
 /// for different reasons — a tool starting versus a session being written — so they are
 /// replaced separately rather than as one block.
-pub fn render_sidebar(tasks : Node, sessions : Node) -> Node {
-  el("aside", attrs=[cls("sidebar")], children=[tasks, sessions])
+pub fn render_sidebar(nodes : Array[Node]) -> Node {
+  el("aside", attrs=[cls("sidebar")], children=nodes)
 }
 
 ///|

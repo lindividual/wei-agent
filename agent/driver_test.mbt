@@ -619,3 +619,151 @@ async test "stopping a turn kills the tool that is running" {
     assert_true(is_error)
   })
 }
+
+///|
+/// A command that returns while its work continues becomes a job.
+///
+/// This is the case the whole job layer exists for: the tool call is over, the turn is over, and
+/// something is still running. Without a record it is a process nobody is looking at — the thing
+/// that gets forgotten.
+async test "a backgrounded command is recorded as a job" {
+  let dir = scratch("bg-job")
+  let seen : Array[String] = []
+  with_fake_model(
+    [bash_tool_call_sse("/bin/sleep 60 & echo started"), text_sse("ok")],
+    seen,
+    async fn(base_url) {
+      let ctx = context_for(dir, base_url, [])
+      let result = @agent.run_turn(
+        ctx,
+        "start something",
+        FIXED_TIME,
+        thinking_level="high",
+      )
+      assert_eq(result.tool_calls, 1)
+      let live = ctx.jobs.live()
+      assert_eq(
+        live.length(),
+        1,
+        msg="expected one live job, saw \{live.length()}",
+      )
+      let job = live[0]
+      assert_eq(job.kind, "bash")
+      assert_eq(job.session, ctx.session_path)
+      assert_true(job.label.contains("sleep 60"), msg=job.label)
+      assert_true(
+        job.pids.length() >= 1,
+        msg="a job without pids cannot be stopped",
+      )
+      // The model is told, in the tool result, that something was left running.
+      let session = logged(ctx.session_path)
+      let mut told = ""
+      for entry in session.entries {
+        match entry.kind {
+          @core.Message(message~) =>
+            match message {
+              @core.ToolResult(result) =>
+                for block in result.content {
+                  match block {
+                    @core.Text(text) => told = told + text
+                    _ => ()
+                  }
+                }
+              _ => ()
+            }
+          _ => ()
+        }
+      }
+      assert_true(told.contains("left 1 process"), msg=told)
+
+      // Stopping it through the store is what the sidebar's Kill button does.
+      let pids = ctx.jobs.request_stop(job.id)
+      assert_true(@platform.kill_pids(pids) >= 1)
+      ctx.jobs.finish(job.id, Killed, detail="killed", finished_at=FIXED_TIME)
+      assert_true(ctx.jobs.live().is_empty())
+      for pid in pids {
+        assert_false(@platform.pid_alive(pid), msg="pid \{pid} should be gone")
+      }
+    },
+  )
+}
+
+///|
+/// A foreground command leaves no job behind: the panel is for what is still running.
+async test "a foreground command leaves no job record" {
+  let dir = scratch("fg-job")
+  let seen : Array[String] = []
+  with_fake_model(
+    [bash_tool_call_sse("/bin/echo hello"), text_sse("ok")],
+    seen,
+    async fn(base_url) {
+      let ctx = context_for(dir, base_url, [])
+      ignore(
+        @agent.run_turn(ctx, "say hello", FIXED_TIME, thinking_level="high"),
+      )
+      assert_true(
+        ctx.jobs.list().is_empty(),
+        msg="\{ctx.jobs.list().length()} records",
+      )
+    },
+  )
+}
+
+///|
+/// The per-session limit dsh sets at ten: past it, the command is refused rather than started.
+async test "a session past the background limit is told to clean up" {
+  let dir = scratch("bg-limit")
+  let seen : Array[String] = []
+  with_fake_model(
+    [bash_tool_call_sse("/bin/echo should-not-run"), text_sse("ok")],
+    seen,
+    async fn(base_url) {
+      let ctx = context_for(dir, base_url, [])
+      // Fill the budget with jobs that stand in for running processes.
+      for i in 0..<@core.max_live_jobs_per_session() {
+        ignore(
+          ctx.jobs.start(
+            kind="bash",
+            label="standing job \{i}",
+            session=ctx.session_path,
+            started_at=FIXED_TIME,
+            pids=[],
+          ),
+        )
+      }
+      let result = @agent.run_turn(
+        ctx,
+        "run it",
+        FIXED_TIME,
+        thinking_level="high",
+      )
+      assert_eq(result.tool_calls, 0)
+      let session = logged(ctx.session_path)
+      let mut said = ""
+      for entry in session.entries {
+        match entry.kind {
+          @core.Message(message~) =>
+            match message {
+              @core.ToolResult(result) => {
+                assert_true(result.is_error)
+                for block in result.content {
+                  match block {
+                    @core.Text(text) => said = said + text
+                    _ => ()
+                  }
+                }
+              }
+              _ => ()
+            }
+          _ => ()
+        }
+      }
+      assert_true(said.contains("Refused"), msg=said)
+      // Nothing was started, so the budget is unchanged.
+      assert_eq(
+        ctx.jobs.live_count(ctx.session_path),
+        @core.max_live_jobs_per_session(),
+      )
+    },
+  )
+}

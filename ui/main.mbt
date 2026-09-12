@@ -315,6 +315,10 @@ struct App {
   hub : @server.Hub
   /// Open sessions, in the order they were opened.
   registry : Array[Runner]
+  /// Background work, across every session. One store rather than one per session: the question
+  /// "what is still running" is asked about the process, and a reader should not have to open
+  /// five sessions to answer it.
+  jobs : @core.JobStore
   /// The path of the session being displayed. Shared by every browser: there is one
   /// document, so there is one answer to "what is on screen".
   mut displayed : String
@@ -672,6 +676,16 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
       ),
     )
   }
+  // The background panel changes when a command outlives its tool call, which is a turn event;
+  // the supervisor task covers the other direction, a process exiting on its own.
+  let refresh_jobs = async fn() {
+    app.hub.broadcast(
+      @html.Patch::Replace(
+        target="jobs",
+        html=render_jobs(app, @env.now().reinterpret_as_int64()),
+      ).to_sse(),
+    )
+  }
   // The bar's figures are per session and come from the log, so they are recomputed when a
   // turn changes them rather than on every frame.
   let refresh_bar = async fn() {
@@ -686,6 +700,7 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
   refresh_sidebar()
   refresh_tasks()
   refresh_bar()
+  refresh_jobs()
 
   // The reader's message appears at once, then a throwaway container everything the
   // model produces lands in. When the turn ends the container is replaced by the
@@ -817,6 +832,7 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
     system_prompt=@core.build_system_prompt(runner.cwd, app.tools),
     tools=app.tools,
     model=app.model,
+    jobs=app.jobs,
   )
   // A failed turn must not take the process down, and must not leave the session marked
   // as busy: the log is on disk, and the reader needs to see what happened.
@@ -873,6 +889,7 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
   refresh_sidebar()
   refresh_tasks()
   refresh_bar()
+  refresh_jobs()
 }
 
 ///|
@@ -901,6 +918,25 @@ async fn workspace_items_and_render(app : App, shown : Runner) -> String {
 }
 
 // ── The page ───────────────────────────────────────────────────────────────
+
+///|
+/// The background panel, as HTML: every job, live ones first.
+fn render_jobs(app : App, now : Int64) -> String {
+  let items : Array[@html.JobItem] = []
+  for job in app.jobs.list() {
+    items.push({
+      id: job.id,
+      label: job.label,
+      kind: job.kind,
+      status: job.status.to_string(),
+      age_ms: job.age_ms(now),
+      pids: job.pids,
+      live: job.is_live(),
+      detail: job.detail,
+    })
+  }
+  @html.render_jobs(items, now).render()
+}
 
 ///|
 /// The tasks panel, as HTML. Empty when nothing is running.
@@ -1073,6 +1109,7 @@ async fn main {
     tools: @core.builtin_tools(),
     hub: @server.Hub::new(),
     registry: [first],
+    jobs: @core.JobStore::new(),
     displayed: first.path,
   }
   // Display changes go through a queue so that the order they arrive in is the order they
@@ -1090,6 +1127,10 @@ async fn main {
       ),
       @html.Patch::Replace(target="sessions", html=sidebar),
       @html.Patch::Replace(target="tasks", html=render_tasks(app, shown)),
+      @html.Patch::Replace(
+        target="jobs",
+        html=render_jobs(app, @env.now().reinterpret_as_int64()),
+      ),
       @html.Patch::Replace(target="bar", html=bar_node(app, shown).render()),
       @html.Patch::Status(text=app.status_line(shown)),
     ]
@@ -1107,10 +1148,11 @@ async fn main {
         let shown = app.shown()
         // The sidebar holds two regions with different reasons to change: what is running, and
         // what exists.
-        let sidebar = @html.render_sidebar(
+        let sidebar = @html.render_sidebar([
           @html.raw(render_tasks(app, shown)),
+          @html.raw(render_jobs(app, @env.now().reinterpret_as_int64())),
           @html.raw(workspace_items_and_render(app, shown)),
-        )
+        ])
         let column = @html.el("div", attrs=[@html.cls("column")], children=[
           bar_node(app, shown),
           transcript_node(app, shown),
@@ -1159,6 +1201,24 @@ async fn main {
       },
       switch_session: fn(path) { ignore(queue_try_put(jobs, Switch(path))) },
       new_session: fn(dir) { ignore(queue_try_put(jobs, New(dir))) },
+      kill_job: async fn(id) {
+        // Ask, then insist: the status shows "stopping" until the processes are actually gone,
+        // which is what tells a reader whether a process is ignoring SIGTERM.
+        let pids = app.jobs.request_stop(id)
+        ignore(@platform.kill_pids(pids))
+        app.jobs.finish(
+          id,
+          @core.JobStatus::Killed,
+          detail="stopped from the panel",
+          finished_at=@env.now().reinterpret_as_int64(),
+        )
+        app.hub.broadcast(
+          @html.Patch::Replace(
+            target="jobs",
+            html=render_jobs(app, @env.now().reinterpret_as_int64()),
+          ).to_sse(),
+        )
+      },
       add_workspace: async fn(path) {
         match @platform.canonical_dir(path) {
           None =>
@@ -1176,6 +1236,36 @@ async fn main {
       },
     }
 
+    // Jobs are watched, not polled by the reader: a process that exits on its own has to stop
+    // being listed as running, and the exit code is worth seeing. One `kill -0` per recorded pid
+    // every couple of seconds is the whole cost.
+    ignore(
+      group.spawn(() => {
+        while true {
+          @async.sleep(2000)
+          let mut changed = false
+          for job in app.jobs.live() {
+            if @platform.live_of(job.pids).is_empty() {
+              app.jobs.finish(
+                job.id,
+                @core.JobStatus::Completed,
+                detail="exited on its own",
+                finished_at=@env.now().reinterpret_as_int64(),
+              )
+              changed = true
+            }
+          }
+          if changed {
+            app.hub.broadcast(
+              @html.Patch::Replace(
+                target="jobs",
+                html=render_jobs(app, @env.now().reinterpret_as_int64()),
+              ).to_sse(),
+            )
+          }
+        }
+      }),
+    )
     ignore(
       group.spawn(() => {
         while true {

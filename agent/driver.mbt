@@ -26,6 +26,10 @@ pub(all) struct AgentContext {
   context_window : Int
   system_prompt : String
   tools : Array[@core.ToolDef]
+  /// Background work this session has started. It lives with the driver rather than with the UI
+  /// because the driver is what starts it, and because a record kept by the tool layer would be
+  /// lost the moment the tool call returned.
+  jobs : @core.JobStore
 }
 
 ///|
@@ -41,6 +45,7 @@ pub fn AgentContext::new(
   api_key~ : String,
   system_prompt~ : String,
   tools~ : Array[@core.ToolDef],
+  jobs? : @core.JobStore = @core.JobStore::new(),
   model? : String = "deepseek-v4-flash",
   base_url? : String = "https://api.deepseek.com",
   pricing? : @core.Pricing = @core.deepseek_v4_flash_pricing(),
@@ -57,6 +62,7 @@ pub fn AgentContext::new(
     context_window,
     system_prompt,
     tools,
+    jobs,
   }
 }
 
@@ -468,21 +474,107 @@ async fn run_tools(
   ignore(@core.plan_shape(plans))
 
   let mut current = session
+  let mut executed = 0
   for block in calls {
     let (id, name, arguments) = match block {
       @core.ToolCall(id~, name~, arguments~) => (id, name, arguments)
       _ => ("", "", Json::object(Map([])))
     }
-    // Run the tool in a task of its own so that it can be cancelled on its own: cancelling
-    // the turn would abandon the partial answer the reader has already seen, and a stop
-    // should still leave an aborted turn in the log.
+    // Background work is accounted for per session, and dsh's admission rule is adopted whole:
+    // past the limit the command is refused with an instruction to clean up, because "start
+    // another background job" must not become a way to accumulate processes nobody counts.
+    let job_id : String? = if name == "bash" {
+      if ctx.jobs.live_count(ctx.session_path) >=
+        @core.max_live_jobs_per_session() {
+        let refusal = @core.Message::ToolResult({
+          tool_call_id: id,
+          tool_name: name,
+          content: [
+            @core.Text(
+              "Refused: this session already has \{@core.max_live_jobs_per_session()} processes running in the background. Stop one of them in the sidebar before starting another.",
+            ),
+          ],
+          is_error: true,
+          timestamp,
+          details: None,
+        })
+        current = commit(
+          current,
+          ctx.session_path,
+          @core.Message(message=refusal),
+          now_ms(),
+        )
+        continue
+      }
+      Some(
+        ctx.jobs.start(
+          kind="bash",
+          label=@core.tool_summary(arguments),
+          session=ctx.session_path,
+          started_at=now_ms(),
+          pids=[],
+        ),
+      )
+    } else {
+      None
+    }
+    // Run the tool in a task of its own so that it can be cancelled on its own: cancelling the
+    // turn would abandon the partial answer the reader has already seen, and a stop should still
+    // leave an aborted turn in the log.
     let output = @async.with_task_group(group => {
       let task = group.spawn(() => {
-        try @platform.execute_tool(name, arguments, ctx.cwd) catch {
+        try
+          @platform.execute_tool(name, arguments, ctx.cwd, watcher={
+            started: pids => {
+              match job_id {
+                Some(id) => ctx.jobs.observe(id, pids, tail="")
+                None => ()
+              }
+            },
+            finished: outcome => {
+              match job_id {
+                Some(id) => {
+                  ctx.jobs.observe(id, outcome.children, tail="")
+                  if outcome.lingering.is_empty() {
+                    // Finished and left nothing behind: not background work, so the record goes.
+                    // A panel that listed every tool call would be a log, not an answer.
+                    ctx.jobs.forget(id)
+                  } else {
+                    // Still running, which is the whole point of the record.
+                    ctx.jobs.observe(id, outcome.lingering, tail="")
+                  }
+                }
+                None => ()
+              }
+            },
+          })
+        catch {
           err =>
             // A cancelled tool is an answer too: the model is told the command was stopped
             // rather than the turn dying with an exception.
             if @async.is_cancellation_error(err) {
+              match job_id {
+                Some(id) => {
+                  // The runtime killed the shell; what the command had already started has to be
+                  // killed here, by pid, because nothing else knows about it.
+                  //
+                  // Protected from cancellation because this *is* the cancellation path: every
+                  // await inside a cancelled coroutine raises at once, and killing a process is a
+                  // spawn. Without the protection the cleanup itself would be cancelled, leaving
+                  // exactly the orphan the record was meant to prevent.
+                  let pids = ctx.jobs.request_stop(id)
+                  ignore(
+                    @async.protect_from_cancel(() => @platform.kill_pids(pids)),
+                  )
+                  ctx.jobs.finish(
+                    id,
+                    Killed,
+                    detail="stopped before it finished",
+                    finished_at=now_ms(),
+                  )
+                }
+                None => ()
+              }
               @core.ToolOutput::error("stopped before it finished")
             } else {
               raise err
@@ -530,6 +622,7 @@ async fn run_tools(
         _ => ()
       }
     }
+    executed += 1
     let result_message = @core.Message::ToolResult({
       tool_call_id: id,
       tool_name: name,
@@ -545,7 +638,7 @@ async fn run_tools(
       now_ms(),
     )
   }
-  (current, calls.length())
+  (current, executed)
 }
 
 ///|

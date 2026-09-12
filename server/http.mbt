@@ -54,6 +54,8 @@ pub(all) struct Routes {
   /// because "a directory" and "a session file" would otherwise have to be told
   /// apart by inspecting the path.
   new_session : async (String) -> Unit
+  /// Stops a background job, by id.
+  kill_job : async (String) -> Unit
   /// Adds a directory as a workspace. Reports why not through the status line when the path
   /// does not name a directory.
   add_workspace : async (String) -> Unit
@@ -167,6 +169,11 @@ pub async fn serve(port : Int, hub : Hub, routes : Routes) -> Unit {
         let cwd = read_body(body)
         ok(conn)
         (routes.new_session)(cwd)
+      }
+      (Post, "/job/kill") => {
+        let id = read_body(body)
+        ok(conn)
+        (routes.kill_job)(id.trim().to_owned())
       }
       (Post, "/workspace") => {
         let cwd = read_body(body)

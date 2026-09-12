@@ -120,6 +120,7 @@ fn routes_with(regions : Array[@html.Patch], seen : Array[String]) -> Routes {
     switch_session: path => seen.push("session:\{path}"),
     new_session: dir => seen.push("new:\{dir}"),
     add_workspace: dir => seen.push("workspace:\{dir}"),
+    kill_job: id => seen.push("kill:\{id}"),
   }
 }
 
