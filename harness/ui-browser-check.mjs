@@ -27,6 +27,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -739,6 +740,95 @@ async function main() {
     );
     check(true, "stopping one session leaves the others alone");
     void taskSession;
+
+    console.log("\nworkspaces (adding a directory)");
+    // A project directory the server has never seen, with nothing in it.
+    const fresh = `${store}-added-project`;
+    mkdirSync(fresh, { recursive: true });
+    // The server canonicalises what it is given, so the workspace it lists is the resolved path:
+    // on macOS that turns `/var/...` into `/private/var/...`.
+    const freshCanonical = realpathSync(fresh);
+    writeFileSync(join(fresh, "README.md"), "# added by the browser check\n");
+    check(
+      (await cdp.eval("document.querySelectorAll('#add-workspace').length")) === 1,
+      "the sidebar offers a way to add a workspace",
+    );
+    // A path that is not a directory is refused by name, not silently ignored.
+    await cdp.eval(
+      `(() => {
+        document.getElementById('workspace-path').value = ${JSON.stringify(`${fresh}/nope`)}; 
+        document.getElementById('add-workspace').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.getElementById('status').textContent.includes('not a directory')`,
+      "an unusable path to be reported",
+      15000,
+    );
+    check(true, "a path that is not a directory says so");
+
+    await cdp.eval(
+      `(() => {
+        document.getElementById('workspace-path').value = ${JSON.stringify(fresh)};
+        document.getElementById('add-workspace').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `[...document.querySelectorAll('#sessions details.workspace')]
+         .some(d => d.querySelector('summary').title === ${JSON.stringify(freshCanonical)})`,
+      "the added workspace to be listed",
+      30000,
+    );
+    check(true, "adding a workspace lists it");
+    check(
+      (await cdp.eval(
+        `(() => {
+          const open = [...document.querySelectorAll('#sessions details.workspace[open]')];
+          return open.length === 1 && open[0].querySelector('summary').title === ${JSON.stringify(freshCanonical)};
+        })()`,
+      )) === true,
+      "and opens it, so there is somewhere to type",
+    );
+    // Adding means working there: the agent's tools have to move too, which the bar shows.
+    const addedBar = await cdp.eval(
+      "[...document.querySelectorAll('#bar .chip')].find(c => c.textContent.startsWith('model')).title",
+    );
+    check(
+      addedBar.includes(freshCanonical),
+      "the agent moved into the added workspace",
+      addedBar,
+    );
+
+    // Adding a second one proves the first add left the row working: the sidebar is replaced
+    // whenever it refreshes, and a listener attached to the old form would be gone with it.
+    const second = `${store}-added-second`;
+    mkdirSync(second, { recursive: true });
+    const secondCanonical = realpathSync(second);
+    await cdp.eval(
+      `(() => {
+        document.getElementById('workspace-path').value = ${JSON.stringify(second)};
+        document.getElementById('add-workspace').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `[...document.querySelectorAll('#sessions details.workspace')]
+         .some(d => d.querySelector('summary').title === ${JSON.stringify(secondCanonical)})`,
+      "a second workspace to be added",
+      30000,
+    );
+    check(true, "the add row keeps working after the sidebar is replaced");
+    check(
+      (await cdp.eval("document.querySelectorAll('#sessions details.workspace').length")) >= 3,
+      "all of the workspaces are listed",
+    );
+    // The workspace is written down, so a restarted server still knows it.
+    check(
+      existsSync(join(store, storeDirName(freshCanonical), "workspace.json")),
+      "the added workspace is remembered in the store",
+    );
 
     console.log("\nno uncaught exceptions");
     check(

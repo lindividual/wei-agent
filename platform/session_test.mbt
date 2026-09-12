@@ -253,3 +253,56 @@ async test "prune_empty_sessions removes only stale header-only files" {
   // A missing directory is not an error.
   assert_eq(prune_empty_sessions("\{dir}/nope", 0L), 0)
 }
+
+///|
+/// A workspace that has been added but not used is still a workspace.
+async test "an added workspace is listed before it has sessions" {
+  let root = session_scratch("added")
+  let dir = "\{root}/--somewhere--"
+  write_workspace(dir, { cwd: "/work/added", title: Some("my project"), })
+  let found = list_workspaces(root, 10)
+  assert_eq(found.length(), 1)
+  // The path comes from the marker: with no sessions there are no headers to read it from.
+  assert_eq(found[0].cwd, "/work/added")
+  assert_eq(found[0].title, Some("my project"))
+  assert_eq(found[0].total, 0)
+  assert_true(found[0].sessions.is_empty())
+
+  // Sessions win on ordering, but the marker still supplies the path and the title.
+  let session_path = "\{dir}/2020-01-01T00-00-00.000Z_one.jsonl"
+  create_session(session_path, header("one", "/work/added"))
+  let found = list_workspaces(root, 10)
+  assert_eq(found.length(), 1)
+  assert_eq(found[0].total, 1)
+  assert_eq(found[0].title, Some("my project"))
+
+  // A marker nobody can read is ignored rather than turning the listing into a failure.
+  let broken = "\{root}/--broken--"
+  make_dirs(broken)
+  write_text(workspace_marker(broken), "not json")
+  assert_eq(list_workspaces(root, 10).length(), 1)
+}
+
+///|
+/// Adding a workspace canonicalises the path, so the same project reached two ways is one
+/// workspace.
+async test "canonical_dir resolves and rejects" {
+  let dir = session_scratch("canonical")
+  let resolved = canonical_dir(dir)
+  assert_true(resolved is Some(_), msg="a real directory must resolve")
+  match resolved {
+    // Resolved means absolute and symlink-free; the directory was created under `_build`, so the
+    // resolved path names the same place and ends where it started.
+    Some(path) => {
+      assert_true(path.has_prefix("/"), msg=path)
+      assert_true(path.contains("session_test"), msg=path)
+    }
+    None => fail("expected a path")
+  }
+  // A file is not a directory, and neither is a path that does not exist.
+  let file = "\{dir}/a.txt"
+  write_text(file, "x")
+  assert_true(canonical_dir(file) is None)
+  assert_true(canonical_dir("\{dir}/nope") is None)
+  assert_true(canonical_dir("") is None)
+}

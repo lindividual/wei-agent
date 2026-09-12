@@ -453,6 +453,7 @@ async fn workspace_items(
     out.push({
       cwd: stored.cwd,
       name: workspace_name(stored.cwd),
+      title: stored.title,
       active: stored.cwd == shown.cwd,
       sessions,
       hidden: stored.total - sessions.length(),
@@ -473,6 +474,7 @@ async fn workspace_items(
     out.insert(0, {
       cwd: shown.cwd,
       name: workspace_name(shown.cwd),
+      title: None,
       active: true,
       sessions: [
         {
@@ -1157,6 +1159,21 @@ async fn main {
       },
       switch_session: fn(path) { ignore(queue_try_put(jobs, Switch(path))) },
       new_session: fn(dir) { ignore(queue_try_put(jobs, New(dir))) },
+      add_workspace: async fn(path) {
+        match @platform.canonical_dir(path) {
+          None =>
+            // Said on the status line rather than raised: the reader typed a path, and the useful
+            // answer is which path was wrong.
+            app.hub.broadcast(
+              @html.Patch::Status(text="not a directory: \{path}").to_sse(),
+            )
+          Some(cwd) => {
+            let dir = @core.session_dir_for(app.root, cwd)
+            @platform.write_workspace(dir, { cwd, title: None, })
+            ignore(queue_try_put(jobs, New(cwd)))
+          }
+        }
+      },
     }
 
     ignore(

@@ -115,6 +115,86 @@ pub async fn prune_empty_sessions(dir : String, min_age_ms : Int64) -> Int {
 }
 
 ///|
+/// A workspace that has been added, whether or not it has been used.
+///
+/// The store directory's name encodes the path lossily, so a directory with no sessions in it
+/// cannot say where it points. This is the small file that can — and it is where a reader's own
+/// name for the workspace lives, since the path is rarely what they call it.
+///
+/// Kept inside the workspace's own store directory rather than in one registry file: deleting a
+/// directory then forgets the workspace, and there is no second place that can disagree with
+/// what is on disk.
+pub(all) struct WorkspaceRecord {
+  cwd : String
+  title : String?
+} derive(Eq, Debug)
+
+///|
+pub fn workspace_marker(dir : String) -> String {
+  "\{dir}/workspace.json"
+}
+
+///|
+pub async fn read_workspace(dir : String) -> WorkspaceRecord? {
+  let path = workspace_marker(dir)
+  if !path_exists(path) {
+    return None
+  }
+  let parsed = try @json.parse(read_prefix(path, 8192)) catch {
+    // A marker nobody can read is not a workspace description; the sessions are still usable, so
+    // this degrades to "no marker" rather than failing the listing.
+    _ => return None
+  } noraise {
+    json => json
+  }
+  match parsed {
+    Object(fields) =>
+      match fields.get("cwd") {
+        Some(String(cwd)) if cwd != "" => {
+          let title = match fields.get("title") {
+            Some(String(title)) if title != "" => Some(title)
+            _ => None
+          }
+          Some({ cwd, title, })
+        }
+        _ => None
+      }
+    _ => None
+  }
+}
+
+///|
+pub async fn write_workspace(dir : String, record : WorkspaceRecord) -> Unit {
+  make_dirs(dir)
+  let fields : Array[(String, Json?)] = [
+    ("cwd", Some(Json::string(record.cwd))),
+    (
+      "title",
+      match record.title {
+        Some(title) => Some(Json::string(title))
+        None => None
+      },
+    ),
+  ]
+  write_text(workspace_marker(dir), Json::object(obj_pairs(fields)).stringify())
+}
+
+///|
+/// Drop the entries whose value is absent, since a JSON object cannot hold an explicit null here
+/// without changing what a reader of the file would see.
+fn obj_pairs(fields : Array[(String, Json?)]) -> Map[String, Json] {
+  let out : Map[String, Json] = Map([])
+  for entry in fields {
+    let (key, value) = entry
+    match value {
+      Some(value) => out.set(key, value)
+      None => ()
+    }
+  }
+  out
+}
+
+///|
 /// A session file on disk, with when it was last written.
 pub(all) struct StoredSession {
   path : String
@@ -184,8 +264,10 @@ async fn sessions_in(dir : String) -> Array[StoredSession] {
 pub(all) struct StoredWorkspace {
   /// The store directory holding them.
   dir : String
-  /// Where the agent worked, as the sessions themselves recorded it.
+  /// Where the agent works, as a canonical path.
   cwd : String
+  /// What to call it, when the reader has said. `None` means "use the last path component".
+  title : String?
   /// Newest first, capped by the caller.
   sessions : Array[StoredSession]
   /// How many sessions the workspace holds, including the ones not listed.
@@ -220,25 +302,48 @@ pub async fn list_workspaces(
       continue
     }
     let sessions = sessions_in(dir)
-    if sessions.is_empty() {
-      continue
+    // A workspace that has been added but not used yet has no sessions and no headers to read
+    // its path from; the marker it was added with is what makes it a workspace.
+    let marker = read_workspace(dir)
+    let cwd = match marker {
+      Some(record) => Some(record.cwd)
+      None =>
+        if sessions.is_empty() {
+          None
+        } else {
+          @core.cwd_of_session_file(read_prefix(sessions[0].path, 8192))
+        }
     }
-    let cwd = match
-      @core.cwd_of_session_file(read_prefix(sessions[0].path, 8192)) {
+    let cwd = match cwd {
       Some(cwd) => cwd
+      // Nothing to attribute this directory to. Skipped rather than guessed at: listing it under
+      // the wrong path would offer to move the agent somewhere it has never been.
       None => continue
+    }
+    let title = match marker {
+      Some(record) => record.title
+      None => None
     }
     let shown = if sessions.length() > max_sessions {
       sessions[:max_sessions].to_owned()
     } else {
       sessions
     }
+    let modified = if sessions.is_empty() {
+      // An empty workspace sorts by when it was added.
+      match @fs.mtime(dir) {
+        (seconds, nanos) => seconds * 1000L + nanos.to_int64() / 1000000L
+      }
+    } else {
+      sessions[0].modified
+    }
     out.push({
       dir,
       cwd,
+      title,
       sessions: shown,
       total: sessions.length(),
-      modified: sessions[0].modified,
+      modified,
     })
   }
   if out.length() > 1 {

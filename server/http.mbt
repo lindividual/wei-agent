@@ -7,6 +7,7 @@
 /// - `GET /events`    an SSE stream of patches
 /// - `POST /prompt`   a user message
 /// - `POST /session`  open a saved session (of any workspace)
+/// - `POST /workspace` add a directory as a workspace
 /// - `POST /new`      start a new session in a workspace
 /// - `POST /abort`    stop the running turn
 ///
@@ -53,6 +54,9 @@ pub(all) struct Routes {
   /// because "a directory" and "a session file" would otherwise have to be told
   /// apart by inspecting the path.
   new_session : async (String) -> Unit
+  /// Adds a directory as a workspace. Reports why not through the status line when the path
+  /// does not name a directory.
+  add_workspace : async (String) -> Unit
 }
 
 ///|
@@ -163,6 +167,11 @@ pub async fn serve(port : Int, hub : Hub, routes : Routes) -> Unit {
         let cwd = read_body(body)
         ok(conn)
         (routes.new_session)(cwd)
+      }
+      (Post, "/workspace") => {
+        let cwd = read_body(body)
+        ok(conn)
+        (routes.add_workspace)(cwd.trim().to_owned())
       }
       _ => not_found(conn)
     }

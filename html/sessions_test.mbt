@@ -22,7 +22,7 @@ fn workspace(
     Some(index) => cwd[index + 1:].to_owned()
     None => cwd
   }
-  { cwd, name, active, sessions, hidden, }
+  { cwd, name, title: None, active, sessions, hidden, }
 }
 
 ///|
@@ -92,13 +92,14 @@ test "sessions beyond the cap are counted, not dropped silently" {
     [workspace("/work/one", true, [session("/a.jsonl", "first", true)], 4)],
     1_700_000_000_000L,
   ).render()
-  assert_true(html.contains("… 4 older"), msg=html)
+  // Precise substring: "placeholder" also contains "older", which made this assertion lie.
+  assert_true(html.contains("… 4 older</div>"), msg=html)
   // Nothing to say when everything is listed.
   let complete = render_sessions(
     [workspace("/work/one", true, [session("/a.jsonl", "first", true)], 0)],
     1_700_000_000_000L,
   ).render()
-  assert_false(complete.contains("older"), msg=complete)
+  assert_false(complete.contains("older</div>"), msg=complete)
 }
 
 ///|
@@ -172,4 +173,27 @@ test "a running session is marked in the list" {
 test "a transcript carries its session" {
   let html = render_transcript([], session="/store/one.jsonl").render()
   assert_true(html.contains("data-session=\"/store/one.jsonl\""), msg=html)
+}
+
+///|
+/// The workspace rows carry whatever the reader called them, and the add row is present so a new
+/// project can be opened without leaving the page.
+test "a titled workspace and the add row" {
+  let titled = WorkspaceItem::{
+    cwd: "/Users/x/src/app",
+    name: "app",
+    title: Some("the app"),
+    active: false,
+    sessions: [],
+    hidden: 0,
+  }
+  let html = render_sidebar(
+    el("div", attrs=[attr("id", "tasks")], children=[]),
+    frag([render_sessions([titled], 1_700_000_000_000L), render_add_workspace()]),
+  ).render()
+  assert_true(html.contains(">the app<"), msg=html)
+  // The path stays reachable even when a title is shown instead.
+  assert_true(html.contains("title=\"/Users/x/src/app\""), msg=html)
+  assert_true(html.contains("id=\"add-workspace\""), msg=html)
+  assert_true(html.contains("placeholder=\"/path/to/project\""), msg=html)
 }

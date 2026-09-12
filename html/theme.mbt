@@ -76,6 +76,9 @@ pub fn stylesheet() -> String {
     ".panel .task .tool { font-family: var(--mono); font-size: var(--text-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
     ".panel .task form { display: flex; }", ".panel .task button { flex: 0 0 auto; width: auto; border-color: var(--line-strong); padding: var(--space-1) var(--space-2); }",
     ".panel input[type=text] { width: 100%; font: inherit; font-size: var(--text-sm); color: inherit; background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: var(--space-2); }",
+    ".add-workspace { display: flex; gap: var(--space-1); margin-top: var(--space-2); padding: 0 var(--space-2); }",
+    ".add-workspace input { flex: 1 1 auto; min-width: 0; font: inherit; font-size: var(--text-sm); color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); }",
+    ".add-workspace button { flex: 0 0 auto; width: auto; border-color: var(--line-strong); padding: var(--space-1) var(--space-2); }",
     // ── conversation ────────────────────────────────────────────────────────
      ".exchange { margin-bottom: var(--space-5); }", ".user { background: var(--surface); border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-3); white-space: pre-wrap; }",
     ".user > :first-child, .text > :first-child { margin-top: 0; }", ".user > :last-child, .text > :last-child { margin-bottom: 0; }",

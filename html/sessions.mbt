@@ -35,6 +35,8 @@ pub(all) struct WorkspaceItem {
   cwd : String
   /// Last path component, for the label.
   name : String
+  /// What the reader calls it, when they have said. Replaces `name` in the label.
+  title : String?
   /// True for the workspace the agent is in right now.
   active : Bool
   /// Newest first.
@@ -59,7 +61,29 @@ pub fn render_sessions(workspaces : Array[WorkspaceItem], now : Int64) -> Node {
       el("div", attrs=[cls("empty")], children=[txt("no saved sessions yet")]),
     )
   }
+  // The add row belongs with the list it adds to, and it is present even when the list is
+  // empty: that is exactly the state a first project is added in.
+  body.push(render_add_workspace())
   el("div", attrs=[attr("id", "sessions")], children=body)
+}
+
+///|
+/// The row that adds a workspace: one path, one button.
+///
+/// A text field rather than a directory picker, because the page is server-rendered and a picker
+/// is a browser API the server cannot drive; what the field must get right is that a wrong path
+/// says so instead of silently doing nothing, which the status line handles.
+pub fn render_add_workspace() -> Node {
+  el("form", attrs=[cls("add-workspace"), attr("id", "add-workspace")], children=[
+    el("input", attrs=[
+      attr("id", "workspace-path"),
+      attr("type", "text"),
+      attr("placeholder", "/path/to/project"),
+      attr("autocomplete", "off"),
+      attr("spellcheck", "false"),
+    ]),
+    el("button", attrs=[attr("type", "submit")], children=[txt("Add")]),
+  ])
 }
 
 ///|
@@ -72,6 +96,10 @@ pub fn render_sidebar(tasks : Node, sessions : Node) -> Node {
 
 ///|
 fn render_workspace(workspace : WorkspaceItem, now : Int64) -> Node {
+  let label = match workspace.title {
+    Some(title) => title
+    None => workspace.name
+  }
   let rows : Array[Node] = []
   for item in workspace.sessions {
     let mut classes = if item.current { "session current" } else { "session" }
@@ -108,7 +136,7 @@ fn render_workspace(workspace : WorkspaceItem, now : Int64) -> Node {
     el("summary", attrs=[attr("title", workspace.cwd)], children=[
       // The name is a span so it can be ellipsised: a `summary` is a list item, and
       // text overflow only applies to the box the text is actually in.
-      el("span", attrs=[cls("name")], children=[txt(workspace.name)]),
+      el("span", attrs=[cls("name")], children=[txt(label)]),
     ]),
     el(
       "button",

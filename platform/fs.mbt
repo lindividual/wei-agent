@@ -90,6 +90,25 @@ pub async fn is_directory(path : String) -> Bool {
 }
 
 ///|
+/// The canonical path of an existing directory, or `None` when the path does not name one.
+///
+/// Canonical rather than as typed: workspaces are identified by where they are, and `~/src/app`
+/// and `/Users/x/src/app` have to be the same workspace or the sidebar lists the same project
+/// twice. `None` rather than an error because "not a directory" is something to tell the reader,
+/// not a failure to propagate.
+pub async fn canonical_dir(path : String) -> String? {
+  if path == "" || !is_directory(path) {
+    return None
+  }
+  try @fs.realpath(path) catch {
+    // A path that cannot be resolved is still a directory; the typed form is good enough.
+    _ => Some(path)
+  } noraise {
+    resolved => Some(resolved)
+  }
+}
+
+///|
 /// Create a directory and any missing parents.
 ///
 /// Failing because the directory already appeared is not a failure: concurrent
