@@ -47,11 +47,16 @@ POST /session  切换会话（空体=新建），立即返回
 POST /abort    停掉正在跑的 turn
 ```
 
-**首帧是「可变区域的快照」。** 每个连接先收到 `transcript` 与 `sessions` 两个区域的
-patch，而不是整页。这条曾经写错过 —— 首帧发整页、客户端又用 `outerHTML` 直接替换
-`#transcript`，结果是浏览器把整个文档的片段塞进 body：输入框和状态行都被换成新节点，
-而 JS 里捕获的还是旧节点，于是**页面看起来正常、输入框和状态行却永久失效**。
-`server/http_test.mbt` 现在直接断言首帧里不能出现 `<html`。
+**首帧是「可变区域的快照」。** 每个连接先收到 `transcript` / `sessions` / 状态行三个
+区域的 patch，而不是整页。这条曾经写错过 —— 首帧发整页、客户端又用 `outerHTML` 直接
+替换 `#transcript`，结果是浏览器把整个文档的片段塞进 body：输入框和状态行都被换成新
+节点，而 JS 里捕获的还是旧节点，于是**页面看起来正常、输入框和状态行却永久失效**，
+而所有字节层面的断言全部通过。
+
+这个 bug 决定了验证方式：`server/http_test.mbt` 断言首帧里不能出现 `<html`，
+`harness/ui-browser-check.mjs` 则用**真实的 headless Chrome**（不是用户的浏览器）
+再确认一遍 DOM 真的没被嵌套、输入框的监听真的挂在屏上的那个节点上。后者是唯一能看见
+这类问题的地方。
 
 **流式期间不渲染 markdown。** 每个 delta 只更新累积文本（`SetText`），turn 结束时
 一次性替换成渲染好的 markdown。半截的 `**bo` 渲染出来是错的，而且每来一个 delta
@@ -154,7 +159,13 @@ moon test -p server          # 8 个测试，起真 socket 验传输
 moon test -p agent           # 4 个测试，假模型端到端跑 turn
 moon run verify              # 全量：160 个文件、46,399 条 entry 往返
 moon run cli -- "hello"      # 打一次真实 DeepSeek，端到端
+node harness/ui-browser-check.mjs   # 真实浏览器验收（自己起 headless Chrome）
 ```
+
+浏览器验收要先把 ui 构建出来（`moon build --target native`），它会自己挑空闲端口、
+起服务器、跑完再收摊。它检查的东西：区域节点各只有一个、文档没有被嵌套、表单提交真的
+到达服务器、流式容器在最终替换后消失、状态行报出花费、侧边栏新建与会话切换、**服务器
+重启后页面自愈**（EventSource 重连 + 首帧快照）、以及全程没有任何未捕获异常。
 
 ### 对拍是主要手段
 
@@ -188,6 +199,13 @@ moon run pi -- "Run 'ls' and tell me how many files are in this directory."
 
 `moon run pi` 跑的是完整链路：派生上下文 → 调模型 → 执行工具 → 写回 session，循环直到
 模型不再请求工具。写出的 session 文件能被 pi 自己读回来，这是最硬的兼容性证据。
+
+### 端口冲突
+
+第二个实例会拿到 `cannot listen on 127.0.0.1:8790 … pass --port` 并以 1 退出，而不是
+留下一个不服务任何东西的僵尸进程。这条也值得说一句：原来的实现在这里会把启动日志和
+运行时的错误输出写乱（同一时刻两个写者往同一个流里写，连 `cwd` 前缀都被吃掉），
+所以现在错误只由运行时输出一行。
 
 ## 已知限制
 

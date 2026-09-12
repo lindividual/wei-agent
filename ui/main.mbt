@@ -326,6 +326,9 @@ async fn run_and_report(
   text : String,
   index : Int,
   aborting : AbortFlag,
+  /// Told what the status line says, so that a browser connecting later can be
+  /// caught up on it: the line is part of the page's state, not of one connection.
+  set_status : (String) -> Unit,
 ) -> @agent.TurnResult {
   hub.broadcast(
     @html.append_node(
@@ -333,6 +336,7 @@ async fn run_and_report(
       @html.render_exchange_start(index, Some(text)),
     ).to_sse(),
   )
+  set_status("working…")
   hub.broadcast(@html.Patch::Status(text="working…").to_sse())
 
   // Streaming text lands in a throwaway container inside the section. When the
@@ -417,9 +421,9 @@ async fn run_and_report(
       ),
     ).to_sse(),
   )
-  hub.broadcast(
-    @html.Patch::Status(text=status_text(result, aborting.value)).to_sse(),
-  )
+  let summary = status_text(result, aborting.value)
+  set_status(summary)
+  hub.broadcast(@html.Patch::Status(text=summary).to_sse())
   result
 }
 
@@ -457,6 +461,11 @@ async fn main {
   let jobs : @aqueue.Queue[Job] = @aqueue.Queue(kind=@aqueue.Kind::Unbounded)
   let mut busy = false
   let mut turn = 0
+  // The status line belongs to the snapshot, not only to the patches that set it
+  // during a turn. Otherwise a reconnecting browser keeps showing the summary of a
+  // turn that the process it just reconnected to knows nothing about — and after a
+  // restart it would advertise work that never happened.
+  let mut status_line = ""
 
   let transcript = () => {
     @html.render_transcript(session.context().messages).render()
@@ -472,6 +481,10 @@ async fn main {
     [
       @html.Patch::Replace(target="transcript", html=transcript()),
       @html.Patch::Replace(target="sessions", html=sessions()),
+      // The status line is part of what a connection has to be caught up on: a
+      // browser that reconnects to a restarted process must not keep showing the
+      // summary of a turn that process knows nothing about.
+      @html.Patch::Status(text=status_line),
     ]
   }
 
@@ -492,9 +505,8 @@ async fn main {
       // Answered before the turn starts, so the browser is not left waiting on a
       // request that may take minutes.
       if busy {
-        hub.broadcast(
-          @html.Patch::Status(text="queued behind the running turn").to_sse(),
-        )
+        status_line = "queued behind the running turn"
+        hub.broadcast(@html.Patch::Status(text=status_line).to_sse())
       }
       ignore(queue_try_put(jobs, Prompt(text)))
     },
@@ -526,14 +538,10 @@ async fn main {
               session = next_session
               session_path = next_path
               aborting.value = false
+              status_line = "opened \{next_session.context().messages.length()} messages"
               for patch in (routes.regions)() {
                 hub.broadcast(patch.to_sse())
               }
-              hub.broadcast(
-                @html.Patch::Status(
-                  text="opened \{next_session.context().messages.length()} messages",
-                ).to_sse(),
-              )
             }
             Prompt(text) => {
               busy = true
@@ -560,7 +568,11 @@ async fn main {
               // A failed turn must not take the process down: the session is on
               // disk, and the reader needs to see what happened rather than a
               // dead page.
-              try run_and_report(hub, ctx, text, index, aborting) catch {
+              try
+                run_and_report(hub, ctx, text, index, aborting, text => {
+                  status_line = text
+                })
+              catch {
                 err => {
                   hub.broadcast(
                     @html.Patch::Status(text="failed: \{err}").to_sse(),
@@ -581,7 +593,18 @@ async fn main {
         }
       }),
     )
-    @server.serve(args.port, hub, routes)
+    // A port already taken is the one startup failure worth naming: it is what
+    // running a second instance looks like. Converted rather than logged, so a
+    // single writer produces the message — a log line racing the runtime's own
+    // error output garbles both.
+    try @server.serve(args.port, hub, routes) catch {
+      err =>
+        raise Failure::Failure(
+          "cannot listen on 127.0.0.1:\{args.port} (\{err}). Another instance may be running; pass --port to choose another.",
+        )
+    } noraise {
+      _ => ()
+    }
   })
 }
 
