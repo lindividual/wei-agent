@@ -433,6 +433,38 @@ pub fn render_reply(index : Int, start : Int, pieces : Array[Piece]) -> Node {
 }
 
 ///|
+/// The information bar above the conversation: what is open, on what model, at what cost.
+///
+/// A region of its own rather than part of the transcript, because it changes for reasons
+/// the transcript does not (a figure updating, a session being switched) and replacing the
+/// whole conversation to refresh a number would be absurd.
+pub fn render_bar(children : Array[Node]) -> Node {
+  let out : Array[Node] = children
+  out.push(el("span", attrs=[cls("spacer")], children=[]))
+  el("div", attrs=[cls("bar"), attr("id", "bar")], children~)
+}
+
+///|
+/// The composer, which lives outside the transcript so that replacing the transcript never
+/// touches what the reader is typing.
+pub fn composer() -> Node {
+  el("form", attrs=[attr("id", "composer")], children=[
+    el("textarea", attrs=[
+      attr("id", "prompt"),
+      attr("rows", "2"),
+      attr("placeholder", "Ask something… (Cmd+Enter to send)"),
+      attr("autofocus", ""),
+    ]),
+    el("button", attrs=[attr("id", "send"), attr("type", "submit")], children=[
+      txt("Send"),
+    ]),
+    el("button", attrs=[attr("id", "stop"), attr("type", "button")], children=[
+      txt("Stop"),
+    ]),
+  ])
+}
+
+///|
 /// A status line for the reader — shown while a turn runs, so a slow model does
 /// not look like a frozen page.
 pub fn render_status(text_value : String) -> Node {

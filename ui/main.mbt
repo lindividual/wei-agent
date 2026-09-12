@@ -398,9 +398,20 @@ async fn workspace_items(
     let sessions : Array[@html.SessionItem] = []
     for session in stored.sessions {
       let prefix = @platform.read_prefix(session.path, 64 * 1024)
+      let label = @core.session_label(prefix)
       sessions.push({
         path: session.path,
-        label: @core.session_label(prefix),
+        // A session whose first turn is still running has no label in its file yet, and
+        // "empty session" for the five minutes a long turn takes would be wrong. The
+        // running turn is the one thing we do know about it.
+        label: if label == "" {
+          match app.runner(session.path) {
+            Some(runner) => @html.clip_label(runner.prompt)
+            None => ""
+          }
+        } else {
+          label
+        },
         modified: session.modified,
         current: session.path == shown.path,
         running: app.running(session.path),
@@ -813,6 +824,37 @@ async fn workspace_items_and_render(app : App, shown : Runner) -> String {
 // ── The page ───────────────────────────────────────────────────────────────
 
 ///|
+/// What is open: the session, the model, and — once the turn reporting fills them in — the
+/// token and cost figures for it.
+fn bar_node(app : App, shown : Runner) -> @html.Node {
+  @html.render_bar([
+    @html.chip("workspace", workspace_name(shown.cwd)),
+    // The id rather than the file name: the timestamp in the name is noise in a bar that is
+    // read at a glance, and the full path is one hover away.
+    @html.chip("session", short_id(shown.path), detail=shown.path),
+    @html.chip("model", app.model),
+  ])
+}
+
+///|
+/// The id part of a session file name: `…_ab12cd34.jsonl` becomes `ab12cd34`.
+fn short_id(path : String) -> String {
+  let name = match path.rev_find("/") {
+    Some(index) => path[index + 1:].to_owned()
+    None => path
+  }
+  let stem = if name.has_suffix(".jsonl") {
+    name[:name.length() - 6].to_owned()
+  } else {
+    name
+  }
+  match stem.rev_find("_") {
+    Some(index) => stem[index + 1:].to_owned()
+    None => stem
+  }
+}
+
+///|
 /// The whole conversation as it stands, including a turn that is still running.
 fn transcript_node(app : App, shown : Runner) -> @html.Node {
   let extra : Array[@html.Node] = []
@@ -888,6 +930,7 @@ async fn main {
         html=transcript_node(app, shown).render(),
       ),
       @html.Patch::Replace(target="sessions", html=sidebar),
+      @html.Patch::Replace(target="bar", html=bar_node(app, shown).render()),
       @html.Patch::Status(text=app.status_line(shown)),
     ]
   }
@@ -902,16 +945,17 @@ async fn main {
     let routes : @server.Routes = {
       page: async fn() {
         let shown = app.shown()
-        let session_html = workspace_items_and_render(app, shown)
-        let body = @html.el("div", attrs=[@html.cls("layout")], children=[
-          @html.raw(session_html),
+        let sidebar = @html.raw(workspace_items_and_render(app, shown))
+        let column = @html.el("div", attrs=[@html.cls("column")], children=[
+          bar_node(app, shown),
           transcript_node(app, shown),
-        ])
-        @html.render_page("pi", stylesheet(), client_script(), [
-          body,
-          composer(),
           @html.render_status(app.status_line(shown)),
-        ]).render()
+          @html.composer(),
+        ])
+        let body = @html.el("div", attrs=[@html.cls("layout")], children=[
+          sidebar, column,
+        ])
+        @html.render_page("pi", @html.stylesheet(), client_script(), [body]).render()
       },
       regions,
       prompt: async fn(text) {
