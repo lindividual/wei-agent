@@ -87,6 +87,7 @@ fn test_app() -> App {
   {
     root: "/tmp/store",
     model: "deepseek-v4-flash",
+    base_url: "https://api.deepseek.com",
     context_window: 1000000,
     api_key: "k",
     tools: [],
@@ -575,4 +576,18 @@ test "the job panel shows only the processes that are still there" {
     render_jobs(app, 1000L).contains("pid"),
     msg=render_jobs(app, 1000L),
   )
+}
+
+///|
+/// The transcript says which session it is of, but not in the attribute that means "open this".
+///
+/// `[data-session]` is the sidebar's switch request. Putting it on the transcript made every click
+/// inside the conversation ask the server to switch to it — and since the tag is a short id, which
+/// names no file, the server started a *new* session instead: the transcript was replaced by an
+/// empty one and the block the reader had just opened was gone.
+test "the transcript marks its session without inviting a switch" {
+  let messages : Array[@core.ContextMessage] = []
+  let html = @html.render_transcript(messages, session="16ce48e4").render()
+  assert_true(html.contains("data-shown-session=\"16ce48e4\""), msg=html)
+  assert_false(html.contains("data-session="), msg=html)
 }

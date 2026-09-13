@@ -993,6 +993,44 @@ async function main() {
     );
     backgroundPids = [];
 
+    console.log("\nclicking inside the conversation");
+    // A click in the transcript must not switch sessions. `[data-session]` means "open that" to the
+    // sidebar's delegated handler, and it used to be on the transcript as well — so opening a block
+    // (or just selecting text) asked the server to switch to the short id in that attribute, which
+    // names no file: the server started a *new* session and the transcript went empty under the
+    // reader.
+    await cdp.waitFor(
+      `document.querySelectorAll('#transcript details').length >= 1`,
+      "a block to click in the transcript",
+      60000,
+    );
+    const shownBefore = await cdp.eval(
+      "document.getElementById('transcript').dataset.shownSession",
+    );
+    const sessionsBefore = await cdp.eval(
+      "document.querySelectorAll('#sessions [data-session]').length",
+    );
+    const opened = await cdp.eval(
+      `(() => {
+        const details = document.querySelector('#transcript details');
+        details.querySelector('summary').click();
+        return { open: details.open, text: details.textContent.trim().length };
+      })()`,
+    );
+    check(opened.open === true, "clicking a summary opens it");
+    check(opened.text > 0, "and there is something inside", JSON.stringify(opened));
+    await sleep(1200);
+    check(
+      (await cdp.eval("document.getElementById('transcript').dataset.shownSession")) ===
+        shownBefore,
+      "the click did not switch sessions",
+    );
+    check(
+      (await cdp.eval("document.querySelectorAll('#sessions [data-session]').length")) ===
+        sessionsBefore,
+      "and no session was created by it",
+    );
+
     console.log("\nworkspaces (adding a directory)");
     // A project directory the server has never seen, with nothing in it.
     const fresh = `${store}-added-project`;

@@ -160,8 +160,14 @@ pub fn render_exchange(
 /// guarantees a result is never shown without the call it answered.
 pub fn render_transcript(
   messages : Array[@core.ContextMessage],
-  /// Which session this transcript is of. Carried in the DOM because the browser needs
-  /// it to decide whether a patch it just received is for what it is showing.
+  /// Which session this transcript is of. The browser needs it to decide whether a patch it just
+  /// received is for what it is showing.
+  ///
+  /// Deliberately not `data-session`: that attribute means "clicking this opens that session" to
+  /// the sidebar's delegated click handler, and putting it on the transcript made *any* click in the
+  /// conversation — opening a block, selecting text — ask the server to switch to it. The id it
+  /// carries is short, so the server did not find a file by that name and started a new session
+  /// instead: the transcript was replaced by an empty one on the next click.
   session? : String = "",
   /// Sections to append after the conversation — a turn that is still running, which the
   /// committed messages do not describe yet.
@@ -201,7 +207,10 @@ pub fn render_transcript(
   }
   el(
     "div",
-    attrs=[attr("id", "transcript"), attr("data-session", session)],
+    // `data-shown-session`, not `data-session`: the sidebar's delegated click handler treats
+    // `[data-session]` as "open that session", and this attribute only says which session the
+    // fragment is of.
+    attrs=[attr("id", "transcript"), attr("data-shown-session", session)],
     children=sections,
   )
 }

@@ -168,11 +168,14 @@ test "a running session is marked in the list" {
 }
 
 ///|
-/// The transcript says which session it is, which is what lets the browser ignore
-/// patches belonging to another one.
+/// The transcript says which session it is, which is what lets the browser ignore patches
+/// belonging to another one — under an attribute that does *not* also mean "clicking this switches
+/// to that session", which is what `data-session` means to the sidebar.
 test "a transcript carries its session" {
-  let html = render_transcript([], session="/store/one.jsonl").render()
-  assert_true(html.contains("data-session=\"/store/one.jsonl\""), msg=html)
+  let messages : Array[@core.ContextMessage] = []
+  let html = render_transcript(messages, session="/store/one.jsonl").render()
+  assert_true(html.contains("data-shown-session=\"/store/one.jsonl\""), msg=html)
+  assert_false(html.contains("data-session="), msg=html)
 }
 
 ///|

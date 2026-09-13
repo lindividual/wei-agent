@@ -50,19 +50,23 @@ enum Start {
 struct Args {
   port : Int
   model : String
+  /// Where the model is served from. A flag rather than a constant because pointing it at a local
+  /// gateway is useful, and because it is the only way to test what a *failing* turn leaves behind.
+  base_url : String
   start : Start
   store : String
 }
 
 ///|
 fn usage() -> String {
-  "usage: ui [--port N] [--model M] [--continue | --resume <path|id>] [--store DIR]"
+  "usage: ui [--port N] [--model M] [--base-url URL] [--continue | --resume <path|id>] [--store DIR]"
 }
 
 ///|
 fn parse_args(argv : Array[String]) -> Args raise {
   let mut port = 8790
   let mut model = "deepseek-v4-flash"
+  let mut base_url = "https://api.deepseek.com"
   let mut start = Start::New
   let mut store = ""
   let mut index = 1
@@ -70,6 +74,7 @@ fn parse_args(argv : Array[String]) -> Args raise {
     let flag = argv[index]
     let needs_value = flag == "--port" ||
       flag == "--model" ||
+      flag == "--base-url" ||
       flag == "--resume" ||
       flag == "--store"
     if needs_value && index + 1 >= argv.length() {
@@ -86,6 +91,10 @@ fn parse_args(argv : Array[String]) -> Args raise {
       }
       "--model" => {
         model = argv[index + 1]
+        index += 2
+      }
+      "--base-url" => {
+        base_url = argv[index + 1]
         index += 2
       }
       "--resume" => {
@@ -108,7 +117,7 @@ fn parse_args(argv : Array[String]) -> Args raise {
       _ => raise Failure::Failure("unknown argument: \{flag}\n\{usage()}")
     }
   }
-  { port, model, start, store, }
+  { port, model, base_url, start, store, }
 }
 
 ///|
@@ -342,6 +351,7 @@ fn Runner::is_running(self : Runner) -> Bool {
 struct App {
   root : String
   model : String
+  base_url : String
   /// The model's context window, from the same catalog as the pricing: the number that turns
   /// "the conversation is 24k tokens" into "and that is 2% of what it can hold".
   context_window : Int
@@ -991,6 +1001,7 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
     system_prompt=@core.build_system_prompt(runner.cwd, app.tools),
     tools=app.tools,
     model=app.model,
+    base_url=app.base_url,
     jobs=app.jobs,
   )
   // Streaming is batched by size *and* flushed on a short timer, and the timer is what makes the
@@ -1072,6 +1083,26 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
   } catch {
     err => {
       log("turn failed: \{err}")
+      // The live containers are temporary. A turn that failed still wrote what it managed to
+      // produce to the log, so the exchange is rebuilt from there — the same rendering a reader
+      // gets on reconnect. Leaving the live nodes in place is what an expandable with nothing in it
+      // looks like: they were opened lazily and may never have received a flush.
+      app.hub.broadcast(
+        @html.replace_node(
+          @html.blocks_id(index),
+          @html.el(
+            "div",
+            attrs=[cls_blocks(), @html.attr("id", @html.blocks_id(index))],
+            children=[
+              @html.render_reply(
+                index,
+                0,
+                @html.reply_pieces(runner.session.context().messages),
+              ),
+            ],
+          ),
+        ).to_scoped_sse(session),
+      )
       status("failed: \{err}")
     }
   } noraise {
@@ -1332,6 +1363,7 @@ async fn main {
   let app : App = {
     root,
     model: args.model,
+    base_url: args.base_url,
     context_window: @core.deepseek_v4_flash_context_window(),
     api_key: key,
     tools: @core.builtin_tools(),
@@ -1547,7 +1579,10 @@ async fn main {
           // frozen page.
           try {
             match job {
-              Switch(path) =>
+              Switch(path) => {
+                // Logged so that a switch arriving from somewhere unexpected can be seen: the
+                // sidebar's click delegation is the only intended source.
+                log("switch   \{path}")
                 if @platform.path_exists(path) {
                   // An already-open session is displayed as it is. Re-reading it from
                   // disk would throw away the state of a turn that may be running in it.
@@ -1563,7 +1598,9 @@ async fn main {
                   )
                   app.display(Runner::new(session, fresh))
                 }
+              }
               New(dir) => {
+                log("new      \{dir}")
                 let (session, path) = create_session(app.root, dir)
                 app.display(Runner::new(session, path))
               }
