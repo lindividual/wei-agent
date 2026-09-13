@@ -270,3 +270,62 @@ test "cwd_of_session_file tolerates a truncated or unreadable start" {
   // Blank leading lines are skipped rather than treated as the header.
   assert_eq(cwd_of_session_file("\n\n" + header().to_line()), Some("/tmp"))
 }
+
+///|
+/// A session's name is the newest one on the path, and its absence is not an error.
+test "session names come from the log, newest wins" {
+  let a = entry_for("a", None, "hi")
+  let session = Session::new(header(), [a])
+  assert_eq(session.name(), None)
+
+  let named = session_name_entry(
+    Some("refactor auth"),
+    Some("a"),
+    1700000000000L,
+  )
+  let session = session.add_entries([named])
+  assert_eq(session.name(), Some("refactor auth"))
+
+  // Renaming replaces rather than accumulating.
+  let renamed = session_name_entry(
+    Some("auth, take two"),
+    Some(named.id),
+    1700000000000L,
+  )
+  let session = session.add_entries([renamed])
+  assert_eq(session.name(), Some("auth, take two"))
+
+  // An entry with no name clears it, and does so like any other rename.
+  let cleared = session_name_entry(None, Some(renamed.id), 1700000000000L)
+  let session = session.add_entries([cleared])
+  assert_eq(session.name(), None)
+
+  // An appended message does not bring the old name back.
+  let session = session.add_entries([
+    entry_for("b", Some(cleared.id), "hello again"),
+  ])
+  assert_eq(session.name(), None)
+}
+
+///|
+/// The entry is written the way pi writes it, since pi is the other reader of this file.
+test "a name entry matches pi's shape" {
+  let entry = session_name_entry(
+    Some("Refactor auth module"),
+    Some("j0k1l2m3"),
+    1733236500000L,
+  )
+  let json = entry.to_json()
+  assert_true(json is Object(_))
+  let encoded = json.stringify()
+  // The fields pi's session-format documentation shows, and no others.
+  for
+    key in [
+      "\"type\":\"session_info\"", "\"name\":\"Refactor auth module\"", "\"parentId\":\"j0k1l2m3\"",
+    ] {
+    assert_true(encoded.contains(key), msg=encoded)
+  }
+  assert_false(encoded.contains("details"), msg=encoded)
+  // And it survives a round trip, which is what the verifier checks on real sessions.
+  assert_eq(Entry::from_json(json).to_json(), json)
+}

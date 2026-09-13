@@ -221,6 +221,24 @@ pub fn agent_note_type() -> String {
 }
 
 ///|
+/// Build the entry recording a session's name.
+///
+/// `None` clears it, which is why the field is optional rather than a plain string: what a rename
+/// replaces is the *previous* entry, and an entry that says "no name" has to be expressible.
+pub fn session_name_entry(
+  name : String?,
+  parent_id : String?,
+  timestamp : Int64,
+) -> Entry {
+  {
+    id: new_entry_id(),
+    parent_id,
+    timestamp: format_iso_utc(timestamp),
+    kind: SessionInfo(name~),
+  }
+}
+
+///|
 /// Build the entry recording a note.
 pub fn agent_note_entry(
   note : String,

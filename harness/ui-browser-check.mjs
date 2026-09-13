@@ -742,6 +742,64 @@ async function main() {
     check(true, "stopping one session leaves the others alone");
     void taskSession;
 
+    console.log("\nnaming a session");
+    // The name is an entry in the session log, so it has to be visible in both places the reader
+    // looks, and it has to still be there after a reload — a name that only lives in the page would
+    // be worse than no name.
+    await cdp.eval(
+      `(() => {
+        const input = document.getElementById('prompt');
+        input.value = "/name the browser check session";
+        document.getElementById('composer').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.getElementById('bar').textContent.includes('the browser check session')`,
+      "the bar to show the name",
+      15000,
+    );
+    check(true, "the bar names the session");
+    // A bare /name reports rather than clearing.
+    await cdp.eval(
+      `(() => {
+        const input = document.getElementById('prompt');
+        input.value = "/name";
+        document.getElementById('composer').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.getElementById('status').textContent.includes('name: the browser check session')`,
+      "a bare /name to report the current name",
+      15000,
+    );
+    check(true, "a bare /name reports instead of clearing");
+    // Not a command: it must reach the model as a message rather than being eaten.
+    check(
+      (await cdp.eval(
+        `document.getElementById('transcript').textContent.includes('the browser check session')`,
+      )) === false,
+      "the command itself is not shown as a message",
+    );
+
+    await cdp.send("Page.navigate", { url: URL });
+    await cdp.waitFor("document.readyState === 'complete'", "page reload", 20000);
+    await sleep(1500);
+    await cdp.waitFor(
+      `document.getElementById('bar').textContent.includes('the browser check session')`,
+      "the name to survive a reload",
+      20000,
+    );
+    check(true, "the name comes back after a reload, because it is in the log");
+    check(
+      (await cdp.eval(
+        `[...document.querySelectorAll('#sessions [data-session]')]
+           .some(r => r.textContent.includes('the browser check session'))`,
+      )) === true,
+      "and the sidebar lists the session by that name",
+    );
+
     console.log("\nbackground jobs (work that outlives its tool call)");
     // A command that returns immediately and leaves a process behind: the case that gets
     // forgotten, and the one this whole panel exists for.

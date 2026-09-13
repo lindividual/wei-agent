@@ -229,6 +229,32 @@ async fn open_session(
 // ── One open session ───────────────────────────────────────────────────────
 
 ///|
+/// What the composer understands as a command rather than a message.
+pub(all) enum Command {
+  /// `/name <text>` sets the session's name; `/name` alone reports the current one.
+  Name(String)
+} derive(Eq, Debug)
+
+///|
+/// Read a command out of what the reader typed, or `None` for a message.
+///
+/// Only `/name` is intercepted. Treating every `/x` as a command would silently swallow messages
+/// that happen to start with a slash — a path, a division, a regex — so an unknown one is left
+/// alone and goes to the model.
+pub fn parse_command(text : String) -> Command? {
+  let trimmed = text.trim()
+  if trimmed == "/name" {
+    // Without an argument it reports rather than clears: a bare command should not be able to
+    // throw away something the reader typed earlier.
+    return Some(Name(""))
+  }
+  if trimmed.has_prefix("/name ") {
+    return Some(Name(trimmed[6:].trim().to_owned()))
+  }
+  None
+}
+
+///|
 /// A session, and whatever it is doing.
 ///
 /// The turn slot lives here rather than behind one global queue: sessions are independent
@@ -297,6 +323,15 @@ fn Runner::new(session : @core.Session, path : String) -> Runner {
 }
 
 ///|
+/// What the bar calls this session.
+fn Runner::name_or_id(self : Runner) -> String {
+  match self.session.name() {
+    Some(name) => name
+    None => short_id(self.path)
+  }
+}
+
+///|
 /// Whether this session has work in flight.
 fn Runner::is_running(self : Runner) -> Bool {
   self.busy || self.waiting > 0
@@ -321,6 +356,10 @@ struct App {
   jobs : @core.JobStore
   /// Labels already read, so redrawing the sidebar does not re-read every session head.
   labels : LabelCache
+  /// Pids that existed at the last look, so the job panel can show the processes that are still
+  /// there instead of every pid a command was ever seen with. Refreshed with the panel, not inside
+  /// it: rendering is pure.
+  mut live_pids : Array[Int]
   /// The path of the session being displayed. Shared by every browser: there is one
   /// document, so there is one answer to "what is on screen".
   mut displayed : String
@@ -422,14 +461,29 @@ fn App::status_line(self : App, shown : Runner) -> String {
 // ── The sidebar's view ─────────────────────────────────────────────────────
 
 ///|
-/// Labels already worked out, keyed by session path.
+/// What the sidebar needs to know about a session: what to call it, and what the reader called it.
+pub(all) struct SessionFacts {
+  /// The first thing the user asked, for sessions nobody has named.
+  label : String
+  /// The reader's own name for it, when they gave one.
+  name : String?
+} derive(Eq, Debug)
+
+///|
+/// Facts already worked out, keyed by session path.
 ///
-/// A session's label only changes when its file does, and `list_sessions` already reports when
-/// that was — so a lookup needs no syscall at all. It exists because the sidebar is rebuilt twice
-/// per turn (the running mark changes) and reading the head of every session to redraw it made
-/// that cost grow with the store: 20 workspaces of 10 sessions came to 12MB read per refresh.
+/// They only change when the file does, and `list_sessions` already reports when that was — so a
+/// lookup needs no syscall at all. It exists because the sidebar is rebuilt twice per turn (the
+/// running mark changes) and reading every session's head to redraw it made that cost grow with the
+/// store: 20 workspaces of 10 sessions came to 12MB read per refresh.
+///
+/// The name lives at the *end* of a log and the label at the beginning, so a miss reads the whole
+/// file rather than a prefix. That is the honest way to find the newest `session_info` without an
+/// index that could disagree with the log — and it is paid once per change, not once per refresh.
+/// If a store of very many large sessions makes that visible, the fix is an index beside the store,
+/// not a smaller read that gives wrong answers.
 pub(all) struct LabelCache {
-  mut entries : Map[String, (Int64, String)]
+  mut entries : Map[String, (Int64, SessionFacts)]
 }
 
 ///|
@@ -438,16 +492,15 @@ pub fn LabelCache::new() -> LabelCache {
 }
 
 ///|
-/// The label for a session, reading its head only when the file has changed.
 fn LabelCache::hit(
   self : LabelCache,
   path : String,
   modified : Int64,
-) -> String? {
+) -> SessionFacts? {
   match self.entries.get(path) {
-    Some((cached_at, label)) =>
+    Some((cached_at, facts)) =>
       if cached_at == modified {
-        Some(label)
+        Some(facts)
       } else {
         None
       }
@@ -460,9 +513,9 @@ fn LabelCache::store(
   self : LabelCache,
   path : String,
   modified : Int64,
-  label : String,
+  facts : SessionFacts,
 ) -> Unit {
-  self.entries.set(path, (modified, label))
+  self.entries.set(path, (modified, facts))
 }
 
 ///|
@@ -470,16 +523,49 @@ async fn LabelCache::label(
   self : LabelCache,
   path : String,
   modified : Int64,
-) -> String {
+) -> SessionFacts {
   match self.hit(path, modified) {
-    Some(label) => return label
+    Some(facts) => return facts
     None => ()
   }
-  // The first user message is in the first lines of the file; the cap only has to be larger than
-  // the header plus a few entries.
-  let label = @core.session_label(@platform.read_prefix(path, 16 * 1024))
-  self.store(path, modified, label)
-  label
+  let text = @platform.read_text(path)
+  let facts : SessionFacts = {
+    // The first user message is near the top of the file, so the label only needs the beginning.
+    label: @core.session_label(prefix_of(text, 16 * 1024)),
+    name: session_name_of(text),
+  }
+  self.store(path, modified, facts)
+  facts
+}
+
+///|
+fn prefix_of(text : String, limit : Int) -> String {
+  if text.length() <= limit {
+    text
+  } else {
+    text[:limit].to_owned()
+  }
+}
+
+///|
+/// The name a session was given, read from its log.
+///
+/// The name lives at the end of a log and the label at the beginning, so finding it means reading
+/// the whole file — once per change, since the result is cached. Parsing goes through the same entry
+/// decoder as everything else, so a name written by pi is read here too; pattern-matching the JSON
+/// would stop working the day a field moves.
+///
+/// If a store of very many large sessions ever makes that visible, the fix is an index beside the
+/// store rather than a smaller read that gives wrong answers.
+fn session_name_of(text : String) -> String? {
+  let session = try @core.parse_session_file(text) catch {
+    // A file being written while we read it may not parse. `None` is the right answer: the next
+    // refresh reads it again.
+    _ => return None
+  } noraise {
+    parsed => parsed
+  }
+  session.name()
 }
 
 ///|
@@ -497,19 +583,24 @@ async fn workspace_items(
   for stored in @platform.list_workspaces(app.root, sidebar_sessions()) {
     let sessions : Array[@html.SessionItem] = []
     for session in stored.sessions {
-      let label = app.labels.label(session.path, session.modified)
+      let facts = app.labels.label(session.path, session.modified)
       sessions.push({
         path: session.path,
-        // A session whose first turn is still running has no label in its file yet, and
-        // "empty session" for the five minutes a long turn takes would be wrong. The
-        // running turn is the one thing we do know about it.
-        label: if label == "" {
-          match app.runner(session.path) {
-            Some(runner) => @html.clip_label(runner.prompt)
-            None => ""
-          }
-        } else {
-          label
+        // The reader's own name wins, because that is what a name is for.
+        label: match facts.name {
+          Some(name) => name
+          None =>
+            // Failing a name, the first question — except for a session whose first turn is still
+            // running, where the file has no label yet and "empty session" would be wrong for the
+            // five minutes a long turn takes. The running turn is what we do know.
+            if facts.label == "" {
+              match app.runner(session.path) {
+                Some(runner) => @html.clip_label(runner.prompt)
+                None => ""
+              }
+            } else {
+              facts.label
+            }
         },
         modified: session.modified,
         current: session.path == shown.path,
@@ -746,6 +837,7 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
   // The background panel changes when a command outlives its tool call, which is a turn event;
   // the supervisor task covers the other direction, a process exiting on its own.
   let refresh_jobs = async fn() {
+    refresh_live_pids(app)
     app.hub.broadcast(
       @html.Patch::Replace(
         target="jobs",
@@ -986,17 +1078,46 @@ async fn workspace_items_and_render(app : App, shown : Runner) -> String {
 // ── The page ───────────────────────────────────────────────────────────────
 
 ///|
+/// Take the process table the job panel filters against.
+async fn refresh_live_pids(app : App) -> Unit {
+  let pids : Array[Int] = []
+  for entry in @platform.process_table() {
+    pids.push(entry.0)
+  }
+  app.live_pids = pids
+}
+
+///|
+/// Whether a pid is one the reader would find if they looked now.
+fn App::still_running(self : App, pid : Int) -> Bool {
+  for live in self.live_pids {
+    if live == pid {
+      return true
+    }
+  }
+  false
+}
+
+///|
 /// The background panel, as HTML: every job, live ones first.
 fn render_jobs(app : App, now : Int64) -> String {
   let items : Array[@html.JobItem] = []
   for job in app.jobs.list() {
+    // Every pid ever seen, minus the ones that are gone: a command is recorded with its own shell
+    // and with the `ps` helper that reported it, and neither is what the reader is looking for.
+    let pids : Array[Int] = []
+    for pid in job.pids {
+      if app.still_running(pid) {
+        pids.push(pid)
+      }
+    }
     items.push({
       id: job.id,
       label: job.label,
       kind: job.kind,
       status: job.status.to_string(),
       age_ms: job.age_ms(now),
-      pids: job.pids,
+      pids,
       live: job.is_live(),
       detail: job.detail,
     })
@@ -1033,7 +1154,9 @@ fn bar_node(app : App, shown : Runner) -> @html.Node {
       // the width that kept the figures on the same line.
       // The id rather than the file name: the timestamp in the name is noise in a bar that is
       // read at a glance, and the full path is one hover away.
-      @html.chip("session", short_id(shown.path), detail=shown.path),
+      // A name if the reader gave one; otherwise the id, which is at least short and matches the
+      // file on disk.
+      @html.chip("session", shown.name_or_id(), detail=shown.path),
       @html.chip(
         "model",
         app.model,
@@ -1178,6 +1301,7 @@ async fn main {
     registry: [first],
     jobs: @core.JobStore::new(),
     labels: LabelCache::new(),
+    live_pids: [],
     displayed: first.path,
   }
   // Display changes go through a queue so that the order they arrive in is the order they
@@ -1234,6 +1358,41 @@ async fn main {
       },
       regions,
       prompt: async fn(text) {
+        match parse_command(text) {
+          Some(Name(value)) => {
+            let shown = app.shown()
+            if shown.is_running() {
+              // Two writers on one log is the corruption this whole design avoids: the turn is
+              // appending entries whose parent is its own leaf, and a rename appended now would
+              // hang off a stale one and end up on a branch nobody walks.
+              shown.status = "cannot rename while a turn is running"
+              app.hub.broadcast(@html.Patch::Status(text=shown.status).to_sse())
+            } else if value == "" {
+              // A bare command reports rather than clears: it should not be able to throw away
+              // something the reader typed earlier.
+              shown.status = match shown.session.name() {
+                Some(name) => "name: \{name}"
+                None => "this session has no name (use /name <text>)"
+              }
+              app.hub.broadcast(@html.Patch::Status(text=shown.status).to_sse())
+            } else {
+              let entry = @core.session_name_entry(
+                Some(value),
+                shown.session.leaf_id,
+                @env.now().reinterpret_as_int64(),
+              )
+              @platform.append_entry(shown.path, entry)
+              shown.session = shown.session.add_entries([entry])
+              shown.status = "named \{value}"
+              // The sidebar row and the bar chip both change, and both are regions.
+              for patch in regions() {
+                app.hub.broadcast(patch.to_sse())
+              }
+            }
+            return
+          }
+          None => ()
+        }
         let shown = app.shown()
         shown.waiting += 1
         if shown.busy {

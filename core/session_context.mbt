@@ -440,3 +440,21 @@ pub fn ContextMessage::to_json(self : ContextMessage) -> Json {
     }
   }
 }
+
+///|
+/// The name the reader gave this session, if they gave one.
+///
+/// The name is an entry in the log rather than a field somewhere else, which is what makes it
+/// survive a restart and stay visible to pi: it writes `/name` the same way. The newest entry
+/// wins, so renaming twice keeps one name rather than a history of them.
+pub fn Session::name(self : Session) -> String? {
+  let mut name : String? = None
+  for entry in self.path() {
+    match entry.kind {
+      // An entry without a name is a clear, and it clears like any other rename: the last one wins.
+      SessionInfo(name=entry_name) => name = entry_name
+      _ => ()
+    }
+  }
+  name
+}

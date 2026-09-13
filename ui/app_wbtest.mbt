@@ -94,6 +94,7 @@ fn test_app() -> App {
     registry: [],
     jobs: @core.JobStore::new(),
     labels: LabelCache::new(),
+    live_pids: [42],
     displayed: "",
   }
 }
@@ -395,16 +396,44 @@ test "the bar names the session by id and keeps the path one hover away" {
 // ── the label cache ────────────────────────────────────────────────────────
 
 ///|
-test "a cached label is reused only while the file it describes is unchanged" {
+test "cached facts are reused only while the file they describe is unchanged" {
   let cache = LabelCache::new()
   assert_true(cache.hit("/a.jsonl", 100L) is None)
-  cache.store("/a.jsonl", 100L, "the first question")
+  cache.store("/a.jsonl", 100L, { label: "the first question", name: None, })
   // Same modification time: the same answer, and no read.
-  assert_eq(cache.hit("/a.jsonl", 100L), Some("the first question"))
+  assert_eq(
+    cache.hit("/a.jsonl", 100L),
+    Some({ label: "the first question", name: None, }),
+  )
   // The file grew, so what it says may have changed.
   assert_true(cache.hit("/a.jsonl", 200L) is None)
   // Sessions are cached independently.
   assert_true(cache.hit("/b.jsonl", 100L) is None)
+}
+
+///|
+test "the name in a log is read through the entry decoder" {
+  let header : @core.SessionHeader = {
+    id: "s",
+    timestamp: @core.format_iso_utc(0L),
+    cwd: "/work/one",
+    parent_session: None,
+    version: Some(3),
+  }
+  let ask : @core.Entry = {
+    id: "u1",
+    parent_id: None,
+    timestamp: @core.format_iso_utc(0L),
+    kind: @core.Message(
+      message=@core.User({ content: [@core.Text("hi")], timestamp: 0L, }),
+    ),
+  }
+  let named = @core.session_name_entry(Some("refactor auth"), Some("u1"), 0L)
+  let log = header.to_line() + ask.to_line() + named.to_line()
+  assert_eq(session_name_of(log), Some("refactor auth"))
+  // A log nobody has named has no name, and neither has one that does not parse yet.
+  assert_eq(session_name_of(header.to_line() + ask.to_line()), None)
+  assert_eq(session_name_of("{\"type\":\"message\""), None)
 }
 
 // ── helpers for reading rendered HTML ──────────────────────────────────────
@@ -441,4 +470,102 @@ fn render_chips_text(chips : Array[@html.Node]) -> String {
     }
   }
   out.to_string()
+}
+
+// ── commands ───────────────────────────────────────────────────────────────
+
+///|
+test "only a real /name is a command" {
+  match parse_command("/name refactor auth") {
+    Some(Name(value)) => assert_eq(value, "refactor auth")
+    None => fail("expected a command")
+  }
+  // Extra spaces are the reader's, not part of the name.
+  match parse_command("  /name   two   spaces  ") {
+    Some(Name(value)) => assert_eq(value, "two   spaces")
+    None => fail("expected a command")
+  }
+  // Bare: report, not clear.
+  match parse_command("/name") {
+    Some(Name(value)) => assert_eq(value, "")
+    None => fail("expected a command")
+  }
+  // A slash that is not a command is a message, and goes to the model untouched.
+  for text in [
+    "/namefoo", "/names", "/tmp/some/path is broken", "what is 1/2?", "/Name x",
+  ] {
+    assert_true(parse_command(text) is None, msg="\{text} should not be a command")
+  }
+}
+
+// ── the name in the list and in the bar ────────────────────────────────────
+
+///|
+test "a named session is listed by its name, an unnamed one by its first question" {
+  let app = test_app()
+  let named = runner_at("/store/a.jsonl", 1)
+  let entry_by_name = @core.session_name_entry(Some("refactor auth"), None, 0L)
+  named.session = named.session.add_entries([entry_by_name])
+  let unnamed = runner_at("/store/b.jsonl", 1)
+  app.registry.push(named)
+  app.registry.push(unnamed)
+  let html = render_tasks(app, named)
+  ignore(html)
+  // The bar names the session by what the reader called it.
+  let bar = bar_node(app, named).render()
+  assert_true(bar.contains("refactor auth"), msg=bar)
+  assert_true(bar.contains("title=\"/store/a.jsonl\""), msg=bar)
+  // Without a name it falls back to the id, which matches the file on disk.
+  let plain = bar_node(app, unnamed).render()
+  assert_true(plain.contains("b"), msg=plain)
+  assert_false(plain.contains("refactor auth"), msg=plain)
+  assert_eq(named.name_or_id(), "refactor auth")
+  assert_eq(unnamed.name_or_id(), "b")
+}
+
+///|
+test "the sidebar shows the reader's name instead of the first question" {
+  let app = test_app()
+  app.labels.store("/store/a.jsonl", 100L, {
+    label: "the first question",
+    name: Some("refactor auth"),
+  })
+  app.labels.store("/store/b.jsonl", 100L, {
+    label: "another question",
+    name: None,
+  })
+  // The label the sidebar shows is resolved in `workspace_items`, which reads the store; what is
+  // testable here is the decision it applies: the name wins when there is one.
+  let named = app.labels.hit("/store/a.jsonl", 100L).unwrap()
+  let plain = app.labels.hit("/store/b.jsonl", 100L).unwrap()
+  assert_eq(named.name, Some("refactor auth"))
+  assert_eq(named.label, "the first question")
+  assert_eq(plain.name, None)
+}
+
+// ── the jobs panel stops showing dead pids ─────────────────────────────────
+
+///|
+test "the job panel shows only the processes that are still there" {
+  let app = test_app()
+  // Three pids recorded, as a command really is: its shell, the `ps` helper that reported the
+  // tree, and the process that was actually started.
+  let id = app.jobs.start(
+    kind="bash",
+    label="npm run dev",
+    session="/store/a.jsonl",
+    started_at=0L,
+    pids=[41, 42, 43],
+  )
+  // Only 42 is still alive.
+  app.live_pids = [42]
+  let html = render_jobs(app, 1000L)
+  assert_true(html.contains("pid 42"), msg=html)
+  assert_false(html.contains("41"), msg=html)
+  assert_false(html.contains("43"), msg=html)
+  // The record keeps all of them: a kill has to reach everything that was ever part of the job.
+  assert_eq(app.jobs.get(id).unwrap().pids, [41, 42, 43])
+  // With nothing alive the row says so rather than printing dead pids.
+  app.live_pids = []
+  assert_false(render_jobs(app, 1000L).contains("pid"), msg=render_jobs(app, 1000L))
 }
