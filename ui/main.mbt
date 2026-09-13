@@ -903,8 +903,8 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
                 ),
               ).to_scoped_sse(session),
             )
-            // Small enough that the reader sees the first characters almost immediately, large
-            // enough that a frame's envelope is not most of what it carries.
+            // Small: the flush timer above is what bounds latency, so this only has to keep a fast
+            // stream from turning every delta into a frame.
             let fresh = @html.StreamBuffer::new(id, threshold=24)
             open_text = Some(fresh)
             fresh
@@ -931,9 +931,10 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
                 @html.render_thinking_stream(id, "\{id}-body"),
               ).to_scoped_sse(session),
             )
-            // Much larger than text: reasoning is collapsed, so a frame buys only the sense that
-            // something is happening — and a thinking-heavy model sends a lot of it.
-            let fresh = @html.StreamBuffer::new("\{id}-body", threshold=256)
+            // Larger than text — a thinking-heavy model sends a lot of it — but the flush timer
+            // applies here too, because a block the reader opens mid-stream must not be empty or
+            // stale, and reasoning is exactly what a reader opens mid-stream.
+            let fresh = @html.StreamBuffer::new("\{id}-body", threshold=64)
             open_thinking = Some(fresh)
             fresh
           }
@@ -992,27 +993,64 @@ async fn run_prompt(app : App, runner : Runner, text : String) -> Unit {
     model=app.model,
     jobs=app.jobs,
   )
+  // Streaming is batched by size *and* flushed on a short timer, and the timer is what makes the
+  // reader's experience of it consistent. Batching alone means a block appears in the DOM when its
+  // first delta arrives but stays empty until enough text has piled up — so opening one mid-stream
+  // showed nothing, and for reasoning, which arrives in a flood, "enough" was a quarter of a
+  // kilobyte. Flushing by time bounds how stale a live block can be without turning every delta
+  // into a frame.
+  let mut flushing = true
+  let flush_open = () => {
+    for buffer in [open_text, open_thinking] {
+      match buffer {
+        Some(existing) =>
+          match existing.flush() {
+            Some(patch) => app.hub.broadcast(patch.to_scoped_sse(session))
+            None => ()
+          }
+        None => ()
+      }
+    }
+  }
   // A failed turn must not take the process down, and must not leave the session marked
   // as busy: the log is on disk, and the reader needs to see what happened.
   try {
-    let result = @agent.run_turn(
-      ctx,
-      text,
-      @env.now().reinterpret_as_int64(),
-      thinking_level="high",
-      on_delta=report,
-      should_stop=() => runner.aborting.value,
-      on_tool~,
-      on_progress~,
-      on_tool_process=handle => {
-        runner.phase = match handle {
-          Some(running) => "running \{running.name}: \{running.detail}"
-          None => "waiting for the model"
-        }
-        runner.tool = handle
-        refresh_tasks()
-      },
-    )
+    let result = @async.with_task_group(group => {
+      // The timer stops with the turn: `flushing` is the one flag the two share, and the group
+      // waits for the ticker rather than leaving it behind.
+      ignore(
+        group.spawn(() => {
+          while flushing {
+            @async.sleep(250)
+            if flushing {
+              flush_open()
+            }
+          }
+        }),
+      )
+      let finished = @agent.run_turn(
+        ctx,
+        text,
+        @env.now().reinterpret_as_int64(),
+        thinking_level="high",
+        on_delta=report,
+        should_stop=() => runner.aborting.value,
+        on_tool~,
+        on_progress~,
+        on_tool_process=handle => {
+          runner.phase = match handle {
+            Some(running) => "running \{running.name}: \{running.detail}"
+            None => "waiting for the model"
+          }
+          runner.tool = handle
+          refresh_tasks()
+        },
+      )
+      flushing = false
+      // Whatever the timer had not sent yet, so the snapshot a switch renders is complete.
+      flush_open()
+      finished
+    })
     runner.session = result.session
     app.hub.broadcast(
       @html.replace_node(

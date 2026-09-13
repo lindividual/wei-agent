@@ -491,10 +491,14 @@ test "only a real /name is a command" {
     None => fail("expected a command")
   }
   // A slash that is not a command is a message, and goes to the model untouched.
-  for text in [
-    "/namefoo", "/names", "/tmp/some/path is broken", "what is 1/2?", "/Name x",
-  ] {
-    assert_true(parse_command(text) is None, msg="\{text} should not be a command")
+  for
+    text in [
+      "/namefoo", "/names", "/tmp/some/path is broken", "what is 1/2?", "/Name x",
+    ] {
+    assert_true(
+      parse_command(text) is None,
+      msg="\{text} should not be a command",
+    )
   }
 }
 
@@ -567,5 +571,8 @@ test "the job panel shows only the processes that are still there" {
   assert_eq(app.jobs.get(id).unwrap().pids, [41, 42, 43])
   // With nothing alive the row says so rather than printing dead pids.
   app.live_pids = []
-  assert_false(render_jobs(app, 1000L).contains("pid"), msg=render_jobs(app, 1000L))
+  assert_false(
+    render_jobs(app, 1000L).contains("pid"),
+    msg=render_jobs(app, 1000L),
+  )
 }

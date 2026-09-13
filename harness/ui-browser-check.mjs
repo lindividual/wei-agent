@@ -418,8 +418,13 @@ async function main() {
       90000,
     );
     await cdp.waitFor(
-      `/model call/.test(document.getElementById('status').textContent)`,
-      "the status line to report the turn",
+      // The *final* line, not the progress one: "working… 1 model call(s)" also matches a naive
+      // "model call" test, and reading the status through that window found no cost yet.
+      `(() => {
+        const text = document.getElementById('status').textContent;
+        return /model call/.test(text) && !/working…/.test(text);
+      })()`,
+      "the status line to report the finished turn",
       90000,
     );
     const status = await cdp.eval("document.getElementById('status').textContent");
@@ -462,6 +467,51 @@ async function main() {
     check(
       (await cdp.eval("document.querySelectorAll('[id^=streams-]').length")) === 0,
       "the streaming container was replaced by the rendered reply",
+    );
+
+    console.log("\nstreaming blocks (a block must not be an empty box)");
+    // The reader can open a reasoning or tool block while it is still being written. Batching
+    // deltas by size alone meant the block appeared in the DOM on its first delta and stayed empty
+    // until enough text had piled up — a quarter of a kilobyte, for reasoning — so opening one
+    // mid-stream showed nothing at all. A flush timer bounds that, and this is the shape of the
+    // requirement: the live container has text in it while the turn runs.
+    await cdp.eval(
+      `(() => {
+        const input = document.getElementById('prompt');
+        input.value = "Think it through carefully, then answer in one sentence: what is the most common cause of flaky tests? No tools.";
+        document.getElementById('composer').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.querySelectorAll('[id^=streams-]').length >= 1`,
+      "a live container to appear",
+      60000,
+    );
+    await cdp.waitFor(
+      `document.querySelector('[id^=streams-]').textContent.trim().length > 0`,
+      "the live block to have text in it",
+      2000,
+    );
+    check(true, "a block that is streaming has text, not an empty box");
+    // And opening one shows that text: the detail the reader clicked for.
+    const liveVisible = await cdp.eval(
+      `(() => {
+        const details = document.querySelector('[id^=streams-] details');
+        if (!details) return 'no details yet';
+        details.open = true;
+        return details.textContent.trim().length > 0 ? 'has text' : 'empty';
+      })()`,
+    );
+    check(
+      liveVisible === 'has text' || liveVisible === 'no details yet',
+      "expanding a live block shows its content",
+      liveVisible,
+    );
+    await cdp.waitFor(
+      `!/working…/.test(document.getElementById('status').textContent)`,
+      "the turn to finish before the next section",
+      120000,
     );
 
     console.log("\nsidebar (a new session, then going back to the old one)");
