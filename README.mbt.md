@@ -249,6 +249,7 @@ moon test -p platform        # 36 个测试，工具、存储、工作区注册�
 moon test -p html            # 35 个测试，含侧边栏结构与 4 个 HTML 注入测试
 moon test -p server          # 8 个测试，起真 socket 验传输
 moon test -p agent           # 10 个测试，假模型端到端跑 turn（含停下时杀掉命令、后台任务登记）
+moon test -p ui              # 19 个测试，界面自己的逻辑：参数解析、状态机、面板映射、用量策略
 moon run verify              # 全量：160 个文件、46,399 条 entry 往返
 moon run cli -- "hello"      # 打一次真实 DeepSeek，端到端
 node harness/ui-browser-check.mjs   # 真实浏览器验收（自己起 headless Chrome）

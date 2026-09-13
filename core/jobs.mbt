@@ -292,6 +292,50 @@ pub fn JobStore::forget(self : JobStore, id : String) -> Unit {
 }
 
 ///|
+/// Settle the jobs whose processes are all gone, and say whether anything changed.
+///
+/// `alive` answers "is this pid still running" — the caller owns that question because it needs a
+/// process table, and keeping it out means the decision below can be tested without one.
+///
+/// The status a job gets depends on why it ended, which is the part worth naming: a job the reader
+/// stopped settles as `killed` (they asked for it), and one that left on its own settles as
+/// `completed`. Marking both "exited on its own" would tell the reader the opposite of what they
+/// did — and the panel is where they check.
+pub fn JobStore::settle_gone(
+  self : JobStore,
+  alive : (Int) -> Bool,
+  now~ : Int64,
+) -> Bool {
+  let mut changed = false
+  for job in self.jobs {
+    if !job.is_live() {
+      continue
+    }
+    // No pids means the command has not been seen yet, not that its work is over: a job is
+    // registered when it starts and learns its pids a moment later, and settling in that window
+    // would drop the record of something that is running right then.
+    if job.pids.is_empty() {
+      continue
+    }
+    let mut any_alive = false
+    for pid in job.pids {
+      if alive(pid) {
+        any_alive = true
+      }
+    }
+    if any_alive {
+      continue
+    }
+    let stopping = job.status is Stopping
+    job.status = if stopping { Killed } else { Completed }
+    job.detail = if stopping { "stopped" } else { "exited on its own" }
+    job.finished_at = Some(now)
+    changed = true
+  }
+  changed
+}
+
+///|
 /// Drop the jobs of a session that are no longer live, so the panel does not accumulate
 /// history. Returns how many were dropped.
 pub fn JobStore::forget_finished(

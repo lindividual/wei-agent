@@ -439,22 +439,46 @@ pub fn LabelCache::new() -> LabelCache {
 
 ///|
 /// The label for a session, reading its head only when the file has changed.
+fn LabelCache::hit(
+  self : LabelCache,
+  path : String,
+  modified : Int64,
+) -> String? {
+  match self.entries.get(path) {
+    Some((cached_at, label)) =>
+      if cached_at == modified {
+        Some(label)
+      } else {
+        None
+      }
+    None => None
+  }
+}
+
+///|
+fn LabelCache::store(
+  self : LabelCache,
+  path : String,
+  modified : Int64,
+  label : String,
+) -> Unit {
+  self.entries.set(path, (modified, label))
+}
+
+///|
 async fn LabelCache::label(
   self : LabelCache,
   path : String,
   modified : Int64,
 ) -> String {
-  match self.entries.get(path) {
-    Some((cached_at, label)) =>
-      if cached_at == modified {
-        return label
-      }
+  match self.hit(path, modified) {
+    Some(label) => return label
     None => ()
   }
   // The first user message is in the first lines of the file; the cap only has to be larger than
   // the header plus a few entries.
   let label = @core.session_label(@platform.read_prefix(path, 16 * 1024))
-  self.entries.set(path, (modified, label))
+  self.store(path, modified, label)
   label
 }
 
@@ -599,12 +623,15 @@ fn format_cost(value : Double) -> String {
   let scale = if decimals == 6 { 1000000.0 } else { 10000.0 }
   let scaled = (value * scale).round().to_int()
   let text = "\{scaled}"
-  let padded = if text.length() >= decimals {
+  // Digits include the ones before the point, so a session that has cost a dollar is not printed
+  // as a tenth of one. The point goes in `decimals` from the right whatever the magnitude.
+  let padded = if text.length() >= decimals + 1 {
     text
   } else {
-    zeroes(decimals - text.length()) + text
+    zeroes(decimals + 1 - text.length()) + text
   }
-  "0." + padded
+  let cut = padded.length() - decimals
+  padded[:cut].to_owned() + "." + padded[cut:].to_owned()
 }
 
 ///|
@@ -1284,18 +1311,24 @@ async fn main {
       group.spawn(() => {
         while true {
           @async.sleep(2000)
-          let mut changed = false
-          for job in app.jobs.live() {
-            if @platform.live_of(job.pids).is_empty() {
-              app.jobs.finish(
-                job.id,
-                @core.JobStatus::Completed,
-                detail="exited on its own",
-                finished_at=@env.now().reinterpret_as_int64(),
-              )
-              changed = true
-            }
+          // One process table for the whole tick rather than a `/bin/kill -0` per pid: the
+          // question is the same for every job, and asking it per pid spawns a process per pid.
+          let live : Array[Int] = []
+          for entry in @platform.process_table() {
+            live.push(entry.0)
           }
+          let changed = app.jobs.settle_gone(
+            pid => {
+              let mut found = false
+              for running in live {
+                if running == pid {
+                  found = true
+                }
+              }
+              found
+            },
+            now=@env.now().reinterpret_as_int64(),
+          )
           if changed {
             app.hub.broadcast(
               @html.Patch::Replace(

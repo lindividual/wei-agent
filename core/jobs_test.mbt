@@ -164,3 +164,61 @@ test "a record that was not background work can be dropped" {
   assert_eq(store.list().length(), 0)
   assert_true(store.get(id) is None)
 }
+
+///|
+/// A job whose processes are gone settles, and how it settles depends on who ended it.
+test "settling a job whose processes are gone distinguishes stopping from exiting" {
+  let store = JobStore::new()
+  let stopped = store.start(
+    kind="bash",
+    label="npm run dev",
+    session="/a",
+    started_at=0L,
+    pids=[10, 11],
+  )
+  let left = store.start(
+    kind="bash",
+    label="sleep 30",
+    session="/a",
+    started_at=0L,
+    pids=[12],
+  )
+  // The reader asked for one of them to stop; the other simply ended.
+  ignore(store.request_stop(stopped))
+  // While every job still has a live process, nothing settles.
+  assert_false(store.settle_gone(pid => pid == 10 || pid == 12, now=5L))
+  assert_true(store.get(stopped).unwrap().is_live())
+  // One of the stopped job's processes is gone and the other is too, so it settles — while the
+  // job whose process is alive is left alone.
+  assert_true(store.settle_gone(pid => pid == 12, now=6L))
+  assert_eq(store.get(stopped).unwrap().status, Killed)
+  assert_true(store.get(left).unwrap().is_live())
+  // Now nothing is alive.
+  assert_true(store.settle_gone(_pid => false, now=7L))
+  assert_eq(store.get(stopped).unwrap().status, Killed)
+  assert_eq(store.get(stopped).unwrap().detail, "stopped")
+  // A job that left on its own is not one the reader stopped.
+  assert_eq(store.get(left).unwrap().status, Completed)
+  assert_eq(store.get(left).unwrap().detail, "exited on its own")
+  assert_eq(store.get(left).unwrap().finished_at, Some(7L))
+  // Settling again changes nothing, so a caller can poll without churning the panel.
+  assert_false(store.settle_gone(_pid => false, now=8L))
+}
+
+///|
+/// A job with no recorded pids is not evidence that its work is gone.
+///
+/// The window is real: a command that backgrounds something is registered before its pids are
+/// known, and settling it there would drop the record that the whole feature exists for.
+test "a job with no pids yet is left alone" {
+  let store = JobStore::new()
+  let id = store.start(
+    kind="bash",
+    label="npm run dev &",
+    session="/a",
+    started_at=0L,
+    pids=[],
+  )
+  assert_false(store.settle_gone(_pid => false, now=100L))
+  assert_true(store.get(id).unwrap().is_live())
+}

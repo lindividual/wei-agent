@@ -64,7 +64,9 @@ test "quotes in markup survive the frame" {
 ///|
 test "each operation encodes its own shape" {
   assert_true(
-    Patch::AppendText(target="t", text="hi").to_sse().contains("\"op\":\"appendtext\""),
+    Patch::AppendText(target="t", text="hi")
+    .to_sse()
+    .contains("\"op\":\"appendtext\""),
   )
   assert_true(
     Patch::Status(text="working").to_sse().contains("\"op\":\"status\""),
@@ -138,7 +140,10 @@ test "a long stream sends each character exactly once" {
   // Every character once, no more and no fewer.
   assert_eq(total, expected)
   // And a bounded number of frames: one per threshold, not one per delta.
-  assert_true(frames <= expected / 64 + 1, msg="\{frames} frames for \{expected} characters")
+  assert_true(
+    frames <= expected / 64 + 1,
+    msg="\{frames} frames for \{expected} characters",
+  )
 }
 
 ///|
