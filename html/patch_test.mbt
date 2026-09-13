@@ -15,7 +15,7 @@ fn frame_lines(frame : String) -> Array[String] {
 
 ///|
 test "an append frame carries the operation and the markup" {
-  let frame = append_node("transcript", el("div", children=[txt("hi")])).to_sse()
+  let frame = append_node("transcript", el(Div, children=[txt("hi")])).to_sse()
   assert_true(frame.has_prefix("event: patch\n"), msg=frame)
   assert_true(frame.contains("\"op\":\"append\""), msg=frame)
   assert_true(frame.contains("\"target\":\"transcript\""), msg=frame)
@@ -72,7 +72,7 @@ test "each operation encodes its own shape" {
     Patch::Status(text="working").to_sse().contains("\"op\":\"status\""),
   )
   assert_true(
-    replace_node("t", el("div")).to_sse().contains("\"op\":\"replace\""),
+    replace_node("t", el(Div)).to_sse().contains("\"op\":\"replace\""),
   )
   // A status update has no target: it is about the page, not an element.
   assert_false(Patch::Status(text="x").to_sse().contains("\"target\""))

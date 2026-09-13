@@ -112,3 +112,50 @@ fn usage_entry(
   }
   entry
 }
+
+///|
+/// The cache-hit denominator: everything the provider billed on the prompt side, so a hit
+/// and a miss land in the same number.
+test "billed input counts fresh and cached prompt tokens together" {
+  let header : SessionHeader = {
+    id: "s",
+    timestamp: format_iso_utc(0L),
+    cwd: "/tmp",
+    parent_session: None,
+    version: None,
+  }
+  let session = Session::new(header, [usage_entry("a", None, 100, 20, 40, None)])
+  let total = session.usage()
+  // 100 fresh + 40 cached, and the 20 output tokens are not prompt tokens at all.
+  assert_eq(total.billed_input(), 140)
+  assert_eq(Session::new(header, []).usage().billed_input(), 0)
+}
+
+///|
+test "cost keeps the digits that make it non-zero" {
+  // A turn costs a fraction of a cent; rounding to cents would print every turn as $0.00.
+  assert_eq(format_cost(0.0), "0.000000")
+  assert_eq(format_cost(0.0000345), "0.000035")
+  assert_eq(format_cost(0.05), "0.050000")
+  assert_eq(format_cost(1.2345), "1.2345")
+}
+
+///|
+test "a cache-hit share never rounds a partial hit up to a full one" {
+  // The table is dsh's: each row is a real ratio whose rounded reading must not become a
+  // full hit while a miss remains. The extra decimals are the information.
+  assert_eq(format_cache_hit_percent(986, 1000), Some("99"))
+  assert_eq(format_cache_hit_percent(991, 1000), Some("99"))
+  assert_eq(format_cache_hit_percent(9949, 10000), Some("99"))
+  assert_eq(format_cache_hit_percent(995, 1000), Some("99.5"))
+  assert_eq(format_cache_hit_percent(9994, 10000), Some("99.9"))
+  assert_eq(format_cache_hit_percent(9995, 10000), Some("99.95"))
+  assert_eq(format_cache_hit_percent(19991, 20000), Some("99.96"))
+  assert_eq(format_cache_hit_percent(19997, 20000), Some("99.99"))
+  assert_eq(format_cache_hit_percent(19999, 20000), Some("99.995"))
+  assert_eq(format_cache_hit_percent(39999, 40000), Some("99.998"))
+  // A whole hit is exact, and no prompt is not a share at all.
+  assert_eq(format_cache_hit_percent(10000, 10000), Some("100"))
+  assert_eq(format_cache_hit_percent(0, 100), Some("0"))
+  assert_eq(format_cache_hit_percent(0, 0), None)
+}

@@ -220,6 +220,234 @@ pub fn agent_note_type() -> String {
   "agent-note"
 }
 
+// ── Turn outcomes ───────────────────────────────────────────────────
+
+///|
+/// Why a turn ended the way it did, when the reason is not visible in the conversation.
+///
+/// A turn has three ways to end that look identical in the log: the model stopped, a limit
+/// stopped it, or the output was cut off at the token ceiling. The first is normal and needs no
+/// record. The other two change what the reader should do next — resume with a longer bound, or
+/// ask the model to continue — and are otherwise unrecoverable once the process exits, because
+/// the messages they left behind say nothing about why writing stopped.
+///
+/// A `custom` entry rather than a field on the assistant message: the message format is pi's and
+/// shared with other readers, while this is a fact about how *this* agent ran the turn. `custom`
+/// entries are not replayed to the model, so recording one cannot change what the model sees, and
+/// a reader that does not know the type skips it.
+pub fn turn_outcome_type() -> String {
+  "turn-outcome"
+}
+
+///|
+/// How a turn ended, in the cases worth writing down.
+pub(all) enum TurnEnding {
+  /// The model decided it was done. Recorded like the others so that a turn which never wrote an
+  /// outcome is unambiguously one that was interrupted — the alternative, writing nothing on
+  /// success, makes "stopped" and "finished" the same absence in the log.
+  Completed
+  /// A guard stopped the turn rather than the model finishing.
+  CostLimit
+  TimeLimit
+  RoundLimit
+  /// The model's last answer hit the output ceiling.
+  Truncated
+  /// The reader stopped it.
+  Stopped
+  /// The reader chose to start over rather than continue an interrupted turn.
+  ///
+  /// Distinct from `Stopped`, which means a turn that was running was cut short. This one was
+  /// never running when it ended: it is how an interrupted turn is closed when the reader decides
+  /// not to resume it. Both close the turn, and the difference is what a later reader needs to know
+  /// — one says "someone stopped this", the other says "this was left behind".
+  Abandoned
+} derive(Eq, Debug)
+
+///|
+/// Whether this ending is one a reader needs warning about.
+///
+/// A normally completed turn is recorded but never surfaced: it is the ordinary case, and a
+/// status line that announced it would be saying nothing every time.
+pub fn TurnEnding::is_interruption(self : TurnEnding) -> Bool {
+  match self {
+    Completed => false
+    _ => true
+  }
+}
+
+///|
+/// The `customType` under which a turn's opening is stored.
+///
+/// A turn is *durably open* between this entry and its outcome. That is what makes an
+/// interruption a fact recorded in the log rather than something inferred from how the messages
+/// happen to end — and inferring it is unreliable, because a turn cut off by a cost limit and a
+/// turn that finished both stop at a message.
+pub fn turn_start_type() -> String {
+  "turn-start"
+}
+
+///|
+/// Build the entry that opens a turn.
+///
+/// The prompt is recorded here rather than left to the user message that follows, because the
+/// interesting case is the one where there is no following message: a reader asking "what was it
+/// doing when it stopped?" has nothing else to go on.
+pub fn turn_start_entry(
+  prompt : String,
+  parent_id : String?,
+  timestamp : Int64,
+) -> Entry {
+  {
+    id: new_entry_id(),
+    parent_id,
+    timestamp: format_iso_utc(timestamp),
+    kind: Custom(
+      custom_type=turn_start_type(),
+      data=Some(Json::object(Map([("prompt", Json::string(prompt))]))),
+    ),
+  }
+}
+
+///|
+/// Whether the active path ends inside a turn that never recorded an outcome.
+///
+/// This is the durable form of "the process died mid-turn". Read from the entries, so it is the
+/// same answer after a restart as before one, and it holds even when the interruption left the
+/// conversation perfectly balanced — a turn killed between two tool calls wrote no unanswered
+/// call, and `needs_repair` cannot see it.
+pub fn Session::turn_in_flight(self : Session) -> Bool {
+  let mut open = false
+  for entry in self.path() {
+    match entry.kind {
+      Custom(custom_type~, ..) =>
+        if custom_type == turn_start_type() {
+          open = true
+        } else if custom_type == turn_outcome_type() {
+          open = false
+        }
+      _ => ()
+    }
+  }
+  open
+}
+
+///|
+/// The prompt of the turn that is currently open, if one is.
+pub fn Session::in_flight_prompt(self : Session) -> String? {
+  let mut prompt : String? = None
+  for entry in self.path() {
+    match entry.kind {
+      Custom(custom_type~, data~) =>
+        if custom_type == turn_start_type() {
+          prompt = match data {
+            Some(Json::Object(fields)) =>
+              match fields.get("prompt") {
+                Some(String(text)) => Some(text)
+                _ => Some("")
+              }
+            _ => Some("")
+          }
+        } else if custom_type == turn_outcome_type() {
+          prompt = None
+        }
+      _ => ()
+    }
+  }
+  prompt
+}
+
+///|
+/// The `kind` field written for one ending.
+fn ending_name(ending : TurnEnding) -> String {
+  match ending {
+    Completed => "completed"
+    CostLimit => "cost_limit"
+    TimeLimit => "time_limit"
+    RoundLimit => "round_limit"
+    Truncated => "truncated"
+    Stopped => "stopped"
+    Abandoned => "abandoned"
+  }
+}
+
+///|
+/// Build the entry recording how a turn ended.
+///
+/// `turns` is the count of model calls the turn made; it is what a reader needs to judge whether
+/// the limit was reached quickly (a looping model) or after a long stretch of real work (a task
+/// that simply needed more room).
+pub fn turn_outcome_entry(
+  ending : TurnEnding,
+  turns : Int,
+  cost : Double,
+  parent_id : String?,
+  timestamp : Int64,
+) -> Entry {
+  {
+    id: new_entry_id(),
+    parent_id,
+    timestamp: format_iso_utc(timestamp),
+    kind: Custom(
+      custom_type=turn_outcome_type(),
+      data=Some(
+        Json::object(
+          Map([
+            ("ending", Json::string(ending_name(ending))),
+            ("turns", Json::number(turns.to_double())),
+            ("cost", Json::number(cost)),
+          ]),
+        ),
+      ),
+    ),
+  }
+}
+
+///|
+/// How the most recent turn on the active path ended, if it was an ending worth recording.
+///
+/// Read from the entries rather than the derived context, for the same reason notes are: the
+/// record is deliberately not part of the conversation.
+pub fn Session::last_turn_ending(self : Session) -> TurnEnding? {
+  let path = self.path()
+  let mut found : TurnEnding? = None
+  for entry in path {
+    match entry.kind {
+      Custom(custom_type~, data~) =>
+        if custom_type == turn_outcome_type() {
+          match data {
+            Some(Json::Object(fields)) =>
+              match fields.get("ending") {
+                Some(String(name)) =>
+                  found = Some(
+                    if name == "completed" {
+                      Completed
+                    } else if name == "cost_limit" {
+                      CostLimit
+                    } else if name == "time_limit" {
+                      TimeLimit
+                    } else if name == "round_limit" {
+                      RoundLimit
+                    } else if name == "truncated" {
+                      Truncated
+                    } else if name == "stopped" {
+                      Stopped
+                    } else if name == "abandoned" {
+                      Abandoned
+                    } else {
+                      continue
+                    },
+                  )
+                _ => ()
+              }
+            _ => ()
+          }
+        }
+      _ => ()
+    }
+  }
+  found
+}
+
 ///|
 /// Build the entry recording a session's name.
 ///
@@ -235,6 +463,26 @@ pub fn session_name_entry(
     parent_id,
     timestamp: format_iso_utc(timestamp),
     kind: SessionInfo(name~),
+  }
+}
+
+///|
+/// Build the entry recording which model a session runs on.
+///
+/// An entry rather than a field on the session header, because pi derives the model from the log
+/// and a session resumed here has to read back the way pi would read it. It is a settings entry,
+/// not a message: it never reaches the model as a turn.
+pub fn model_change_entry(
+  provider : String,
+  model_id : String,
+  parent_id : String?,
+  timestamp : Int64,
+) -> Entry {
+  {
+    id: new_entry_id(),
+    parent_id,
+    timestamp: format_iso_utc(timestamp),
+    kind: ModelChange(provider~, model_id~),
   }
 }
 

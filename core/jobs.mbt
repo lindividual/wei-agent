@@ -228,6 +228,48 @@ pub fn JobStore::finish(
 }
 
 ///|
+/// Reconcile live jobs against the processes that actually exist, and report how many were lost.
+///
+/// Called on start, with the store read back from disk. A job that was running when the server went
+/// away is one of two things, and only the process table can tell them apart:
+///
+/// - a process that is still there, which is the case persistence exists for — the record is what
+///   lets the reader find and kill something the server no longer owns;
+/// - a process that has since exited, whose outcome nobody witnessed, so the honest thing to say is
+///   that it was lost rather than to leave it claiming to be running forever.
+///
+/// `is_alive` is a parameter rather than a process-table call so the decision is pure and testable:
+/// this is the part with a rule in it, and the rule is not about pids — it is about what to claim
+/// when the only evidence is gone.
+pub fn JobStore::reconcile(
+  self : JobStore,
+  is_alive : (Int) -> Bool,
+  now : Int64,
+) -> Int {
+  let mut lost = 0
+  for job in self.jobs {
+    if !job.is_live() {
+      continue
+    }
+    // Any surviving pid keeps the job alive: a command's shell can exit while the child it
+    // backgrounded is the actual work, which is the whole reason several pids are recorded.
+    let mut alive = false
+    for pid in job.pids {
+      if is_alive(pid) {
+        alive = true
+      }
+    }
+    if !alive {
+      job.status = Failed
+      job.detail = "lost: the server exited while this was running"
+      job.finished_at = Some(now)
+      lost = lost + 1
+    }
+  }
+  lost
+}
+
+///|
 /// Record more pids and output for a live job.
 pub fn JobStore::observe(
   self : JobStore,
@@ -358,4 +400,193 @@ pub fn JobStore::forget_finished(
   }
   self.jobs = kept
   dropped
+}
+
+// ── Persistence ────────────────────────────────────────────────────────────
+
+///|
+/// The store as JSON, for writing somewhere that outlives the process.
+///
+/// Jobs are kept in memory, which is right for the panel and wrong for the processes: a `bash`
+/// job that outlives its tool call also outlives the server if the server is killed, and a child
+/// process whose only record died with the process that started it is an orphan nobody can find,
+/// let alone stop. Writing the records down is what makes "there is still something running from
+/// last time" a fact the next start can act on.
+///
+/// `next_id` is persisted too. Without it a restart would hand out `bash-1` again while `bash-1`
+/// from the previous run is still on the loose, and two live jobs sharing an id is worse than
+/// losing the records.
+pub fn JobStore::to_json(self : JobStore) -> Json {
+  let jobs : Array[Json] = []
+  for job in self.jobs {
+    jobs.push(
+      Json::object(
+        Map([
+          ("id", Json::string(job.id)),
+          ("kind", Json::string(job.kind)),
+          ("label", Json::string(job.label)),
+          ("session", Json::string(job.session)),
+          ("status", Json::string(job.status.to_string())),
+          ("startedAt", Json::number(job.started_at.to_double())),
+          (
+            "finishedAt",
+            match job.finished_at {
+              Some(t) => Json::number(t.to_double())
+              None => Json::null()
+            },
+          ),
+          ("detail", Json::string(job.detail)),
+          ("pids", Json::array(job.pids.map(p => Json::number(p.to_double())))),
+          ("tail", Json::string(job.tail)),
+        ]),
+      ),
+    )
+  }
+  Json::object(
+    Map([
+      ("nextId", Json::number(self.next_id.to_double())),
+      ("jobs", Json::array(jobs)),
+    ]),
+  )
+}
+
+///|
+fn json_string(j : Json, key : String) -> String? {
+  match j {
+    Object(fields) =>
+      match fields.get(key) {
+        Some(String(value)) => Some(value)
+        _ => None
+      }
+    _ => None
+  }
+}
+
+///|
+fn json_int(j : Json, key : String) -> Int? {
+  match j {
+    Object(fields) =>
+      match fields.get(key) {
+        Some(Number(value, ..)) => Some(value.to_int())
+        _ => None
+      }
+    _ => None
+  }
+}
+
+///|
+/// A JSON number as an `Int64`.
+///
+/// Separate from `json_int` because an epoch-millisecond timestamp does not fit in the 32-bit
+/// `Int` this platform has: `1789283993636.0.to_int()` saturates to `2147483647`, and a job read
+/// back from disk would claim to have started in 1970 — which is how the panel came to print an
+/// age of 496426 hours for a job that had been running for a minute. Token counts and id counters
+/// are small and can stay `Int`; times cannot.
+fn json_int64(j : Json, key : String) -> Int64? {
+  match j {
+    Object(fields) =>
+      match fields.get(key) {
+        Some(Number(value, ..)) => Some(value.to_int64())
+        _ => None
+      }
+    _ => None
+  }
+}
+
+///|
+fn status_of(name : String) -> JobStatus {
+  if name == "running" {
+    Running
+  } else if name == "stopping" {
+    Stopping
+  } else if name == "completed" {
+    Completed
+  } else if name == "killed" {
+    Killed
+  } else {
+    Failed
+  }
+}
+
+///|
+/// Read a store back, skipping anything malformed.
+///
+/// Tolerant on purpose: this file is written by a process that may have been killed mid-write, and
+/// a single truncated record must not cost the reader every *other* job that was recorded. A file
+/// that does not parse at all reads as an empty store, which is the same thing a first run sees.
+pub fn parse_job_store(text : String) -> JobStore {
+  let parsed = try @json.parse(text) catch {
+    _ => return JobStore::new()
+  } noraise {
+    value => value
+  }
+  let jobs_json = match json_field(parsed, "jobs") {
+    Some(Array(items)) => items
+    _ => return JobStore::new()
+  }
+  let jobs : Array[Job] = []
+  for item in jobs_json {
+    let id = match json_string(item, "id") {
+      Some(value) => value
+      None => continue
+    }
+    let started_at = match json_int64(item, "startedAt") {
+      Some(value) => value
+      None => continue
+    }
+    let pids : Array[Int] = []
+    match json_field(item, "pids") {
+      Some(Array(values)) =>
+        for value in values {
+          match value {
+            Number(n, ..) => pids.push(n.to_int())
+            _ => ()
+          }
+        }
+      _ => ()
+    }
+    jobs.push({
+      id,
+      kind: json_string(item, "kind").unwrap_or(""),
+      label: json_string(item, "label").unwrap_or(""),
+      session: json_string(item, "session").unwrap_or(""),
+      status: status_of(json_string(item, "status").unwrap_or("")),
+      started_at,
+      finished_at: json_int64(item, "finishedAt"),
+      detail: json_string(item, "detail").unwrap_or(""),
+      pids,
+      tail: json_string(item, "tail").unwrap_or(""),
+    })
+  }
+  {
+    jobs,
+    // A store with no recorded counter resumes from one past the highest id it read, so a
+    // restart cannot reissue an id that a surviving process is still using.
+    next_id: match json_int(parsed, "nextId") {
+      Some(value) => value
+      None => highest_id_number(jobs) + 1
+    },
+  }
+}
+
+///|
+/// The largest `N` in any `<kind>-N` id, or zero.
+fn highest_id_number(jobs : Array[Job]) -> Int {
+  let mut highest = 0
+  for job in jobs {
+    let at = job.id.rev_find("-")
+    let digits = match at {
+      Some(index) => job.id[index + 1:].to_owned()
+      None => continue
+    }
+    let value = try @string.parse_int(digits) catch {
+      _ => continue
+    } noraise {
+      parsed => parsed
+    }
+    if value > highest {
+      highest = value
+    }
+  }
+  highest
 }

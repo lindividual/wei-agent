@@ -8,8 +8,14 @@
 /// - `POST /prompt`   a user message
 /// - `POST /session`  open a saved session (of any workspace)
 /// - `POST /workspace` add a directory as a workspace
+/// - `POST /workspace/pick` open the host's folder chooser and add what it returns
 /// - `POST /new`      start a new session in a workspace
+/// - `POST /more`     lift the session-list cap for one workspace
 /// - `POST /abort`    stop the running turn
+/// - `POST /settings/key`    save or clear the key the panel writes
+/// - `POST /settings/skills` apply the set of enabled skills
+/// - `POST /settings/limits` set or clear the two turn limits
+/// - `POST /model`    switch the displayed session's model
 ///
 /// The POST routes answer immediately and the work happens behind them. A turn
 /// can take minutes; a request that waits for it to finish makes the browser look
@@ -59,6 +65,51 @@ pub(all) struct Routes {
   /// Adds a directory as a workspace. Reports why not through the status line when the path
   /// does not name a directory.
   add_workspace : async (String) -> Unit
+  /// Asks the host to open its folder chooser, and adds whatever comes back.
+  ///
+  /// No body: the answer to a dialog is not in the request, and the reader is the one choosing.
+  /// Async because the dialog is waited on — this is the one route whose handler outlives its
+  /// response on purpose.
+  choose_workspace : async () -> Unit
+  /// Renames the displayed session to the body, verbatim.
+  ///
+  /// Passed through as typed, like `prompt`: the `/name` command reaches the same rename with the
+  /// same undecoded text, and a second decoding convention would be a second thing to keep true.
+  rename : async (String) -> Unit
+  /// Takes one saved session out of the store by renaming it aside, so it can be put back.
+  ///
+  /// The body is the session's path, which the sidebar already holds — the identity used for opening
+  /// is the file, not the id, and deleting uses the same one for the same reason.
+  delete_session : async (String) -> Unit
+  /// Lists every session of a workspace, past the sidebar's cap. The body is the working
+  /// directory, which is what a workspace is addressed by everywhere else.
+  more : async (String) -> Unit
+  /// Puts the last deleted session back. The body is the path it had.
+  undo_delete : async (String) -> Unit
+  /// Switches the displayed session to the model named in the body, which is one id.
+  ///
+  /// Its own route rather than a settings form: the model is a property of a session, not of the
+  /// process, so it is not something `~/.pi-mb/settings.json` holds and it must not go through the
+  /// panel's settings lock.
+  set_model : async (String) -> Unit
+  /// Resumes the interrupted turn of the displayed session.
+  ///
+  /// The body names the session; empty means the one on screen, like `abort`. Its own route rather
+  /// than part of `prompt`, because it is the one gesture that does NOT carry a new message: the
+  /// prompt it continues is already in the log, and sending it again would append a second copy.
+  continue_turn : async (String) -> Unit
+  /// Closes the displayed session's interrupted turn without resuming it.
+  ///
+  /// The other half of the same choice. It writes an outcome rather than doing nothing, because
+  /// otherwise the turn stays open forever and the notice keeps coming back.
+  dismiss_turn : async (String) -> Unit
+  /// Handles one POST from the settings panel: `saved key=…&clear=1` or `skill=a&skill=b`.
+  ///
+  /// One entry point rather than two, because the two forms differ only in a field name and a
+  /// second variant of `Routes` would be a second thing to wire up and test. The body is passed
+  /// through as the form-encoded text the browser sent, and decoding it is the application's
+  /// business — the transport has no opinion about what a key or a skill is.
+  settings : async (String) -> Unit
 }
 
 ///|
@@ -165,6 +216,26 @@ pub async fn serve(port : Int, hub : Hub, routes : Routes) -> Unit {
         ok(conn)
         (routes.switch_session)(path)
       }
+      (Post, "/name") => {
+        let name = read_body(body)
+        ok(conn)
+        (routes.rename)(name)
+      }
+      (Post, "/session/delete") => {
+        let path = read_body(body)
+        ok(conn)
+        (routes.delete_session)(path)
+      }
+      (Post, "/session/undo") => {
+        let path = read_body(body)
+        ok(conn)
+        (routes.undo_delete)(path)
+      }
+      (Post, "/more") => {
+        let cwd = read_body(body)
+        ok(conn)
+        (routes.more)(cwd.trim().to_owned())
+      }
       (Post, "/new") => {
         let cwd = read_body(body)
         ok(conn)
@@ -175,10 +246,42 @@ pub async fn serve(port : Int, hub : Hub, routes : Routes) -> Unit {
         ok(conn)
         (routes.kill_job)(id.trim().to_owned())
       }
+      (Post, "/continue") => {
+        let target = read_body(body)
+        ok(conn)
+        (routes.continue_turn)(target.trim().to_owned())
+      }
+      (Post, "/dismiss") => {
+        let target = read_body(body)
+        ok(conn)
+        (routes.dismiss_turn)(target.trim().to_owned())
+      }
+      (Post, "/model") => {
+        let id = read_body(body)
+        ok(conn)
+        (routes.set_model)(id.trim().to_owned())
+      }
       (Post, "/workspace") => {
         let cwd = read_body(body)
         ok(conn)
         (routes.add_workspace)(cwd.trim().to_owned())
+      }
+      (Post, "/workspace/pick") => {
+        // Drained before answering for the same reason as every other POST: the body belongs to the
+        // request, and a handler that runs before it has been read is racing the connection.
+        ignore(read_body(body))
+        ok(conn)
+        (routes.choose_workspace)()
+      }
+      // One handler for both settings forms: the path says which, and the body is the
+      // form-encoded fields the browser sent.
+      (Post, "/settings/key")
+      | (Post, "/settings/skills")
+      | (Post, "/settings/limits")
+      | (Post, "/settings/agents") => {
+        let text = read_body(body)
+        ok(conn)
+        (routes.settings)(text)
       }
       _ => not_found(conn)
     }

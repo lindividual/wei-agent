@@ -21,6 +21,20 @@ pub(all) struct TrimPolicy {
   /// Messages at the end of the conversation that are left untouched. The model
   /// is working on these, so they must stay exact.
   recent_window : Int
+  /// How many messages must pile up beyond the window before the trim boundary moves.
+  ///
+  /// One means the boundary follows the conversation message by message, which is the
+  /// obvious behaviour and the wrong one: the request changes at that position on every
+  /// turn, and a change at a position invalidates the provider's prefix cache from there
+  /// to the end. Since the boundary sits just outside the window, that re-bills the newest
+  /// and largest stretch of the conversation at full price on every request.
+  ///
+  /// A larger step quantizes the boundary, so it holds still for `advance_step - 1` turns
+  /// and then moves in one jump. While it holds still the previous request is a prefix of
+  /// the new one and almost nothing is re-billed. The price is that the window protects up
+  /// to `advance_step - 1` messages more than `recent_window` asks for — content that is
+  /// sent verbatim a little longer, at cache prices, instead of being re-sent fresh.
+  advance_step : Int
   /// Tool output larger than this many bytes is trimmed once it falls outside the
   /// window. Small results are left alone: the bookkeeping would cost more than
   /// the bytes saved.
@@ -47,6 +61,12 @@ pub(all) struct TrimPolicy {
 pub fn TrimPolicy::default() -> TrimPolicy {
   {
     recent_window: 20,
+    // Eight messages, so the request prefix is stable for seven turns out of eight. Chosen
+    // against the window above: a step much smaller than the window still moves often relative
+    // to it, and one much larger holds verbatim more of the conversation than trimming was
+    // meant to leave alone. Under a cache read billed at a fiftieth of fresh input, the seven
+    // stable turns pay for the eighth many times over.
+    advance_step: 8,
     tool_result_limit: 4 * 1024,
     head_lines: 40,
     tail_lines: 20,
@@ -59,6 +79,7 @@ pub fn TrimPolicy::default() -> TrimPolicy {
 pub fn TrimPolicy::none() -> TrimPolicy {
   {
     recent_window: 0,
+    advance_step: 1,
     tool_result_limit: 0,
     head_lines: 0,
     tail_lines: 0,
@@ -165,19 +186,46 @@ fn trim_message(
 }
 
 ///|
+/// How many leading messages have been released to trimming.
+///
+/// The one place the boundary is computed, so the context that is sent and the report that
+/// describes it cannot disagree.
+///
+/// The boundary is quantized to a multiple of `advance_step`, and that quantization is the
+/// point rather than a detail. The request content at a position depends only on whether that
+/// position is inside the cutoff, never on the cutoff's value, so holding the cutoff still for
+/// a turn makes the previous request a byte-for-byte prefix of the new one. Moving it by one
+/// every turn does the opposite: it changes the content at the boundary and shifts everything
+/// after it, so the provider's cached prefix ends there and the whole recent window is billed
+/// again.
+fn trim_cutoff(length : Int, policy : TrimPolicy) -> Int {
+  let released = if length > policy.recent_window {
+    length - policy.recent_window
+  } else {
+    0
+  }
+  if policy.advance_step <= 1 {
+    released
+  } else {
+    // Rounded down, so the window protects at most `advance_step - 1` messages more than it
+    // asks for. Rounding up would release messages the window was meant to keep exact.
+    released / policy.advance_step * policy.advance_step
+  }
+}
+
+///|
 /// Reduce old messages, leaving the most recent `recent_window` untouched.
 ///
 /// Order is preserved and the array length never changes, so anything indexing
 /// into the conversation keeps working.
+///
+/// Where trimming starts is `trim_cutoff`, which holds the boundary still between jumps so
+/// that consecutive requests share a prefix. The cost of that is stated there.
 pub fn trim_context(
   messages : Array[ContextMessage],
   policy : TrimPolicy,
 ) -> Array[ContextMessage] {
-  let cutoff = if messages.length() > policy.recent_window {
-    messages.length() - policy.recent_window
-  } else {
-    0
-  }
+  let cutoff = trim_cutoff(messages.length(), policy)
   let out : Array[ContextMessage] = []
   for i in 0..<messages.length() {
     if i < cutoff {
@@ -205,11 +253,7 @@ pub fn trim_context_reporting(
   policy : TrimPolicy,
 ) -> (Array[ContextMessage], TrimReport) {
   let trimmed = trim_context(messages, policy)
-  let cutoff = if messages.length() > policy.recent_window {
-    messages.length() - policy.recent_window
-  } else {
-    0
-  }
+  let cutoff = trim_cutoff(messages.length(), policy)
   let mut tool_results_trimmed = 0
   let mut thinking_blanked = 0
   for i in 0..<cutoff {

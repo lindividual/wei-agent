@@ -10,7 +10,7 @@
 pub fn build_system_prompt(
   cwd : String,
   tools : Array[ToolDef],
-  extra? : String,
+  sections? : Array[String],
 ) -> String {
   let out = StringBuilder()
   out.write_string(
@@ -28,9 +28,17 @@ pub fn build_system_prompt(
     "- When a command fails, read the error before retrying; do not repeat a failing command unchanged.\n" +
     "- Report what you did and what you found. If you could not finish a task, say so plainly rather than implying success.\n",
   )
-  match extra {
-    Some(text) if text != "" => out.write_string("\n\{text}\n")
-    _ => ()
+  // In the order given, and skipping the empty ones: a caller assembles these from whatever the
+  // session actually has, and the two callers — the turn and the context figure — must build the
+  // same prompt or the size the bar reports would be of a prompt nobody sent.
+  match sections {
+    Some(texts) =>
+      for text in texts {
+        if text != "" {
+          out.write_string("\n\{text}\n")
+        }
+      }
+    None => ()
   }
   out.to_string()
 }

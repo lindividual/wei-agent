@@ -75,6 +75,7 @@ test "a large tool result is trimmed with an explicit marker" {
   let big = tool_result_msg("c1", lines(500, "content"))
   let policy : TrimPolicy = {
     recent_window: 0,
+    advance_step: 1,
     tool_result_limit: 1024,
     head_lines: 5,
     tail_lines: 3,
@@ -101,6 +102,7 @@ test "a single enormous line is not shredded" {
   let one_line = "x".repeat(20000)
   let policy : TrimPolicy = {
     recent_window: 0,
+    advance_step: 1,
     tool_result_limit: 1024,
     head_lines: 5,
     tail_lines: 3,
@@ -126,6 +128,7 @@ test "old reasoning is blanked and keeps its signature" {
   // Default window is 20 messages, so a lone message is "recent"; put it outside.
   let policy : TrimPolicy = {
     recent_window: 0,
+    advance_step: 1,
     tool_result_limit: 0,
     head_lines: 0,
     tail_lines: 0,
@@ -156,6 +159,7 @@ test "assistant text survives reasoning being blanked" {
   ])
   let policy : TrimPolicy = {
     recent_window: 0,
+    advance_step: 1,
     tool_result_limit: 0,
     head_lines: 0,
     tail_lines: 0,
@@ -175,6 +179,7 @@ test "reasoning can be kept" {
   ])
   let policy : TrimPolicy = {
     recent_window: 0,
+    advance_step: 1,
     tool_result_limit: 0,
     head_lines: 0,
     tail_lines: 0,
@@ -199,6 +204,7 @@ test "the recent window is left alone" {
   ]
   let policy : TrimPolicy = {
     recent_window: 1,
+    advance_step: 1,
     tool_result_limit: 1024,
     head_lines: 2,
     tail_lines: 2,
@@ -240,6 +246,7 @@ test "shape is preserved" {
   ]
   let policy : TrimPolicy = {
     recent_window: 1,
+    advance_step: 1,
     tool_result_limit: 1024,
     head_lines: 2,
     tail_lines: 2,
@@ -270,6 +277,7 @@ test "trimming never grows the context" {
   // A small window, so most of the history is old enough to trim.
   let policy : TrimPolicy = {
     recent_window: 5,
+    advance_step: 1,
     tool_result_limit: 4 * 1024,
     head_lines: 40,
     tail_lines: 20,
@@ -380,5 +388,177 @@ test "trimming leaves the session intact" {
   assert_true(result_text(after[0]).contains("old line 250"))
   assert_true(
     after[1] is Assistant({ content: [Thinking(thinking="thought", ..)], .. }),
+  )
+}
+
+// ── The boundary's effect on the request prefix ────────────────────────────
+
+///|
+/// A conversation of `count` large tool results, each of which trimming will actually
+/// change. Big enough that no policy's window protects all of them, and larger than the
+/// default size threshold so the default policy trims them too.
+fn conversation(count : Int) -> Array[ContextMessage] {
+  let out : Array[ContextMessage] = []
+  for i in 0..<count {
+    out.push(tool_result_msg("c\{i}", lines(500, "result-\{i}")))
+  }
+  out
+}
+
+///|
+/// Whether one derived conversation is a byte-for-byte prefix of the next.
+///
+/// This is the property the provider's cache is made of: the shared leading messages are read
+/// from cache and only the tail is billed fresh. A single message that differs at a position
+/// ends the shared prefix there, so everything after it is re-sent at full price.
+fn is_prefix_of(
+  earlier : Array[ContextMessage],
+  later : Array[ContextMessage],
+) -> Bool {
+  if earlier.length() > later.length() {
+    return false
+  }
+  for i in 0..<earlier.length() {
+    if earlier[i] != later[i] {
+      return false
+    }
+  }
+  true
+}
+
+///|
+/// Each turn's request begins with the previous turn's, so the provider reads it from cache.
+///
+/// This is the whole reason the boundary is quantized. A conversation that grows one message
+/// per turn is the normal case; each step is compared against the previous one, and every step
+/// must share the prefix except the ones where the boundary is due to jump.
+test "a growing conversation keeps its request prefix between boundary jumps" {
+  let policy : TrimPolicy = {
+    recent_window: 4,
+    advance_step: 4,
+    tool_result_limit: 1024,
+    head_lines: 3,
+    tail_lines: 2,
+    drop_old_thinking: true,
+  }
+  let messages = conversation(30)
+  let mut jumps = 0
+  for n in 6..<30 {
+    let before = trim_context(messages[:n].to_owned(), policy)
+    let after = trim_context(messages[:n + 1].to_owned(), policy)
+    if !is_prefix_of(before, after) {
+      jumps += 1
+    }
+  }
+  // 24 steps, a jump every fourth: six of them, and the rest are pure appends.
+  assert_eq(jumps, 6)
+  // The old rule breaks the prefix on every single step, because the boundary moves with the
+  // conversation and the message sitting at it changes: 24 of 24. That is what the
+  // quantization buys.
+  assert_eq(old_boundary_jumps(messages, 6, 30), 24)
+}
+
+///|
+/// The count of prefix breaks the old rule produced, for contrast in the test above.
+///
+/// Written as its own function so the comparison is a number rather than a claim: the boundary
+/// that follows the conversation moves on every single step, so almost no step shares a prefix.
+fn old_boundary_jumps(
+  messages : Array[ContextMessage],
+  from : Int,
+  to : Int,
+) -> Int {
+  let moving : TrimPolicy = {
+    recent_window: 4,
+    advance_step: 1,
+    tool_result_limit: 1024,
+    head_lines: 3,
+    tail_lines: 2,
+    drop_old_thinking: true,
+  }
+  let mut jumps = 0
+  for n in from..<to {
+    let before = trim_context(messages[:n].to_owned(), moving)
+    let after = trim_context(messages[:n + 1].to_owned(), moving)
+    if !is_prefix_of(before, after) {
+      jumps += 1
+    }
+  }
+  jumps
+}
+
+///|
+/// The boundary lags until a whole step has piled up, then releases it at once.
+test "the boundary waits for a full step before moving" {
+  let policy : TrimPolicy = {
+    recent_window: 2,
+    advance_step: 4,
+    tool_result_limit: 1024,
+    head_lines: 3,
+    tail_lines: 2,
+    drop_old_thinking: true,
+  }
+  // 11 messages, window 2: nine are past the window, and the step releases eight of them.
+  let trimmed = trim_context(conversation(11), policy)
+  // The released eight lost their middle.
+  assert_true(
+    result_text(trimmed[0]).contains("omitted"),
+    msg=result_text(trimmed[0]),
+  )
+  assert_true(
+    result_text(trimmed[7]).contains("omitted"),
+    msg=result_text(trimmed[7]),
+  )
+  // Everything from the boundary on is untouched. Three messages, not the window's two: the
+  // remainder of the step is held verbatim rather than trimmed, which is the price of the
+  // boundary holding still.
+  for i in 8..<11 {
+    assert_false(
+      result_text(trimmed[i]).contains("omitted"),
+      msg="message \{i} was trimmed before the boundary released it",
+    )
+  }
+}
+
+///|
+/// A step of one is the old behaviour, kept so the difference stays measurable.
+test "a step of one moves the boundary every message" {
+  let policy : TrimPolicy = {
+    recent_window: 2,
+    advance_step: 1,
+    tool_result_limit: 1024,
+    head_lines: 3,
+    tail_lines: 2,
+    drop_old_thinking: true,
+  }
+  let trimmed = trim_context(conversation(10), policy)
+  // Window 2 of 10 leaves 8 released, so the boundary is at 8 rather than lagging to 4.
+  assert_true(
+    result_text(trimmed[7]).contains("omitted"),
+    msg=result_text(trimmed[7]),
+  )
+  assert_false(
+    result_text(trimmed[8]).contains("omitted"),
+    msg=result_text(trimmed[8]),
+  )
+}
+
+///|
+/// Trimming nothing is still an option, and the default's step leaves short conversations alone.
+test "the default policy trims nothing until a step has accumulated" {
+  let policy = TrimPolicy::default()
+  // 20 messages with a window of 20: nothing is past it.
+  assert_eq(trim_context(conversation(20), policy).length(), 20)
+  // 24: four past the window, which is less than the default step of eight.
+  let trimmed = trim_context(conversation(24), policy)
+  assert_false(
+    result_text(trimmed[0]).contains("omitted"),
+    msg="the boundary moved before a full step had accumulated",
+  )
+  // 28: eight past, so one step is released.
+  let released = trim_context(conversation(28), policy)
+  assert_true(
+    result_text(released[0]).contains("omitted"),
+    msg="the boundary never moved",
   )
 }

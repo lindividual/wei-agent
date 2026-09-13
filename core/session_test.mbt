@@ -327,3 +327,23 @@ test "a broken parent chain stops the walk" {
   assert_eq(path.length(), 1)
   assert_eq(path[0].id, "b")
 }
+
+///|
+/// A parent link that points *forward* is a cycle, and a cycle used to be a hang.
+///
+/// The case above is a dangling link — the parent is not in the file at all, so the walk stops by
+/// running out of entries. This is the other one: every link resolves, but they resolve into a
+/// loop. It is what a log looks like when two writers interleave, when a file is merged or edited
+/// by hand, or when an id collides. Before this was guarded the server spun at 100% CPU and grew
+/// to gigabytes of memory on a two-turn session, because the walk reallocated its whole result on
+/// every pass and never returned. The assertion that matters is simply that this returns at all.
+test "a cyclic parent chain terminates instead of looping forever" {
+  let session = session_with([
+    user_entry("a", Some("b"), "points forward"),
+    user_entry("b", Some("a"), "and back again"),
+  ])
+  let path = session.path()
+  // Both entries are reachable, and the walk stops at the repeat rather than going round again.
+  assert_eq(path.length(), 2)
+  assert_eq(session.needs_repair(), false)
+}

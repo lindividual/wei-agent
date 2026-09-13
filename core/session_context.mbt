@@ -124,22 +124,37 @@ pub fn Session::path_to(self : Session, leaf_id : String?) -> Array[Entry] {
 }
 
 ///|
+/// Walk from the current leaf back to the root.
+///
+/// A missing parent ends the walk: entries are appended with a parent that already exists, so
+/// normally the only way to reach a gap is a truncated file. But "normally" is not "always" —
+/// an entry can also point *forward*, at a parent that has not been written yet, and that is what
+/// a log looks like when two writers interleave, when a file is merged or hand-edited, or when an
+/// id collides. A forward link is a cycle, and following one does not terminate: before this was
+/// guarded, a single such entry took the server to 100% CPU and gigabytes of memory, because every
+/// element around the walk was rebuilt on each pass.
+///
+/// So the walk stops at the first entry it has already seen. That is not a repair — the log is
+/// still wrong and the caller should treat the path as short rather than complete — but it is a
+/// bounded answer instead of a hang, and a reader can still open the session.
 fn walk_path(index : Map[String, Entry], leaf_id : String) -> Array[Entry] {
   let reversed : Array[Entry] = []
+  let seen : Map[String, Unit] = Map([])
   let mut current = index.get(leaf_id)
-  // A parent missing from the index ends the walk. Entries are appended with a
-  // parent that already exists, so a dangling link means a truncated file rather
-  // than a cycle.
   while true {
     match current {
       None => break
-      Some(entry) => {
-        reversed.push(entry)
-        current = match entry.parent_id {
-          Some(parent) => index.get(parent)
-          None => None
+      Some(entry) =>
+        if seen.get(entry.id) is Some(_) {
+          break
+        } else {
+          seen.set(entry.id, ())
+          reversed.push(entry)
+          current = match entry.parent_id {
+            Some(parent) => index.get(parent)
+            None => None
+          }
         }
-      }
     }
   }
   let path : Array[Entry] = []

@@ -67,12 +67,24 @@ async fn main {
   @platform.create_session(path, header)
 
   let tools = @core.builtin_tools()
+  // Same discovery as the server, so a one-shot CLI turn sees the skills and the instructions a
+  // web turn would.
+  let skills = @platform.discover_skills(cwd, home)
+  let settings = @platform.load_settings(home)
+  let instructions = @core.choose_instructions(
+    settings,
+    @platform.workspace_agents_md(cwd),
+  )
+  let system_prompt = @core.build_system_prompt(cwd, tools, sections=[
+    instructions.text,
+    @core.skill_catalog_prompt(skills),
+  ])
   let ctx = @agent.AgentContext::new(
     session=@core.Session::new(header, []),
     session_path=path,
     cwd~,
     api_key=key,
-    system_prompt=@core.build_system_prompt(cwd, tools),
+    system_prompt~,
     tools~,
   )
 
@@ -99,12 +111,18 @@ async fn main {
   // Report what the log actually contains, since that is the artifact everything
   // else is derived from.
   let context = result.session.context()
-  let usage = @core.estimate_context_tokens(context.messages)
+  // The anchored figure, so this agrees with what the web UI shows and with what the
+  // compaction decision uses. The raw heuristic here was what printed "~10 tokens" for a
+  // conversation whose request carried 1,300 tokens of prompt and tool schemas.
+  let pressure = @core.context_pressure(
+    context.messages,
+    @core.request_overhead_tokens(system_prompt, tools),
+  )
   let (_, report) = @core.trim_context_reporting(
     context.messages,
     @core.TrimPolicy::default(),
   )
   println(
-    "context \{context.messages.length()} messages, ~\{usage} tokens (trimmed to ~\{report.after_tokens})",
+    "context \{context.messages.length()} messages, ~\{pressure.tokens} tokens (heuristic ~\{pressure.estimated}, trimmed to ~\{report.after_tokens})",
   )
 }

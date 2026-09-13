@@ -141,7 +141,7 @@ async test "read_prefix stops early" {
 
 ///|
 /// The workspace list groups sessions by the directory recorded in their headers,
-/// newest workspace first, and caps how many sessions each one shows.
+/// newest workspace first, and leaves the cap to the caller that draws the list.
 async test "list_workspaces reads the cwd from the sessions" {
   let root = session_scratch("workspaces")
   // The directory name deliberately does not encode this cwd: the encoding is
@@ -155,11 +155,10 @@ async test "list_workspaces reads the cwd from the sessions" {
   // A directory with no sessions is not a workspace.
   make_dirs("\{root}/--empty--")
 
-  let workspaces = list_workspaces(root, 10)
+  let workspaces = list_workspaces(root)
   assert_eq(workspaces.length(), 2)
   assert_eq(workspaces[0].cwd, "/work/two")
   assert_eq(workspaces[1].cwd, "/work/one")
-  assert_eq(workspaces[0].total, 1)
   assert_eq(workspaces[0].sessions.length(), 1)
 
   // A directory whose newest session cannot be attributed is skipped rather than
@@ -167,13 +166,13 @@ async test "list_workspaces reads the cwd from the sessions" {
   let broken = "\{root}/--broken--/2031-01-01T00-00-00.000Z_broken.jsonl"
   make_dirs(@core.parent_of(broken))
   write_text(broken, "not json at all\n")
-  let after = list_workspaces(root, 10)
+  let after = list_workspaces(root)
   assert_eq(after.length(), 2)
 }
 
 ///|
-async test "list_workspaces caps the sessions it lists but counts them all" {
-  let root = session_scratch("cap")
+async test "list_workspaces lists every session, newest first" {
+  let root = session_scratch("all")
   let dir = "\{root}/--work-one--"
   make_dirs(dir)
   for i in 0..<5 {
@@ -182,10 +181,15 @@ async test "list_workspaces caps the sessions it lists but counts them all" {
       header("s\{i}", "/work/one"),
     )
   }
-  let workspaces = list_workspaces(root, 2)
+  let workspaces = list_workspaces(root)
   assert_eq(workspaces.length(), 1)
-  assert_eq(workspaces[0].sessions.length(), 2)
-  assert_eq(workspaces[0].total, 5)
+  // All five, and the newest first: how many of them a page shows is the page's business, and the
+  // test that used to live here was asserting the cap in the wrong layer.
+  assert_eq(workspaces[0].sessions.length(), 5)
+  assert_true(
+    workspaces[0].sessions[0].path.contains("s4.jsonl"),
+    msg=workspaces[0].sessions[0].path,
+  )
 }
 
 ///|
@@ -260,27 +264,26 @@ async test "an added workspace is listed before it has sessions" {
   let root = session_scratch("added")
   let dir = "\{root}/--somewhere--"
   write_workspace(dir, { cwd: "/work/added", title: Some("my project"), })
-  let found = list_workspaces(root, 10)
+  let found = list_workspaces(root)
   assert_eq(found.length(), 1)
   // The path comes from the marker: with no sessions there are no headers to read it from.
   assert_eq(found[0].cwd, "/work/added")
   assert_eq(found[0].title, Some("my project"))
-  assert_eq(found[0].total, 0)
   assert_true(found[0].sessions.is_empty())
 
   // Sessions win on ordering, but the marker still supplies the path and the title.
   let session_path = "\{dir}/2020-01-01T00-00-00.000Z_one.jsonl"
   create_session(session_path, header("one", "/work/added"))
-  let found = list_workspaces(root, 10)
+  let found = list_workspaces(root)
   assert_eq(found.length(), 1)
-  assert_eq(found[0].total, 1)
+  assert_eq(found[0].sessions.length(), 1)
   assert_eq(found[0].title, Some("my project"))
 
   // A marker nobody can read is ignored rather than turning the listing into a failure.
   let broken = "\{root}/--broken--"
   make_dirs(broken)
   write_text(workspace_marker(broken), "not json")
-  assert_eq(list_workspaces(root, 10).length(), 1)
+  assert_eq(list_workspaces(root).length(), 1)
 }
 
 ///|
@@ -305,4 +308,55 @@ async test "canonical_dir resolves and rejects" {
   assert_true(canonical_dir(file) is None)
   assert_true(canonical_dir("\{dir}/nope") is None)
   assert_true(canonical_dir("") is None)
+}
+
+///|
+/// Deleting renames a session aside rather than removing it, so a mis-click is recoverable by hand.
+///
+/// This is the whole of the safety argument, and it is worth asserting rather than describing: the
+/// file must still be on disk under a predictable name, must be out of `list_sessions` — which is
+/// the part that makes it *look* deleted — and must come back unchanged when it is restored.
+async test "deleting a session keeps its bytes and takes it out of the listing" {
+  let dir = session_scratch("delete")
+  make_dirs(dir)
+  let path = "\{dir}/2020-01-01T00-00-00.000Z_abc12345.jsonl"
+  create_session(path, header("abc12345", "/tmp/x"))
+  append_entry(path, user_entry("a question", None))
+  // A second file, so "gone from the listing" is distinguishable from "the listing broke".
+  let other = "\{dir}/2020-01-02T00-00-00.000Z_def67890.jsonl"
+  create_session(other, header("def67890", "/tmp/x"))
+  append_entry(other, user_entry("another question", None))
+
+  assert_eq(list_sessions(dir).length(), 2)
+  delete_session(path)
+  assert_false(path_exists(path), msg="the .jsonl name should be gone")
+  assert_true(
+    path_exists(path + deleted_suffix()),
+    msg="the bytes should still be there, one rename away",
+  )
+  assert_eq(
+    list_sessions(dir).length(),
+    1,
+    msg="a deleted session must be out of the listing",
+  )
+  restore_session(path)
+  assert_true(path_exists(path), msg="undo should put it back")
+  assert_eq(list_sessions(dir).length(), 2)
+}
+
+///|
+/// Undo is safe to press twice, and safe to press in a tab that is looking at a stale list.
+async test "restoring a session that is already back is a no-op" {
+  let dir = session_scratch("restore-twice")
+  make_dirs(dir)
+  let path = "\{dir}/session.jsonl"
+  create_session(path, header("abc", "/tmp"))
+  append_entry(path, user_entry("kept", None))
+  restore_session(path)
+  assert_true(
+    path_exists(path),
+    msg="restoring a live session must not move it",
+  )
+  let listing = list_sessions(dir)
+  assert_eq(listing.length(), 1)
 }

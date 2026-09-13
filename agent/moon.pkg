@@ -6,9 +6,11 @@ import {
   "moonbitlang/core/json",
 }
 
-// The tests run the driver against a scripted model behind a real socket.
+// The tests run the driver against a scripted model behind a real socket, and build filesystem
+// fixtures — including a binary file, for the test that a failing tool does not end the turn.
 import {
   "moonbitlang/async",
+  "moonbitlang/async/fs",
   "moonbitlang/async/socket",
   "moonbitlang/core/encoding/utf8",
 } for "test"

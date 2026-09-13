@@ -35,9 +35,15 @@ pub(all) struct AgentContext {
 ///|
 /// Build a context with the DeepSeek defaults.
 ///
-/// Constructing it in one place is what keeps the pricing, the window and the
-/// model name from drifting apart: they are three facts about the same model, and
-/// a hand-assembled struct can pair the window of one with the pricing of another.
+/// Constructing it in one place is what keeps the pricing, the window and the model name from
+/// drifting apart: they are three facts about the same model, and a hand-assembled struct can pair
+/// the window of one with the pricing of another.
+///
+/// The defaults are *the catalog's* default model rather than three restated values. A second copy
+/// of a number is a second thing to get out of step, and this is the copy a caller that passes
+/// nothing gets — so it would have been the one that went stale first. A caller naming a different
+/// model passes all three (the UI does, from the session's own choice); the catalog test pins the
+/// default entry to the accessors these used to hardcode.
 pub fn AgentContext::new(
   session~ : @core.Session,
   session_path~ : String,
@@ -46,10 +52,10 @@ pub fn AgentContext::new(
   system_prompt~ : String,
   tools~ : Array[@core.ToolDef],
   jobs? : @core.JobStore = @core.JobStore::new(),
-  model? : String = "deepseek-v4-flash",
+  model? : String = @core.default_model_id(),
   base_url? : String = "https://api.deepseek.com",
-  pricing? : @core.Pricing = @core.deepseek_v4_flash_pricing(),
-  context_window? : Int = @core.deepseek_v4_flash_context_window(),
+  pricing? : @core.Pricing = @core.default_model().pricing,
+  context_window? : Int = @core.default_model().context_window,
 ) -> AgentContext {
   {
     session,
@@ -78,6 +84,14 @@ pub(all) struct ToolHandle {
   name : String
   /// One line of what it is doing, for a reader watching.
   detail : String
+  /// The call as the model wrote it.
+  ///
+  /// Carried alongside `detail` rather than instead of it, because the two answer different
+  /// questions and the page asks both: `detail` is the one-line form for the sidebar's "what is it
+  /// doing", and this is what the tool's own block shows — the same raw arguments the finished
+  /// block shows, so a block that is still running looks like one that has finished rather than
+  /// like a thinner, separate thing.
+  arguments : Json
   stop : () -> Unit
 }
 
@@ -112,13 +126,26 @@ pub(all) struct TurnResult {
   compactions : Int
   /// Summed over every model call the turn made, compaction included.
   usage : @core.Usage
-  /// False when the round limit stopped the turn rather than the model deciding it
-  /// was done.
+  /// False when a limit stopped the turn rather than the model deciding it was done.
   ///
   /// Reported rather than raised: a model that keeps asking for tools is a thing
   /// the reader should be told about, not a reason to fail the request — and
   /// definitively not a reason to take the process down.
   settled : Bool
+  /// True when the cost limit is what stopped it, so the reader is told which guard fired.
+  /// A turn can be expensive without making many calls — one large request against a pricier
+  /// model costs more than fifty small ones — so the two limits do not imply each other.
+  cost_limit_hit : Bool
+  /// True when the time limit is what stopped it. Separate from `cost_limit_hit` for the same
+  /// reason the two limits are separate: they fail for different reasons and the reader's response
+  /// to each is different.
+  time_limit_hit : Bool
+  /// The model's final answer was cut off at the output token limit rather than finishing.
+  ///
+  /// Reported because a truncated answer looks exactly like a finished one. The model cannot say
+  /// "I was interrupted" — the interruption is the end of what it wrote — so unless the caller
+  /// notices the stop reason, the reader is left with a sentence that stops mid-thought.
+  truncated : Bool
 } derive(Debug)
 
 ///|
@@ -220,9 +247,43 @@ fn request_for(
     thinking: @core.deepseek_v4_thinking_levels().resolve(thinking_level),
     max_tokens: None,
     temperature: None,
-    vision: false,
+    // Asked of the catalog rather than written down here, so the decision to send an image and the
+    // model it is sent to cannot disagree. A model that cannot see gets the placeholder, which is
+    // how a pasted screenshot still leaves a trace in the conversation.
+    vision: @core.model_sees_images(ctx.model),
   }
   @core.build_deepseek_request(spec)
+}
+
+///|
+/// How many times one model call is attempted before the turn gives up on it.
+///
+/// Four means one attempt and three retries. Chosen against the two things being traded off: a
+/// connection that is refused fails in under a second, so three retries cost a few seconds and
+/// usually save the turn; a run of attempts that each block until the idle timeout costs
+/// minutes, which is why the count is small rather than generous.
+fn model_attempts() -> Int {
+  4
+}
+
+///|
+/// How long to wait before attempt `n`, counting the first retry as 1.
+///
+/// Doubling, capped: a brief blip is retried almost at once, and a longer outage is not met with
+/// a tight loop that hammers an endpoint which is already unwell. The total wait for three
+/// retries is about seven seconds.
+fn retry_delay_ms(attempt : Int) -> Int {
+  let mut delay = 1000
+  let mut i = 1
+  while i < attempt {
+    delay = delay * 2
+    i = i + 1
+  }
+  if delay > 8000 {
+    8000
+  } else {
+    delay
+  }
 }
 
 ///|
@@ -230,6 +291,18 @@ fn request_for(
 ///
 /// Shared by the reply path and the summarization path: the only difference
 /// between them is what the caller does with the finished message.
+///
+/// A failed call is retried when trying again could plausibly work, which is most of what makes
+/// a turn survive a flaky connection. Three things stop the retry, and each of them is about not
+/// making things worse:
+///
+/// - The endpoint said something permanent (a bad key, a context that is too long). Asking again
+///   gets the same answer, so the error is raised as it stands.
+/// - The reader has already seen output. A retry replays the response from the beginning, so
+///   text the browser has already rendered would be followed by the same text again. Once
+///   anything has been emitted, the turn reports the failure instead.
+/// - The reader stopped it. Retrying a request nobody is waiting for is work done for its own
+///   sake.
 async fn request_model(
   ctx : AgentContext,
   body : String,
@@ -237,30 +310,75 @@ async fn request_model(
   on_delta : async (@core.StreamEvent) -> Unit,
   stopping : () -> Bool,
 ) -> @core.Message {
-  let parser = @core.StreamParser::new(
-    api="openai-completions",
-    provider="deepseek",
-    model=ctx.model,
-    timestamp~,
-    pricing=ctx.pricing,
-  )
-  @platform.post_sse(
-    "\{ctx.base_url}/chat/completions",
-    Map([
-      ("Authorization", "Bearer \{ctx.api_key}"),
-      ("Content-Type", "application/json"),
-    ]),
-    body,
-    chunk => {
-      for event in parser.feed(chunk) {
-        on_delta(event)
+  let url = "\{ctx.base_url}/chat/completions"
+  let headers : Map[String, String] = Map([
+    ("Authorization", "Bearer \{ctx.api_key}"),
+    ("Content-Type", "application/json"),
+  ])
+  let mut attempt = 1
+  while true {
+    // A fresh parser per attempt. The previous one may hold half a stream, and feeding a second
+    // response into it would splice two answers together into one message.
+    let parser = @core.StreamParser::new(
+      api="openai-completions",
+      provider="deepseek",
+      model=ctx.model,
+      timestamp~,
+      pricing=ctx.pricing,
+    )
+    // A cell rather than a captured local: the flag is written inside the callback and read
+    // after the call returns, and a reference makes that sharing unambiguous.
+    let emitted = Ref(false)
+    let report : async (@core.StreamEvent) -> Unit = async fn(event) {
+      emitted.val = true
+      on_delta(event)
+    }
+    let outcome : Result[@core.Message, String] = try {
+      @platform.post_sse(
+        url,
+        headers,
+        body,
+        chunk => {
+          for event in parser.feed(chunk) {
+            report(event)
+          }
+        },
+        should_stop=stopping,
+      )
+      // A stream the caller stopped reading is recorded as aborted rather than as a
+      // truncated response, which is what pi writes for the same event.
+      Ok(parser.finish(aborted=stopping()))
+    } catch {
+      @platform.Transient(message) => Err(message)
+      // Permanent, or anything else: not retryable, so it is reported as it is.
+      @platform.Permanent(message) => raise Failure::Failure(message)
+      err => raise err
+    } noraise {
+      result => result
+    }
+    match outcome {
+      Ok(message) => return message
+      Err(message) => {
+        if emitted.val || stopping() || attempt >= model_attempts() {
+          // `emitted` is worth saying out loud: the turn did produce output, so the failure is
+          // reported as an interruption rather than as a call that never worked.
+          let suffix = if emitted.val {
+            " (after the response had already started)"
+          } else {
+            ""
+          }
+          raise Failure::Failure(
+            "\{message}; gave up after \{attempt} attempt(s)\{suffix}",
+          )
+        }
+        @async.sleep(retry_delay_ms(attempt))
+        attempt = attempt + 1
       }
-    },
-    should_stop=stopping,
-  )
-  // A stream the caller stopped reading is recorded as aborted rather than as a
-  // truncated response, which is what pi writes for the same event.
-  parser.finish(aborted=stopping())
+    }
+  }
+  // Unreachable: the loop returns or raises on every path. Present so the function has a
+  // definite result for the compiler.
+  abort("request_model: retry loop exited")
 }
 
 ///|
@@ -343,6 +461,17 @@ fn usage_of(message : @core.Message) -> @core.Usage {
 }
 
 ///|
+/// Whether the model stopped because it ran out of output budget rather than because it was done.
+///
+/// Read from the response's own stop reason, which is the only place the difference is recorded.
+fn cut_off_at_limit(message : @core.Message) -> Bool {
+  match message {
+    Assistant(assistant) => assistant.stop_reason is @core.Length
+    _ => false
+  }
+}
+
+///|
 /// Summarize the old half of the conversation when the next request would not
 /// fit in the model's window.
 ///
@@ -363,8 +492,15 @@ async fn compact_if_needed(
   // dropping old tool output already brought the request under the threshold,
   // paying for a summary would be paying for nothing.
   let prepared = session.prepared_context()
-  let tokens = @core.estimate_context_tokens(prepared.messages)
-  if !settings.should_compact(tokens, ctx.context_window) {
+  // The anchored figure, not the raw heuristic. The threshold is a hard boundary — crossing it is
+  // what buys a summary call — and the heuristic under-counts by about a fifth, so comparing the
+  // wrong number against a threshold would compact late. Late is the expensive direction: it is
+  // the request that overflows, and an overflow is refused rather than summarized.
+  let pressure = @core.context_pressure(
+    prepared.messages,
+    @core.request_overhead_tokens(ctx.system_prompt, ctx.tools),
+  )
+  if !settings.should_compact(pressure.tokens, ctx.context_window) {
     return (session, zero, false)
   }
   let cut = match
@@ -398,7 +534,10 @@ async fn compact_if_needed(
     thinking: @core.Thinking::Disabled,
     max_tokens: None,
     temperature: None,
-    vision: false,
+    // The summarizer reads the same conversation as the turn, so it needs the same answer: a
+    // conversation with an image in it has to survive summarization as a placeholder rather than
+    // being sent to a model that would reject it.
+    vision: @core.model_sees_images(ctx.model),
   }
   let body = @core.build_deepseek_request(spec)
   let discard : async (@core.StreamEvent) -> Unit = fn(_event) { () }
@@ -550,8 +689,12 @@ async fn run_tools(
           })
         catch {
           err =>
-            // A cancelled tool is an answer too: the model is told the command was stopped
-            // rather than the turn dying with an exception.
+            // A tool that failed is an answer too, and for the same reason a cancelled one is:
+            // the model is told what went wrong instead of the turn dying with an exception. A
+            // single unreadable file — a binary reached by `read`, a decode error in `grep` —
+            // used to take the whole turn down with it, leaving the reader with an error and no
+            // reply. The exception is reported as the tool's error output, where the model can
+            // react to it, and `max_rounds` still bounds a model that keeps retrying.
             if @async.is_cancellation_error(err) {
               match job_id {
                 Some(id) => {
@@ -577,7 +720,7 @@ async fn run_tools(
               }
               @core.ToolOutput::error("stopped before it finished")
             } else {
-              raise err
+              @core.ToolOutput::error("the tool failed: \{err}")
             }
         } noraise {
           result => result
@@ -587,6 +730,7 @@ async fn run_tools(
         Some({
           name,
           detail: @core.tool_summary(arguments),
+          arguments,
           stop: () => task.cancel(),
         }),
       )
@@ -647,12 +791,46 @@ async fn run_tools(
 /// The loop is bounded by the model stopping rather than by a step count. A model
 /// that never stops would spin forever, which is a real risk with a small model; the
 /// bound below makes that a bounded, reported outcome rather than an infinite one.
+///
+/// The bound is generous — 200 model calls — because a tool-heavy turn legitimately takes
+/// many of them, and stopping one at 40 cut work off in the middle of a task that was
+/// going fine. Reaching 200 is no longer "a long turn"; it means the model is looping,
+/// which is what the limit is for.
+///
+/// There are two limits, and the second is the one that actually bounds the bill. A turn can
+/// be expensive without being long: one request against a large cached-then-uncached context
+/// costs more than fifty small ones, so counting calls does not bound spending. `max_cost`
+/// does, using the per-model pricing the turn already sums.
+///
+/// Both defaults come from measurement rather than taste: over 2280 real turns the median
+/// cost was $0.004, the ninetieth percentile $0.036, and the most expensive $0.295 (147 calls,
+/// 93M cached prompt tokens). The longest ran 165 calls. So 200 calls and $1 are each about
+/// a turn that never happened — the guards catch a runaway, not a large turn.
 pub async fn run_turn(
   ctx : AgentContext,
   prompt : String,
   timestamp : Int64,
   thinking_level? : String,
-  max_rounds? : Int = 40,
+  /// Most model calls one turn may make. `0` disables the bound.
+  max_rounds? : Int = 200,
+  /// Most one turn may cost, in US dollars. `0.0` disables the bound.
+  max_cost? : Double = 1.0,
+  /// Most one turn may take, in seconds. `0` disables the bound.
+  ///
+  /// The third dimension, and the one the other two cannot see: a command can sit for an hour
+  /// making no model calls and costing nothing, while the reader waits. Chosen from measurement
+  /// over 50,000 real assistant turns: half finished within 2s and 99% within 50s, but the
+  /// longest ran 34 minutes. Half an hour is past everything that was measured and still bounds
+  /// what a stuck turn can do to the reader's afternoon.
+  max_seconds? : Int = 1800,
+  /// Continue a turn that a crash left open, instead of starting a new one.
+  ///
+  /// The difference is one message. A new turn commits the user's prompt and opens a turn; a
+  /// resumed one does neither, because the prompt is already in the log and the turn that needs
+  /// closing is the one already open. Everything after that is the same loop, which is the point:
+  /// the tool results that *were* recorded stay as they are, so the work already done is not done
+  /// twice — the same property DBOS gets from checkpointing steps, which we get from the log.
+  continuing? : Bool = false,
   on_delta? : async (@core.StreamEvent) -> Unit,
   should_stop? : () -> Bool,
   /// Called after each tool finishes, for a caller rendering the turn live.
@@ -717,14 +895,54 @@ pub async fn run_turn(
       timestamp,
     )
   }
-  session = commit(
-    session,
-    ctx.session_path,
-    @core.Message(
-      message=@core.User({ content: [@core.Text(prompt)], timestamp, }),
-    ),
-    timestamp,
-  )
+  // A continued turn appends nothing here: the prompt it is carrying is already the last user
+  // message in the log, and appending it again would put the question to the model twice.
+  if !continuing {
+    session = commit(
+      session,
+      ctx.session_path,
+      @core.Message(
+        message=@core.User({ content: [@core.Text(prompt)], timestamp, }),
+      ),
+      timestamp,
+    )
+  }
+  // The turn is opened in the log before any of its work happens. Between this entry and the
+  // outcome written at the end, the turn is durably in flight — which is the only way to tell
+  // afterwards that it was interrupted, since a turn stopped by a guard and a turn that finished
+  // both end at a message.
+  //
+  // A continued turn skips this: the turn it is continuing was already opened, and a second opening
+  // would leave the log claiming two turns in flight.
+  if !continuing {
+    // Invariant: at most one turn is ever open. A reader who ignores an interrupted turn and
+    // simply types again is choosing to move on, so the old turn is closed here rather than left
+    // open forever — otherwise the log would claim two turns in flight and the interruption notice
+    // would survive the decision to abandon it.
+    if session.turn_in_flight() {
+      session = commit(
+        session,
+        ctx.session_path,
+        @core.turn_outcome_entry(
+          @core.Abandoned,
+          0,
+          0.0,
+          session.leaf_id,
+          timestamp,
+        ).kind,
+        timestamp,
+      )
+    }
+    session = commit(
+      session,
+      ctx.session_path,
+      @core.Custom(
+        custom_type=@core.turn_start_type(),
+        data=Some(Json::object(Map([("prompt", Json::string(prompt))]))),
+      ),
+      timestamp,
+    )
+  }
 
   let replies : Array[String] = []
   let mut model_calls = 0
@@ -732,11 +950,36 @@ pub async fn run_turn(
   let mut compactions = 0
   let mut usage = @core.Usage::zero()
   let mut rounds = 0
+  let mut cost_limit_hit = false
+  let mut time_limit_hit = false
+  let mut truncated = false
+  // The deadline is read from the clock here rather than derived from the caller's `timestamp`,
+  // which is the time an entry is stamped with and not necessarily "now" — a resumed session can
+  // pass an older one. Measuring from this moment is the only reading that bounds how long the
+  // reader waits.
+  let deadline_ms : Int64 = if max_seconds > 0 {
+    now_ms() + max_seconds.to_int64() * 1000L
+  } else {
+    0L
+  }
 
-  while rounds < max_rounds {
+  while true {
     // Checked before each model call, so a stop requested during a tool round takes
     // effect at the next boundary rather than cutting a tool off mid-write.
     if stopping() {
+      break
+    }
+    // Both limits are checked here, before spending anything. A limit of zero means "no
+    // limit" rather than "stop immediately", which is why each is guarded by its own test.
+    if max_rounds > 0 && rounds >= max_rounds {
+      break
+    }
+    if max_cost > 0.0 && usage.cost.total >= max_cost {
+      cost_limit_hit = true
+      break
+    }
+    if deadline_ms > 0L && now_ms() >= deadline_ms {
+      time_limit_hit = true
       break
     }
     // Before the request rather than after the turn: a tool round can double the
@@ -757,6 +1000,7 @@ pub async fn run_turn(
     model_calls += 1
     usage = add_usage(usage, usage_of(message))
     let text = assistant_text(message)
+    truncated = cut_off_at_limit(message)
     if text != "" {
       replies.push(text)
     }
@@ -775,6 +1019,34 @@ pub async fn run_turn(
   // One last report, so a caller that only watches progress sees the finished counts
   // rather than the ones from before the final model call.
   progress(model_calls, tool_calls)
+  // Write down why the turn ended. A turn always records one — including the ordinary case —
+  // because "the log has no outcome" has to mean "this turn never finished", and writing nothing
+  // on success would make that phrase describe every turn that went well.
+  let ending : @core.TurnEnding = if cost_limit_hit {
+    @core.CostLimit
+  } else if time_limit_hit {
+    @core.TimeLimit
+  } else if max_rounds > 0 && rounds >= max_rounds {
+    @core.RoundLimit
+  } else if stopping() {
+    @core.Stopped
+  } else if truncated {
+    @core.Truncated
+  } else {
+    @core.Completed
+  }
+  let session = commit(
+    session,
+    ctx.session_path,
+    @core.turn_outcome_entry(
+      ending,
+      model_calls,
+      usage.cost.total,
+      session.leaf_id,
+      now_ms(),
+    ).kind,
+    now_ms(),
+  )
   {
     session,
     replies,
@@ -782,6 +1054,13 @@ pub async fn run_turn(
     tool_calls,
     compactions,
     usage,
-    settled: rounds < max_rounds,
+    // Settled means the model was allowed to finish: it stopped asking for tools, or the
+    // reader stopped it. A limit is the one case where it did not get to decide.
+    settled: !cost_limit_hit &&
+    !time_limit_hit &&
+    !(max_rounds > 0 && rounds >= max_rounds),
+    cost_limit_hit,
+    time_limit_hit,
+    truncated,
   }
 }

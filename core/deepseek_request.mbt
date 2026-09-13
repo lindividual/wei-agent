@@ -259,6 +259,44 @@ fn tool_result_text(content : Array[Content]) -> String {
 /// Translate session messages into the OpenAI wire format.
 ///
 /// The ordering rules here are load-bearing: a user message whose content is
+
+///|
+/// A tool result's content, in the shape the wire wants.
+///
+/// A plain string unless the result actually carries an image.
+///
+/// The string form is the default for a reason: it is what pi sends, it is what every recorded
+/// request fixture pins byte for byte, and it is what DeepSeek's own examples use. Breaking that on
+/// every tool call to serve the occasional screenshot would churn the prompt — and the prompt
+/// *prefix*, which is what the provider's cache is keyed on.
+///
+/// The array form is used only when there is an image to send, because a stringified result cannot
+/// carry one: `tool_result_text` renders the blocks as text, so an image read by the `read` tool
+/// would reach the model as a note about a picture rather than as the picture. Verified against the
+/// live endpoint before being written this way — a tool message with `image_url` parts is accepted,
+/// and the model described a test image sent that way.
+fn tool_result_content(content : Array[Content]) -> Json {
+  let mut has_image = false
+  for block in content {
+    match block {
+      Image(..) => has_image = true
+      _ => ()
+    }
+  }
+  if !has_image {
+    return Json::string(tool_result_text(content))
+  }
+  let parts : Array[Json] = []
+  for block in content {
+    match text_or_image(block) {
+      Some(part) => parts.push(part)
+      None => ()
+    }
+  }
+  Json::array(parts)
+}
+
+///|
 /// empty is dropped entirely, and an assistant message with neither text nor
 /// tool calls is dropped too, because DeepSeek rejects a message that has
 /// `null` content and no calls.
@@ -347,7 +385,7 @@ pub fn convert_messages(
           Json::object(
             Map([
               ("role", Json::string("tool")),
-              ("content", Json::string(tool_result_text(content))),
+              ("content", tool_result_content(content)),
               ("tool_call_id", Json::string(result.tool_call_id)),
             ]),
           ),

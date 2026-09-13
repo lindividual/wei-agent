@@ -23,15 +23,17 @@
  */
 import { spawn } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 
@@ -86,6 +88,31 @@ function storeDirName(cwd) {
     .slice(start)
     .replace(/[/\\:]/g, "-");
   return `--${body}--`;
+}
+
+/// The settings panel writes a file under `$HOME`, and a check must not edit the real one: run
+/// the server with a scratch home, and give it the credential store so real turns still work.
+///
+/// This is also what makes the check hermetic: the skills the panel lists come from `$HOME`, so a
+/// machine with a large collection would otherwise see a different panel than a fresh checkout.
+function scratchHome() {
+  const home = mkdtempSync(join(tmpdir(), "pws-home-"));
+  const auth = join(homedir(), ".pi/agent/auth.json");
+  if (existsSync(auth)) {
+    mkdirSync(join(home, ".pi/agent"), { recursive: true });
+    copyFileSync(auth, join(home, ".pi/agent/auth.json"));
+  }
+  // One skill, so the panel has something to switch: an empty list renders an explanation
+  // instead, and neither state would be exercised.
+  const skill = join(home, ".pi/agent/skills/browser-demo");
+  mkdirSync(skill, { recursive: true });
+  writeFileSync(
+    join(skill, "SKILL.md"),
+    "---\nname: browser-demo\ndescription: Seeded by the browser check.\n---\n\n" +
+      "# browser-demo\n\nA body the model can only have read through the expansion: reply with\n" +
+      "exactly SKILL-BODY-OK-9f2c when this skill is invoked.\n",
+  );
+  return home;
 }
 
 /// A session file the server will accept: a header, then `turns` exchanges.
@@ -252,6 +279,14 @@ class Session {
     return result.result.value;
   }
 
+  /// Move the pointer. The point is the page's own `:hover` rules: a reveal that only exists for a
+  /// pointer cannot be seen any other way, and faking the style would test the fake.
+  async moveMouse(x, y) {
+    await this.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+    // One frame, so the style the check reads is the one the browser has settled on.
+    await sleep(100);
+  }
+
   /// Poll an expression until it is truthy, so the checks do not race the page.
   async waitFor(expression, label, timeoutMs = 60000) {
     const deadline = Date.now() + timeoutMs;
@@ -287,9 +322,12 @@ async function httpJson(url, attempts = 60) {
 
 // ── the server under test ──────────────────────────────────────────────────
 
-function startServer(store) {
+function startServer(store, home) {
   const child = spawn(UI_BIN, ["--port", String(PORT), "--store", store], {
     stdio: ["ignore", "pipe", "pipe"],
+    // The scratch home keeps the settings panel's file, and the skills it lists, out of the
+    // real `$HOME`.
+    env: { ...process.env, HOME: home },
   });
   // The server logs to stderr on purpose (it is the stream that survives a crash),
   // so a failure to start has to be surfaced from there.
@@ -323,11 +361,12 @@ async function main() {
     process.exit(2);
   }
   const store = mkdtempSync(join(tmpdir(), "pws-browser-"));
+  const home = scratchHome();
   const profile = mkdtempSync(join(tmpdir(), "pws-chrome-"));
   mkdirSync(join(profile, "Default"), { recursive: true });
 
   let backgroundPids = [];
-  let server = startServer(store);
+  let server = startServer(store, home);
   let chrome = null;
   try {
     await waitForServer();
@@ -418,20 +457,33 @@ async function main() {
       90000,
     );
     await cdp.waitFor(
-      // The *final* line, not the progress one: "working… 1 model call(s)" also matches a naive
-      // "model call" test, and reading the status through that window found no cost yet.
-      `(() => {
-        const text = document.getElementById('status').textContent;
-        return /model call/.test(text) && !/working…/.test(text);
-      })()`,
-      "the status line to report the finished turn",
+      // The *footer*, not the status line. A finished turn's figures live under its reply, and the
+      // status line deliberately carries only what the footer cannot say — that a guard stopped the
+      // turn. Waiting for the status line here would have been waiting for the duplication back.
+      `document.querySelectorAll('#transcript .turn-stats').length > 0`,
+      "the turn's figures to appear under the reply",
       90000,
     );
     const status = await cdp.eval("document.getElementById('status').textContent");
-    check(/\$\d/.test(status), "the status line reports a cost", status);
+    // A turn that just finished normally: nothing to announce, because the answer is the report.
+    check(
+      !/model call/.test(status),
+      "a finished turn does not restate its own figures on the status line",
+      status,
+    );
+    const footer = await cdp.eval(
+      "[...document.querySelectorAll('#transcript .turn-stats')].pop().textContent",
+    );
+    check(/\$\d/.test(footer), "the turn's footer reports a cost", footer);
+    check(/model call/.test(footer), "the footer reports the model calls", footer);
     // The information bar reports what the session has used, from the log.
     const bar = await cdp.eval("document.getElementById('bar').textContent");
     check(/tokens/.test(bar) && /cost/.test(bar) && /context/.test(bar), "the bar reports usage, cost and context", bar);
+    check(
+      !/\b0 in \/ 0 out\b/.test(bar),
+      "a session that has run a turn reports figures that are not all zero",
+      bar,
+    );
     const costText = await cdp.eval(
       "[...document.querySelectorAll('#bar .chip')].find(c => c.textContent.startsWith('cost')).textContent",
     );
@@ -444,9 +496,24 @@ async function main() {
       "the breakdown is one hover away",
       costDetail,
     );
+    // The bar is a warning rather than a gauge, so this checks the rule and not just the element:
+    // the figure is always a proportion of the window, and the bar is drawn only once that
+    // proportion is big enough to see. A fresh session against a large window is nowhere near it,
+    // and an empty rectangle still draws the eye — which is the state this used to be in.
+    const ctx = await cdp.eval(`(() => {
+      const chip = [...document.querySelectorAll('#bar .chip')].find(c => c.textContent.startsWith('context'));
+      const scale = (n, s) => Number(n) * (s === 'k' ? 1e3 : s === 'M' ? 1e6 : 1);
+      const m = chip.textContent.match(/([\\d.]+)([kM]?) \\/ ([\\d.]+)([kM]?)/);
+      return {
+        text: chip.textContent,
+        meter: !!chip.querySelector('.meter'),
+        fraction: m ? scale(m[1], m[2]) / scale(m[3], m[4]) : null,
+      };
+    })()`);
     check(
-      (await cdp.eval("document.querySelectorAll('#bar .chip .meter').length")) === 1,
-      "the context figure is a proportion of the window",
+      ctx.fraction !== null && ctx.meter === (ctx.fraction >= 0.02),
+      "the context figure is a proportion of the window, and its bar appears only when that is visible",
+      JSON.stringify(ctx),
     );
 
     const replyHtml = await cdp.eval(
@@ -467,6 +534,44 @@ async function main() {
     check(
       (await cdp.eval("document.querySelectorAll('[id^=streams-]').length")) === 0,
       "the streaming container was replaced by the rendered reply",
+    );
+    // The answer is the last thing the model wrote, and it sits outside the fold over the working —
+    // otherwise the fold would be standing between the reader and the thing they came for. A direct
+    // child is the assertion, not "present": the working contains text blocks too, and a fold that
+    // swallowed the answer would still pass a `querySelector`.
+    check(
+      (await cdp.eval("document.querySelectorAll('#transcript .blocks > .text').length")) === 1,
+      "the answer is a direct child of the exchange, not inside the fold",
+    );
+    // The figures line is the way into what the figures are made of: the numbers behind it were
+    // already known and had nowhere to be read. It is the page's second disclosure — the reasoning
+    // block while it streams is the first — and both go through one convention, so this checks the
+    // convention rather than the one panel: a `[data-expands]` button names a target that exists,
+    // clicking it opens that target, and the button says so.
+    const disclosure = await cdp.eval(`(() => {
+      const button = document.querySelector('#transcript .turn-stats [data-expands]');
+      if (!button) return { error: 'no figures line to open' };
+      const target = document.getElementById(button.dataset.expands);
+      if (!target) return { error: 'the line names a target that is not on the page', id: button.dataset.expands };
+      const before = getComputedStyle(target).display;
+      button.click();
+      return {
+        before,
+        after: getComputedStyle(target).display,
+        rows: target.querySelectorAll('dt').length,
+        aria: button.getAttribute('aria-expanded'),
+      };
+    })()`);
+    check(!disclosure.error, "the figures line names a breakdown that is on the page", JSON.stringify(disclosure));
+    check(
+      disclosure.before === 'none' && disclosure.after !== 'none',
+      "clicking the figures line opens the breakdown",
+      JSON.stringify(disclosure),
+    );
+    check(
+      disclosure.rows >= 2 && disclosure.aria === 'true',
+      "the breakdown lists the numbers, and the line reports that it is open",
+      JSON.stringify(disclosure),
     );
 
     console.log("\nstreaming blocks (a block must not be an empty box)");
@@ -508,9 +613,327 @@ async function main() {
       "expanding a live block shows its content",
       liveVisible,
     );
+    // Reasoning while it is arriving has three states, which is one more than `<details>` has, so
+    // it is not one: the newest few lines show, the header opens the rest, and the finished turn
+    // folds it away entirely. What is asserted here is the part that cannot be asserted in a unit
+    // test — that the clip keeps the *newest* lines. `overflow: hidden` alone would keep the oldest.
+    const peek = await cdp.eval(`(() => {
+      const block = document.querySelector('#transcript .thinking.live');
+      // Not every model reasons; when none does there is nothing here to be wrong.
+      if (!block) return { skipped: 'the model produced no reasoning this turn' };
+      const body = block.querySelector('.body');
+      const head = block.querySelector('.head');
+      if (!body || !head) return { error: 'the live reasoning block is missing its parts' };
+      const box = body.getBoundingClientRect();
+      // The content's own height, not the box's. \`scrollHeight\` is the wrong instrument here: it is
+      // an integer and a clipped flex column reports the *clipped* height through it, so it cannot
+      // tell a box that is exactly full from one with a screenful hidden behind it — and comparing
+      // it against a fractional height made this check fail on every turn whose reasoning happened
+      // to be shorter than the clip.
+      const range = document.createRange();
+      range.selectNodeContents(body);
+      const content = range.getBoundingClientRect().height;
+      const lineHeight = parseFloat(getComputedStyle(body).lineHeight) || 0;
+      const clip = {
+        height: box.height,
+        content,
+        lineHeight,
+        // Only worth judging what is on show once at least a whole line is hidden: clipping less
+        // than that leaves the top of the box inside the *first* line, so "is this the newest of
+        // it" has no answer to give either way.
+        hidesAWholeLine: content > box.height + lineHeight + 2,
+      };
+      head.click();
+      const opened = block.hasAttribute('data-expanded') && getComputedStyle(body).display !== 'flex';
+      head.click();
+      const closed = !block.hasAttribute('data-expanded');
+      return {
+        clip,
+        // Anchoring the column to its end is what makes the overflow fall off the top. Where the
+        // clipped box begins is the first *visible* character, so if that is not the start of the
+        // text, the end is what is being shown.
+        startsAtText: document.caretRangeFromPoint(box.left + 3, box.top + 1)?.startOffset === 0,
+        opened,
+        closed,
+        aria: head.getAttribute('aria-expanded'),
+      };
+    })()`);
+    check(!peek.error, "the live reasoning block is well formed", JSON.stringify(peek));
+    if (!peek.skipped) {
+      // The promise is a ceiling, not an exact size: a turn that thought for two lines shows two.
+      check(
+        peek.clip.lineHeight > 0 && peek.clip.height <= peek.clip.lineHeight * 3 + 2,
+        "reasoning in flight is no taller than the three lines it promises",
+        JSON.stringify(peek),
+      );
+      // And when there is more than fits, what is on show is the *newest* of it. This is the half
+      // that a unit test cannot check, and the half that `overflow: hidden` alone would get wrong.
+      check(
+        !peek.clip.hidesAWholeLine || peek.startsAtText === false,
+        "and the lines on show are the newest ones, not the oldest",
+        JSON.stringify(peek),
+      );
+      check(peek.opened && peek.closed, "the reasoning header opens and closes it", JSON.stringify(peek));
+      check(peek.aria === 'false', "and reports that it is shut again", JSON.stringify(peek));
+    } else {
+      console.log(`  --   reasoning peek not observed: ${peek.skipped}`);
+    }
     await cdp.waitFor(
       `!/working…/.test(document.getElementById('status').textContent)`,
       "the turn to finish before the next section",
+      120000,
+    );
+
+    console.log("\na tool that is running (shown from the start, folded when it is over)");
+    // `read` finishes in milliseconds, so the running state is invisible on any tool that is
+    // already fast. The only way to look at it is to run something slow, and the running state is
+    // the whole point: a real `bash` call can take minutes, and those minutes are exactly when the
+    // reader is asking whether anything is happening.
+    //
+    // Long enough to survive the reload below, which is the part of this that used to be broken.
+    await cdp.eval(
+      `(() => {
+        const input = document.getElementById('prompt');
+        input.value = "Use the bash tool to run exactly this command, and wait for it to finish: /bin/sleep 20";
+        document.getElementById('composer').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.querySelectorAll('#transcript [id^=live-tool].running').length >= 1`,
+      "the tool's block to appear while the tool is still running",
+      120000,
+    );
+    const liveTool = await cdp.eval(`(() => {
+      const block = document.querySelector('#transcript [id^=live-tool].running');
+      const time = block.querySelector('time');
+      const args = block.querySelector('.args');
+      const detail = block.querySelector('.pending');
+      // What is inside, and in what order: the call, then the body. The finished block has the same
+      // two things in the same places, which is the point — a block must not change shape when the
+      // tool ends.
+      return {
+        id: block.id,
+        open: block.hasAttribute('open'),
+        hasTimer: !!time,
+        before: time ? time.textContent : null,
+        // Where the clock is. It sits on the running line — the line that says what is happening, so
+        // "and for how long" belongs beside it — and the summary is left as the bare tool name, which
+        // is what a finished block's summary says too.
+        clockOnRunningLine: !!block.querySelector('.pending time'),
+        clockInSummary: !!block.querySelector('summary time'),
+        shape: [...block.children].map((c) => c.tagName.toLowerCase() + '.' + (c.className || '')),
+        args: args ? args.textContent : null,
+        detail: detail ? detail.textContent : '',
+        // Open means it is readable without a click, which is the assertion: the block is shown from
+        // the moment the tool starts, not from the moment it is over.
+        visibleWithoutClick: args && args.checkVisibility ? args.checkVisibility() : true,
+        // The clock and the call are shown together in the summary line and the body, and the
+        // summary line must not be the only thing there is.
+        bodyHeight: block.getBoundingClientRect().height,
+      };
+    })()`);
+    check(
+      liveTool.open && liveTool.visibleWithoutClick,
+      "a tool that is running is shown open, with its call readable",
+      JSON.stringify(liveTool),
+    );
+    check(
+      liveTool.hasTimer && /^\d/.test(liveTool.before || ''),
+      "and it is counting from when it started",
+      JSON.stringify(liveTool),
+    );
+    check(
+      liveTool.clockOnRunningLine && !liveTool.clockInSummary,
+      "the clock is on the line that says what is happening, not in the heading",
+      JSON.stringify(liveTool),
+    );
+    // The call itself, not a one-line paraphrase of it: the block a reader watches is the block they
+    // will be left with, so it shows the same arguments the finished one does.
+    check(
+      /sleep 20/.test(liveTool.args || ''),
+      "and it shows the call, not a summary of it",
+      JSON.stringify(liveTool),
+    );
+    check(
+      liveTool.shape.length === 3 &&
+        liveTool.shape[0] === "summary." &&
+        liveTool.shape[2] === "div.pending",
+      "with the same inside as a finished block: the summary, the call, then the body",
+      JSON.stringify(liveTool.shape),
+    );
+    // The clock is the browser's, not a frame a second from the server — the whole reason `tick()`
+    // and `data-since` exist. Reading it again after a second is the only way to see that it moves.
+    await sleep(2200);
+    const tickedText = await cdp.eval(
+      `(() => {
+        const time = document.getElementById(${JSON.stringify(liveTool.id)}).querySelector('time');
+        return time ? time.textContent : null;
+      })()`,
+    );
+    check(
+      tickedText !== null && tickedText !== liveTool.before,
+      "the count moves on its own",
+      `${liveTool.before} -> ${tickedText}`,
+    );
+
+    // Now the case the whole arrangement exists for: the reader reloads while the tool is running.
+    //
+    // A patch whose target is missing is dropped in silence (`if (!node) return`), so if the
+    // snapshot could not represent a tool that has started but not reported, the tool's output
+    // would never appear — after a reload, and only after a reload, with nothing on the page to
+    // say so. That is why the snapshot carries the running block at all.
+    //
+    // The marker is what makes this a reload rather than a no-op: `readyState === 'complete'` is
+    // already true before the new document starts loading, so waiting on it alone reads the *old*
+    // DOM and quietly verifies nothing.
+    await sleep(2200);
+    await cdp.eval("window.__reloadMarker = 'old-document'");
+    await cdp.send("Page.navigate", { url: URL });
+    await cdp.waitFor(
+      "document.readyState === 'complete' && typeof window.__reloadMarker === 'undefined'",
+      "a genuinely new document",
+      20000,
+    );
+    await cdp.waitFor(
+      `document.querySelectorAll('#transcript [id^=live-tool].running').length >= 1`,
+      "the running tool to be in the snapshot the new page is given",
+      30000,
+    );
+    const afterReload = await cdp.eval(`(() => {
+      const block = document.getElementById(${JSON.stringify(liveTool.id)});
+      const time = block ? block.querySelector('time') : null;
+      return {
+        id: block ? block.id : null,
+        open: block ? block.hasAttribute('open') : null,
+        since: time ? time.dataset.since : null,
+        // Seconds of the tool's life that had already elapsed when this snapshot was rendered. If
+        // the snapshot used the moment of rendering instead of the tool's own start, this would be
+        // near zero — and so would the clock the reader sees, which would reset on every refresh.
+        elapsedMs: time ? Date.now() - Number(time.dataset.since) : null,
+      };
+    })()`);
+    check(
+      afterReload.id === liveTool.id && afterReload.open === true,
+      "a reload mid-tool still shows the tool that is running",
+      JSON.stringify(afterReload),
+    );
+    check(
+      afterReload.elapsedMs > 3000,
+      "and its clock carries on from the tool's real start rather than restarting with the page",
+      JSON.stringify(afterReload),
+    );
+
+    // And the same block, folded, once the tool is over. One block per tool: the earlier shape
+    // appended the result beside the running block, which left the running one — timer and all —
+    // sitting there for the rest of the session.
+    await cdp.waitFor(
+      `document.querySelectorAll('#transcript .result').length >= 1`,
+      "the tool's result to arrive",
+      120000,
+    );
+    // Watched from inside the page rather than read at the right moment from out here. The block is
+    // open for about a second, and a poll over the wire races that second — on a slow run it would
+    // read the folded state and call the feature broken. The observer is kept on `window`, because a
+    // MutationObserver with no reference can be collected and then simply never fires.
+    //
+    // What is asserted is the *visible* behaviour, not which mechanism did the folding. A turn that
+    // finishes within the second ends by re-rendering the whole exchange (that is what a finished
+    // turn does), and that folds the block anyway; demanding that the timer be the thing that folded
+    // it would be asserting an implementation detail and would fail whenever the answer came back
+    // quickly.
+    await cdp.eval(`(() => {
+      const id = ${JSON.stringify(liveTool.id)};
+      window.__settle = { resultAt: null, goneAt: null, foldedAt: null, openWithResult: false };
+      const look = () => {
+        const block = document.getElementById(id);
+        if (!block) {
+          // The block is gone from under this id: the turn ended and re-rendered the exchange, so
+          // there is no longer a live tool block to fold.
+          if (window.__settle.resultAt !== null && window.__settle.goneAt === null) {
+            window.__settle.goneAt = Date.now();
+          }
+          return;
+        }
+        const hasResult = !!block.querySelector('.result');
+        if (!hasResult) return;
+        if (window.__settle.resultAt === null) window.__settle.resultAt = Date.now();
+        if (block.hasAttribute('open')) window.__settle.openWithResult = true;
+        else if (window.__settle.foldedAt === null) window.__settle.foldedAt = Date.now();
+      };
+      window.__settleObs = new MutationObserver(look);
+      // On the document element, not on the transcript. A region refresh replaces the transcript
+      // outright (outerHTML = ...), which detaches an observer living on it — and that observer then
+      // never fires again, so the wait below times out on a page where everything actually worked.
+      // Nothing replaces the document element.
+      window.__settleObs.observe(document.documentElement, {
+        subtree: true, childList: true, attributes: true,
+      });
+      look();
+      return true;
+    })()`);
+    // Polled rather than thrown: a timeout here is not "the page crashed", it is one of the states
+    // below being false, and the checks should say which. Throwing would report a bare timeout and
+    // throw away everything that was recorded.
+    let settleSeen = false;
+    for (let i = 0; i < 120 && !settleSeen; i++) {
+      settleSeen = await cdp.eval(
+        `!!(window.__settle && (window.__settle.foldedAt !== null || window.__settle.goneAt !== null))`,
+      );
+      if (!settleSeen) await sleep(250);
+    }
+    const settled = await cdp.eval(`(() => {
+      const id = ${JSON.stringify(liveTool.id)};
+      const block = document.getElementById(id);
+      const withResult = [...document.querySelectorAll('#transcript details.tool')]
+        .filter((b) => b.querySelector('.result'));
+      return {
+        ...window.__settle,
+        // Whether the block is still there at all, so a report of "never saw a result" can say
+        // whether the tool is still running or the block left without one.
+        stillPresent: !!document.getElementById(id),
+        // Counted through the id, because "one block, reused" is the claim: a second append would
+        // show up here as two elements, or as the result landing in a block of its own.
+        withId: document.querySelectorAll('#transcript [id="' + id + '"]').length,
+        stillRunning: document.querySelectorAll('#transcript details.running').length,
+        settleAttrsLeft: document.querySelectorAll('#transcript [data-settle]').length,
+        blocksWithResult: withResult.length,
+        anyOpenWithResult: withResult.some((b) => b.hasAttribute('open')),
+      };
+    })()`);
+    check(
+      settled.openWithResult === true,
+      "the result is shown as it arrives rather than arriving already folded",
+      JSON.stringify(settled),
+    );
+    // "A moment": long enough to read a line, not a blink. Below that the block was folded on the
+    // same frame it was opened, which is the failure this is here to catch.
+    const shownFor =
+      settled.resultAt === null ? null : (settled.foldedAt ?? settled.goneAt) - settled.resultAt;
+    check(
+      shownFor !== null && shownFor >= 300,
+      "and it stays open long enough to be read",
+      `${settled.resultAt} -> ${settled.foldedAt ?? settled.goneAt} (${shownFor}ms)`,
+    );
+    check(
+      settled.withId <= 1,
+      "one block per tool, not a running one left beside a finished one",
+      JSON.stringify(settled),
+    );
+    check(settled.blocksWithResult >= 1, "the tool's output is in the conversation", JSON.stringify(settled));
+    check(
+      settled.anyOpenWithResult === false,
+      "and no finished tool is left hanging open",
+      JSON.stringify(settled),
+    );
+    check(
+      settled.settleAttrsLeft === 0 && settled.stillRunning === 0,
+      "nothing is left claiming to still be running or waiting to fold",
+      JSON.stringify(settled),
+    );
+    await cdp.waitFor(
+      `!/working…/.test(document.getElementById('status').textContent)`,
+      "the tool turn to finish before the next section",
       120000,
     );
 
@@ -571,6 +994,126 @@ async function main() {
     );
     check(true, "clicking a sidebar row opens that session");
 
+    console.log("\nsession rows (one line each, with the actions under the pointer)");
+    // Two rows with content, so "the current one" and "the others" are different rows.
+    await cdp.waitFor(
+      "document.querySelectorAll('#sessions li.session').length >= 2",
+      "two session rows",
+      30000,
+    );
+    const rows = await cdp.eval(`(() => {
+      const list = [...document.querySelectorAll('#sessions li.session')];
+      const box = (el) => { const r = el.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height) }; };
+      const style = (el, p) => getComputedStyle(el).getPropertyValue(p);
+      const current = list.filter(r => r.classList.contains('current'));
+      return JSON.stringify({
+        count: list.length,
+        heights: [...new Set(list.map(r => Math.round(r.getBoundingClientRect().height)))],
+        labels: list.map(r => r.querySelector('.label').textContent),
+        ages: list.map(r => r.querySelector('.age').textContent),
+        order: list.map(r => [...r.querySelector('.open').children].map(c => c.className)),
+        // The two quiet controls, which is what the row offers without a hover.
+        actsDisplay: list.map(r => style(r.querySelector('.acts'), 'display')),
+        acts: [...document.querySelectorAll('#sessions .acts')].map(a =>
+          [...a.children].map(b => ({ glyph: b.textContent, name: b.getAttribute('aria-label'), tag: b.dataset.rename !== undefined ? 'rename' : 'delete' }))),
+        currentCount: current.length,
+        currentFill: current[0] ? style(current[0], 'background-color') : null,
+        plainFill: list.find(r => !r.classList.contains('current')) ? style(list.find(r => !r.classList.contains('current')), 'background-color') : null,
+        // The bar is a pseudo-element, so it is invisible to every query but a computed style
+        // asked for that pseudo-element.
+        currentBar: current[0] ? getComputedStyle(current[0], '::before').width : null,
+        plainBar: list.find(r => !r.classList.contains('current')) ? getComputedStyle(list.find(r => !r.classList.contains('current')), '::before').content : null,
+        currentWeight: current[0] ? style(current[0].querySelector('.label'), 'font-weight') : null,
+        labelWeight: list.find(r => !r.classList.contains('current')) ? style(list.find(r => !r.classList.contains('current')).querySelector('.label'), 'font-weight') : null,
+        rowBox: (() => { const r = list.find(x => !x.classList.contains('current')).getBoundingClientRect(); return { x: Math.round(r.x + 30), y: Math.round(r.y + r.height / 2) }; })(),
+      });
+    })()`);
+    const rowState = JSON.parse(rows);
+    check(
+      rowState.heights.length === 1 && rowState.heights[0] <= 34,
+      "a session is one line, whatever it is called",
+      JSON.stringify({ heights: rowState.heights, labels: rowState.labels }),
+    );
+    check(
+      rowState.order.every((kids) => kids.includes('label') && kids.includes('age')),
+      "the row is the label and the age, in that order",
+      JSON.stringify(rowState.order),
+    );
+    check(
+      rowState.ages.every((age) => /(now|\d+[mhd] ago)$/.test(age)),
+      "every row says how long ago it was, in one unit",
+      JSON.stringify(rowState.ages),
+    );
+    check(
+      rowState.actsDisplay.every((d) => d === 'none'),
+      "the rename and delete controls are out of the way until they are needed",
+      JSON.stringify(rowState.actsDisplay),
+    );
+    check(
+      rowState.acts.every((pair) => pair.every((b) => (b.name ?? '').length > 0)),
+      "and each of them is named for the row it acts on, not just 'delete'",
+      JSON.stringify(rowState.acts),
+    );
+    check(
+      rowState.currentCount === 1 && rowState.currentFill !== rowState.plainFill,
+      "the open session is the filled row",
+      JSON.stringify(rowState),
+    );
+    check(
+      rowState.currentBar === '2px' && rowState.plainBar !== '""',
+      "with an accent bar beside it, which the others do not have",
+      JSON.stringify({ currentBar: rowState.currentBar, plainBar: rowState.plainBar }),
+    );
+    check(
+      rowState.currentWeight === '600' && rowState.labelWeight === '400',
+      "and a heavier name",
+      JSON.stringify({ currentWeight: rowState.currentWeight, labelWeight: rowState.labelWeight }),
+    );
+
+    await cdp.moveMouse(rowState.rowBox.x, rowState.rowBox.y);
+    const hovered = JSON.parse(await cdp.eval(`(() => {
+      const r = [...document.querySelectorAll('#sessions li.session')].find(x => !x.classList.contains('current'));
+      return JSON.stringify({
+        acts: getComputedStyle(r.querySelector('.acts')).display,
+        age: getComputedStyle(r.querySelector('.age')).display,
+        fill: getComputedStyle(r).backgroundColor,
+      });
+    })()`));
+    check(
+      hovered.acts === 'flex' && hovered.age === 'none',
+      "hovering a row swaps the age for the actions, in the same place",
+      JSON.stringify(hovered),
+    );
+    check(
+      hovered.fill !== rowState.plainFill,
+      "and the row being pointed at is filled",
+      JSON.stringify({ hovered: hovered.fill, resting: rowState.plainFill }),
+    );
+
+    // Away from the list, then the keyboard's own route in: the actions must be laid out before
+    // Tab looks for them, or they are unreachable without a mouse.
+    await cdp.moveMouse(5, 5);
+    const focused = JSON.parse(await cdp.eval(`(() => {
+      const r = [...document.querySelectorAll('#sessions li.session')].find(x => !x.classList.contains('current'));
+      r.querySelector('.open').focus();
+      return JSON.stringify({
+        acts: getComputedStyle(r.querySelector('.acts')).display,
+        age: getComputedStyle(r.querySelector('.age')).display,
+        outline: getComputedStyle(r.querySelector('.open')).outlineWidth,
+        focused: document.activeElement === r.querySelector('.open'),
+      });
+    })()`));
+    check(
+      focused.focused && focused.acts === 'flex' && focused.age === 'none',
+      "and focusing a row with the keyboard reveals them too",
+      JSON.stringify(focused),
+    );
+    check(
+      focused.outline !== '0px',
+      "with a focus ring that is visible against the row it is on",
+      JSON.stringify(focused),
+    );
+
     console.log("\nworkspaces (a session from another directory)");
     // Seed a second workspace the server has never seen: its own directory and a
     // session file that says where the agent should work.
@@ -593,6 +1136,15 @@ async function main() {
     mkdirSync(otherDir, { recursive: true });
     // Deliberately long: the scroll position is only observable on a conversation taller than the
     // window, and the reader's complaint was about exactly those.
+    // Eleven sessions beside it, so this workspace holds twelve against a list that shows ten.
+    // Written *before* the long one because the order is by mtime: the file a check is about has to
+    // be the newest, or it is the one the cap hides and every check below is about a row that is
+    // not on the page.
+    for (let i = 0; i < 11; i++) {
+      const older = sessionFile(otherCwd, `an older conversation ${i}`, 1);
+      const at = `2019-01-${String(i + 1).padStart(2, "0")}T00-00-00.000Z`;
+      writeFileSync(join(otherDir, `${at}_${older.id}.jsonl`), older.text);
+    }
     const seeded = sessionFile(otherCwd, "seeded question from the other project", 24);
     writeFileSync(join(otherDir, `2020-01-01T00-00-00.000Z_${seeded.id}.jsonl`), seeded.text);
 
@@ -615,6 +1167,28 @@ async function main() {
       "only the workspace being worked in is open",
     );
 
+    // The workspace name is longer than the column. It has to be ellipsised, and it has to be the
+    // *name* that gives: a `summary` is a list item, and text overflow only applies to the box the
+    // text is in.
+    const longName = JSON.parse(await cdp.eval(`(() => {
+      const names = [...document.querySelectorAll('#sessions summary .name')];
+      const name = names.find(n => n.textContent.length > 30);
+      if (!name) return JSON.stringify({ found: false, names: names.map(n => n.textContent) });
+      const sidebar = document.querySelector('.sidebar').getBoundingClientRect();
+      const row = name.closest('summary').getBoundingClientRect();
+      return JSON.stringify({
+        found: true,
+        clipped: name.scrollWidth > name.clientWidth,
+        insideColumn: Math.round(row.right) <= Math.round(sidebar.right) + 1,
+        sidebarWidth: Math.round(sidebar.width),
+      });
+    })()`));
+    check(
+      longName.found && longName.clipped && longName.insideColumn,
+      "a workspace name too long for the column is ellipsised rather than pushing it wider",
+      JSON.stringify(longName),
+    );
+
     const switched = await cdp.eval(
       `(() => {
         const row = [...document.querySelectorAll('#sessions [data-session]')]
@@ -625,10 +1199,19 @@ async function main() {
       })()`,
     );
     check(!!switched, "the seeded session is listed under its own workspace", switched ?? "not found");
+    // The status line no longer repeats the working directory — it is the first thing on the
+    // workspace row, and a temp path with a hash in it was most of the line. What says the agent
+    // moved is the transcript becoming that session's conversation, which is what the reader
+    // actually sees.
     await cdp.waitFor(
-      `document.getElementById('status').textContent.includes(${JSON.stringify(`in ${otherCwd}`)})`,
+      `document.getElementById('transcript').textContent.includes('seeded question from the other project')`,
       "the agent to move into the other workspace",
       30000,
+    );
+    check(
+      !/in \//.test(await cdp.eval("document.getElementById('status').textContent")),
+      "the status line names what was opened, not where it lives",
+      await cdp.eval("document.getElementById('status').textContent"),
     );
     check(
       (await cdp.eval(
@@ -669,6 +1252,44 @@ async function main() {
       "exactly one session is marked current",
     );
 
+    // The cap, and the way past it. Twelve sessions in this workspace against a list that shows
+    // ten, so two of them are reachable only through the offer.
+    const capped = await cdp.eval(`(() => {
+      const rows = [...document.querySelectorAll('#sessions details.workspace[open] li.session')];
+      const more = document.querySelector('#sessions details.workspace[open] [data-more]');
+      return JSON.stringify({
+        rows: rows.length,
+        label: more ? more.textContent : null,
+        named: more ? more.getAttribute('aria-label') : null,
+        // Nothing is dropped silently: the offer names the workspace it belongs to, because a
+        // column of them would otherwise be a stack of identical buttons.
+        above: more ? rows.includes(more.previousElementSibling.querySelector('li')) : null,
+        lastInList: more ? more.previousElementSibling === rows[rows.length - 1].parentElement : null,
+      });
+    })()`);
+    const capState = JSON.parse(capped);
+    check(
+      capState.rows === 10 && capState.label === 'Show 2 more',
+      "a workspace that holds more sessions than the list shows offers the rest",
+      JSON.stringify(capState),
+    );
+    check(
+      /show 2 more sessions in /.test(capState.named ?? ''),
+      "and says which workspace the rest are in",
+      JSON.stringify(capState),
+    );
+    await cdp.eval("document.querySelector('#sessions details.workspace[open] [data-more]').click()");
+    await cdp.waitFor(
+      `document.querySelectorAll('#sessions details.workspace[open] li.session').length === 12`,
+      "the rest of the workspace's sessions to arrive",
+      20000,
+    );
+    check(true, "clicking it lists them, so nothing in the store is out of reach");
+    check(
+      (await cdp.eval("document.querySelectorAll('#sessions [data-more]').length")) === 0,
+      "and the offer goes away once there is nothing left to offer",
+    );
+
     // The point of a workspace: the tools run there. A relative path only resolves
     // if the read tool was given the new directory.
     const markerPrompt = "Use the read tool on marker-b.txt and reply with its contents.";
@@ -690,7 +1311,7 @@ async function main() {
     console.log("\nreconnect (the server is restarted under the page)");
     server.kill("SIGKILL");
     await sleep(1500);
-    server = startServer(store);
+    server = startServer(store, home);
     await waitForServer();
     // EventSource backs off before retrying, so give the reconnection time to be
     // attempted and answered.
@@ -709,9 +1330,20 @@ async function main() {
       "the status line no longer advertises the pre-restart turn",
       statusAfter,
     );
+    // Not `innerHTML.length === 0`: a fresh session now shows the welcome, which is what tells a
+    // reader what the page is for. The requirement is that the *conversation* is gone — no exchange
+    // left over from before the restart — and that what replaced it is the empty state.
+    const afterRestart = await cdp.eval(`(() => {
+      const t = document.getElementById('transcript');
+      return {
+        exchanges: t.querySelectorAll('.exchange').length,
+        welcome: !!t.querySelector('.welcome'),
+      };
+    })()`);
     check(
-      (await cdp.eval("document.getElementById('transcript').innerHTML.length")) === 0,
+      afterRestart.exchanges === 0 && afterRestart.welcome,
       "the page shows the new session the restarted server opened",
+      JSON.stringify(afterRestart),
     );
     // The conversation is not lost: it is on disk, listed, and one click away.
     const restored = await cdp.eval(
@@ -769,6 +1401,13 @@ async function main() {
     );
     const before = await counter();
     check(before !== null && before >= 1, "the turn reports progress while it runs", `counter=${before}`);
+    // The picker locks for the duration: a model change would append an entry off the running
+    // turn's own leaf, which forks the log onto a branch nobody walks. The server refuses it too;
+    // this is what stops the reader trying, and it has to come from a refresh, not from a reload.
+    check(
+      (await cdp.eval("document.getElementById('model-picker').disabled")) === true,
+      "the model picker is locked while a turn runs",
+    );
 
     // Away: the other session. Nothing about the running one may show up here.
     check(!!(await openSession("second-ok")), "the second session can be opened");
@@ -793,6 +1432,16 @@ async function main() {
     );
 
     // Let it work while nobody is watching, then come back and see that it did.
+    //
+    // The model-call counter only moves when a *model call* completes, and one round is a model
+    // call followed by however many tool calls it asked for. Reading every file in a directory is
+    // a round with a lot of tool calls in it, so the gap between two model calls is not bounded by
+    // anything this test can assume — a fixed sleep here was about one run in three short, which
+    // made the whole check fail for a reason that had nothing to do with what it asserts.
+    //
+    // So the away time is spent working rather than waiting: come back and poll until either the
+    // counter has moved or the turn has ended, both of which prove the turn kept going while
+    // another session was on screen.
     await sleep(9000);
     check(!!(await openSession("browser-ok")), "the working session can be opened again");
     await cdp.waitFor(
@@ -800,18 +1449,29 @@ async function main() {
       "the running exchange to be back on screen",
       30000,
     );
-    let after = await counter();
-    if (after === null) {
-      // It finished while hidden, which is also proof that it kept going.
-      after = await cdp.eval(
+    const progressed = async () => {
+      const now = await counter();
+      // `null` means the status line no longer reports a running turn, which is the turn having
+      // finished — proof of progress by itself.
+      if (now === null) return "finished";
+      return now > before ? "advanced" : null;
+    };
+    let outcome = null;
+    const deadline = Date.now() + 45000;
+    while (Date.now() < deadline && outcome === null) {
+      outcome = await progressed();
+      if (outcome === null) await sleep(500);
+    }
+    if (outcome === "finished") {
+      const exchanges = await cdp.eval(
         "document.querySelectorAll('#transcript .exchange').length",
       );
-      check(after >= 2, "the turn completed while hidden");
+      check(exchanges >= 2, "the turn completed while hidden");
     } else {
       check(
-        after > before,
+        outcome === "advanced",
         "the turn made progress while another session was displayed",
-        `before=${before} after=${after}`,
+        `before=${before} after=${await counter()}`,
       );
     }
     check(
@@ -871,6 +1531,14 @@ async function main() {
       30000,
     );
     check(true, "stopping one session leaves the others alone");
+    // And the picker is usable again, which is the other half of the lock: a refresh that only
+    // ever disabled it would leave the reader unable to change the model at all.
+    await cdp.waitFor(
+      `document.getElementById('model-picker').disabled === false`,
+      "the picker to unlock once the turn is over",
+      30000,
+    );
+    check(true, "the model picker unlocks when the turn ends");
     void taskSession;
 
     console.log("\nnaming a session");
@@ -1043,6 +1711,20 @@ async function main() {
       (await cdp.eval("document.querySelectorAll('#add-workspace').length")) === 1,
       "the sidebar offers a way to add a workspace",
     );
+    // The folder chooser, when this host can open one. Not clicked: the dialog is a real OS window
+    // on the machine running the server, and an unattended run cannot close it. What is checked is
+    // the structure that makes it safe to click — outside the path form, so it can never submit a
+    // half-typed path.
+    const pick = await cdp.eval(`(() => {
+      const button = document.getElementById('workspace-pick');
+      if (!button) return 'absent';
+      return button.type === 'button' && !button.closest('form') ? 'outside-form' : 'submitter';
+    })()`);
+    check(
+      pick === 'absent' || pick === 'outside-form',
+      "the folder chooser, when offered, is not a form submitter",
+      pick,
+    );
     // A path that is not a directory is refused by name, not silently ignored.
     await cdp.eval(
       `(() => {
@@ -1096,6 +1778,12 @@ async function main() {
     const second = `${store}-added-second`;
     mkdirSync(second, { recursive: true });
     const secondCanonical = realpathSync(second);
+    // Instructions of its own, written before the workspace is added so the panel the add renders
+    // already has them. What the block does with this file is checked below.
+    writeFileSync(
+      join(second, "AGENTS.md"),
+      "# browser check instructions\n\nOnly for this workspace.\n",
+    );
     await cdp.eval(
       `(() => {
         document.getElementById('workspace-path').value = ${JSON.stringify(second)};
@@ -1118,6 +1806,530 @@ async function main() {
     check(
       existsSync(join(store, storeDirName(freshCanonical), "workspace.json")),
       "the added workspace is remembered in the store",
+    );
+
+    console.log("\nsettings (the panel, its live facts and its one editable list)");
+    // The panel is a `<details>`, so the browser owns whether it is open — which is also what
+    // toggling a skill must not reset.
+    check(
+      (await cdp.eval("document.querySelectorAll('#settings').length")) === 1,
+      "the settings panel is in the bar",
+    );
+    // Counting both, because a refresh that sends the `<details>` instead of the body nests a
+    // second panel inside the first — and that still renders, still has the ids, and still works.
+    // Only the counts see it.
+    check(
+      (await cdp.eval("document.querySelectorAll('#settings-body').length")) === 1,
+      "the panel body is not nested in itself",
+    );
+    // A working key from pi's store, with nothing saved and nothing wrong: the panel stays closed
+    // rather than taking a third of the screen on every load. (It opens by itself in the two cases
+    // that need the reader: no key at all, or a saved key a variable is overruling.)
+    check(
+      (await cdp.eval("document.getElementById('settings').open === false")) ||
+        (await cdp.eval(
+          "document.querySelector('#settings-body .key-state .state').textContent.includes('no key')",
+        )),
+      "the panel opens by itself only when there is something to act on",
+    );
+    await cdp.eval(
+      `(() => { document.getElementById('settings').open = true; return true; })()`,
+    );
+    await cdp.waitFor(
+      "document.getElementById('settings-body') !== null",
+      "the panel body",
+      10000,
+    );
+    const panel = await cdp.eval(
+      "document.getElementById('settings-body').textContent",
+    );
+    check(
+      panel.includes("deepseek-v4-flash") && panel.includes(store),
+      "the panel reports the model actually in use and the store actually resolved",
+      panel,
+    );
+    // The key it is using is shown as a fingerprint. With no environment key, and a credential on
+    // file from pi, the panel must say which one — and never print it.
+    const keyState = await cdp.eval(
+      "document.querySelector('#settings-body .key-state').textContent",
+    );
+    check(
+      !keyState.includes("sk-") || keyState.includes("…"),
+      "the panel identifies the key rather than printing it",
+      keyState,
+    );
+    check(
+      keyState.length > 0,
+      "the panel says where the key in use came from",
+      keyState,
+    );
+    // The panel is taken out of the flow so a long skill list cannot push the conversation
+    // around, and it must still be inside the window it floats over — an absolutely positioned box
+    // anchored to the wrong edge is invisible and would pass every byte-level assertion.
+    const layout = await cdp.eval(
+      `JSON.stringify((() => {
+        const body = document.getElementById('settings-body').getBoundingClientRect();
+        const bar = document.getElementById('bar').getBoundingClientRect();
+        return { left: body.left, right: body.right, width: window.innerWidth, barHeight: bar.height };
+      })())`,
+    );
+    const geometry = JSON.parse(layout);
+    check(
+      geometry.left >= 0 && geometry.right <= geometry.width + 1,
+      "the panel stays inside the viewport",
+      layout,
+    );
+    check(
+      geometry.barHeight < 80,
+      "opening the panel does not push the bar down",
+      layout,
+    );
+
+    // The seeded skill is listed and on. The count is read rather than hardcoded: this machine may
+    // have skills of its own under a root the check does not control, and what is being tested is
+    // that the number tracks the boxes.
+    const count = () =>
+      cdp.eval("document.querySelector('#settings-body h3 .count').textContent");
+    const onCount = async () => Number((await count()).split("/")[0].replace(/[^0-9]/g, ""));
+    const skillsOn = await onCount();
+    check(
+      (await cdp.eval(
+        `document.querySelector('#settings-body input[value="browser-demo"]')?.checked === true`,
+      )),
+      "a discovered skill is listed as on",
+    );
+    check(skillsOn > 0, "the panel counts the skills that are on", `${skillsOn}`);
+    // Switch it off and apply. The form is posted by the page rather than navigated to, so this
+    // also covers that the delegated submit listener is attached to a form that arrived in a
+    // patch.
+    await cdp.eval(
+      `(() => {
+        const box = document.querySelector('#settings-body input[value="browser-demo"]');
+        box.checked = false;
+        document.getElementById('skills-form').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      "document.getElementById('status').textContent.includes('skill')",
+      "the skill change to be applied",
+      15000,
+    );
+    check(true, "toggling a skill posts and is acknowledged");
+    await cdp.waitFor(
+      `document.querySelector('#settings-body input[value="browser-demo"]')?.checked === false`,
+      "the panel to come back with the skill off",
+      15000,
+    );
+    // The body is what gets replaced, so the panel the reader had open is still open — and the
+    // count agrees with the box.
+    check(
+      (await cdp.eval("document.getElementById('settings').open === true")),
+      "applying a setting does not close the panel",
+    );
+    check(
+      (await cdp.eval("document.querySelectorAll('#settings-body').length")) === 1 &&
+        (await cdp.eval("document.querySelectorAll('#settings').length")) === 1,
+      "refreshing the panel did not nest it in itself",
+    );
+    check(
+      (await onCount()) === skillsOn - 1,
+      "the panel reports the new state, not the submitted one",
+      `${await count()}`,
+    );
+    const settingsFile = join(home, ".pi-mb/settings.json");
+    check(
+      existsSync(settingsFile) &&
+        JSON.parse(readFileSync(settingsFile, "utf8")).disabled_skills.includes(
+          "browser-demo",
+        ),
+      "the switch is written to the settings file",
+    );
+    // And it goes back on the same way: the form is the only way in, so the reverse direction has
+    // to work through it too. (Whether the catalog the model actually receives lost the skill is
+    // asserted in `ui/app_wbtest.mbt`, where the prompt can be inspected — a transcript never
+    // contains the catalog.)
+    await cdp.eval(
+      `(() => {
+        document.querySelector('#settings-body input[value="browser-demo"]').checked = true;
+        document.getElementById('skills-form').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.querySelector('#settings-body h3 .count').textContent === ${JSON.stringify(
+        `${skillsOn}/${skillsOn} on`,
+      )}`,
+      "the skill to go back on",
+      15000,
+    );
+    check(
+      (await cdp.eval(
+        `document.querySelector('#settings-body input[value="browser-demo"]')?.checked === true`,
+      )),
+      "switching it back on restores the count",
+      `${await count()}`,
+    );
+    check(true, "a switched-off skill can be switched back on");
+
+    // The limits: the two guards a reader can move without a restart. Driven through the form the
+    // page actually renders, because the interesting failure is a form that posts and changes
+    // nothing — the value the next turn reads is what has to move.
+    const limitsBefore = await cdp.eval(
+      `document.querySelector('#limits-form input[name="max_rounds"]').value`,
+    );
+    check(
+      limitsBefore === "" || /^[0-9.]+$/.test(limitsBefore),
+      "the limit fields show a value or an empty box for the default",
+      `${limitsBefore}`,
+    );
+    await cdp.eval(
+      `(() => {
+        document.querySelector('#limits-form input[name="max_rounds"]').value = '57';
+        document.querySelector('#limits-form input[name="max_cost"]').value = '0.75';
+        document.getElementById('limits-form').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      "document.getElementById('status').textContent.includes('limits saved')",
+      "the limits to be saved",
+      15000,
+    );
+    check(true, "saving a limit posts and is acknowledged");
+    let settingsNow = JSON.parse(readFileSync(settingsFile, "utf8"));
+    check(
+      settingsNow.max_rounds === 57 && settingsNow.max_cost === 0.75,
+      "the limits are written to the settings file",
+      JSON.stringify(settingsNow),
+    );
+    await cdp.waitFor(
+      `document.querySelector('#limits-form input[name="max_rounds"]')?.value === "57"`,
+      "the panel to come back showing the saved limits",
+      15000,
+    );
+    check(true, "the panel renders the limits that are now in force rather than what was typed");
+    // And the next turn really runs under them. This is what separates "a form that saved a
+    // number" from "a bound the turn reads", and it is checked with the limit that stops a turn
+    // deterministically: one model call, with a prompt that forces a tool round, so the turn has
+    // somewhere to stop rather than settling on its first answer.
+    await cdp.eval(
+      `(() => {
+        document.querySelector('#limits-form input[name="max_rounds"]').value = '1';
+        document.querySelector('#limits-form input[name="max_cost"]').value = '';
+        document.getElementById('limits-form').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.querySelector('#limits-form input[name="max_rounds"]')?.value === "1"`,
+      "the one-call limit to be saved",
+      15000,
+    );
+    await cdp.eval(
+      `(() => {
+        document.getElementById('prompt').value = 'Use the bash tool to run exactly: /bin/echo limit-check';
+        document.getElementById('composer').requestSubmit();
+        return true;
+      })()`,
+    );
+    // The status line says *that* a guard stopped the turn and which one; the footer under the
+    // reply says how many model calls it took to get there. The count used to be in both places.
+    await cdp.waitFor(
+      `document.getElementById('status').textContent.includes('gave up')`,
+      "the turn to stop at the saved call limit",
+      120000,
+    );
+    check(
+      !/model call/.test(await cdp.eval("document.getElementById('status').textContent")),
+      "the guard is named without repeating the footer's counts",
+      await cdp.eval("document.getElementById('status').textContent"),
+    );
+    check(true, "the saved call limit is the one the next turn runs under");
+    // Put the limits back, so the checks after this one run the way they did before.
+    await cdp.eval(
+      `(() => {
+        document.querySelector('#limits-form input[name="max_rounds"]').value = '';
+        document.querySelector('#limits-form input[name="max_cost"]').value = '';
+        document.getElementById('limits-form').requestSubmit();
+        return true;
+      })()`,
+    );
+    // Waiting on the *server's* answer, not on the field: the field is empty the moment this
+    // script clears it, so waiting for that would be waiting for nothing. The rendered source
+    // label only becomes `default` when the panel that came back from the server says so.
+    await cdp.waitFor(
+      `document.querySelector('#limits-form label.limit .source')?.textContent === "default"`,
+      "the limits to go back to the defaults",
+      15000,
+    );
+    settingsNow = JSON.parse(readFileSync(settingsFile, "utf8"));
+    check(
+      settingsNow.max_rounds === null && settingsNow.max_cost === null,
+      "clearing the fields records no opinion rather than a bound of zero",
+      JSON.stringify(settingsNow),
+    );
+
+    // The instructions: the one setting where "saved" and "in force" are different questions,
+    // and the whole reason the block shows a source line above a preview. The active workspace is
+    // the second one added above, so this starts from a file it does not have.
+    const instructionSource = () =>
+      cdp.eval(
+        "document.querySelector('#settings-body .instruction-source b')?.textContent",
+      );
+    const instructionPreview = () =>
+      cdp.eval(
+        "document.querySelector('#settings-body .instruction-preview')?.textContent ?? ''",
+      );
+    check(
+      (await instructionSource()) === "AGENTS.md in this workspace",
+      "a workspace with an AGENTS.md reports it as the instructions in force",
+      `${await instructionSource()} / ${await instructionPreview()}`,
+    );
+    check(
+      (await instructionPreview()).includes("# browser check instructions"),
+      "the preview shows what the turn will actually send",
+      await instructionPreview(),
+    );
+    // Saving a fallback posts through the form the page renders, and the status line has to say
+    // the save landed *and* that it is not the text being sent — otherwise "I saved it and nothing
+    // changed" reads as a bug rather than as the precedence working.
+    await cdp.eval(
+      `(() => {
+        document.getElementById('agents-input').value = 'Prefer small diffs.';
+        document.getElementById('agents-form').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      "document.getElementById('status').textContent.includes('takes precedence')",
+      "the fallback instructions to be saved",
+      15000,
+    );
+    check(
+      true,
+      "saving fallback instructions is acknowledged as overruled by the workspace file",
+    );
+    check(
+      JSON.parse(readFileSync(settingsFile, "utf8")).agents_md ===
+        "Prefer small diffs.",
+      "the fallback is written to the settings file",
+    );
+    check(
+      (await cdp.eval("document.getElementById('agents-input').value")) ===
+        "Prefer small diffs.",
+      "the textarea keeps the text, which unlike a key the server does send back",
+    );
+    // Removing the file flips which source is in force, with no restart and no reload: the read
+    // happens per turn and per render, so a cache here is the one thing this whole check is for.
+    rmSync(join(second, "AGENTS.md"));
+    await cdp.eval(
+      `(() => {
+        document.getElementById('agents-form').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.querySelector('#settings-body .instruction-source b')?.textContent === "saved in settings"`,
+      "the panel to report the saved text now that the file is gone",
+      15000,
+    );
+    check(
+      (await instructionPreview()) === "Prefer small diffs.",
+      "and to preview the saved text rather than the file it can no longer read",
+      await instructionPreview(),
+    );
+    // Clearing it is the case the marker field exists for: an emptied textarea posts no field at
+    // all, and without the marker the server could not tell it from a request the panel never
+    // made.
+    await cdp.eval(
+      `(() => {
+        document.getElementById('agents-input').value = '';
+        document.getElementById('agents-form').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      "document.getElementById('status').textContent.includes('cleared')",
+      "the cleared fallback to be acknowledged",
+      15000,
+    );
+    check(
+      JSON.parse(readFileSync(settingsFile, "utf8")).agents_md === "",
+      "an emptied textarea clears the setting rather than saving a blank one",
+    );
+    check(
+      (await cdp.eval(
+        "document.querySelector('#settings-body .instruction-source b')?.textContent",
+      )) === "none",
+      "and the panel says nothing is being sent rather than leaving the reader to guess",
+    );
+
+    // Finally the key, which is last because saving one changes what the next turn would send
+    // and every turn check above has already run.
+    const fakeKey = "sk-browser-check-0000000000000000";
+    await cdp.eval(
+      `(() => {
+        document.getElementById('key-input').value = ${JSON.stringify(fakeKey)};
+        document.getElementById('key-form').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      "document.getElementById('status').textContent.includes('key')",
+      "the key to be saved",
+      15000,
+    );
+    check(true, "saving a key posts and is acknowledged");
+    check(
+      JSON.parse(readFileSync(settingsFile, "utf8")).saved_api_key === fakeKey,
+      "the key is written to the settings file",
+    );
+    // The credential never comes back to the browser, and the field the reader typed into is
+    // cleared rather than left holding it.
+    check(
+      (await cdp.eval(
+        "document.documentElement.outerHTML.includes('browser-check-0000')",
+      )) === false,
+      "the saved key is never rendered back into the page",
+    );
+    check(
+      (await cdp.eval("document.getElementById('key-input').value")) === "",
+      "the field does not keep the key after saving",
+    );
+    // Clearing it is the other half of the same control, and the one that would silently take the
+    // wrong branch if the button's value were relied on: a submit button's name is not part of a
+    // form's data, so the clear control has to carry a hidden field of its own.
+    await cdp.waitFor(
+      "document.getElementById('key-clear') !== null",
+      "the clear control to appear once a key is saved",
+      15000,
+    );
+    await cdp.eval(
+      `(() => { document.getElementById('key-clear').requestSubmit(); return true; })()`,
+    );
+    await cdp.waitFor(
+      `document.getElementById('status').textContent.includes('cleared')`,
+      "the clear to be applied and reported as such",
+      15000,
+    );
+    check(true, "clearing a key posts and says what is in use instead");
+    check(
+      JSON.parse(readFileSync(settingsFile, "utf8")).saved_api_key === "",
+      "clearing removes the saved key from the file",
+    );
+    check(
+      (await cdp.eval("document.getElementById('key-clear') === null")),
+      "the clear control goes away once there is nothing to clear",
+    );
+
+    console.log("\nskill invocation (/skill:<name>)");
+    // The expansion is the whole feature: the model must answer with a string that exists nowhere
+    // except the skill's body, because its description only says the body exists.
+    await cdp.eval(
+      `(() => {
+        document.getElementById('prompt').value = '/skill:browser-demo go';
+        document.getElementById('composer').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.getElementById('transcript').textContent.includes('SKILL-BODY-OK-9f2c')`,
+      "the skill body to reach the model and come back",
+      120000,
+    );
+    check(true, "/skill:<name> expands the skill and the model answers from it");
+    // The block the model saw is not in the transcript — it is the request, not the reply — so
+    // assert on the rendering instead: the reader's message is what they typed, not the expansion.
+    const exchange = await cdp.eval(
+      `document.getElementById('transcript').textContent`,
+    );
+    check(
+      !exchange.includes("References are relative to"),
+      "the expansion is sent to the model without being echoed into the conversation",
+    );
+    // Let the turn settle before touching the picker: a model change is refused while a turn is
+    // running, and neither the reply landing in the transcript nor the Send button re-enabling is
+    // the same moment as the turn ending — the POST returns immediately, while the turn runs on.
+    // Stop is the one thing that says a turn is over: it is live only while one is running, and it
+    // goes back to disabled at the same moment the picker unlocks. (The status line used to be the
+    // signal here; a turn that finishes normally now leaves it empty, which is the point.)
+    await cdp.waitFor(
+      `document.getElementById('stop').disabled === true`,
+      "the skill turn to finish",
+      120000,
+    );
+
+    console.log("\nmodel picker (per session, bottom-right of the composer)");
+    const pickerState = () =>
+      cdp.eval(
+        `(() => {
+          const s = document.getElementById('model-picker');
+          return JSON.stringify({ count: document.querySelectorAll('#model-picker').length, value: s && s.selectedOptions[0].value, options: s ? s.options.length : 0 });
+        })()`,
+      );
+    const pickerBefore = JSON.parse(await pickerState());
+    check(
+      pickerBefore.count === 1,
+      "the composer has exactly one model picker",
+      JSON.stringify(pickerBefore),
+    );
+    check(
+      pickerBefore.options >= 3,
+      "the picker offers the catalog",
+      JSON.stringify(pickerBefore),
+    );
+    // Switching through the control the page actually renders.
+    await cdp.eval(
+      `(() => {
+        const s = document.getElementById('model-picker');
+        s.value = 'deepseek-v4-pro';
+        s.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `document.getElementById('status').textContent.includes('V4 Pro')`,
+      "the switch to be acknowledged",
+      15000,
+    );
+    check(true, "the picker switches the session's model");
+    await cdp.waitFor(
+      `document.querySelector('#model-picker').selectedOptions[0].value === 'deepseek-v4-pro'`,
+      "the picker to come back showing the new model",
+      15000,
+    );
+    check(
+      (await cdp.eval("document.getElementById('bar').textContent")).includes(
+        "deepseek-v4-pro",
+      ),
+      "the bar names the model the session is now on",
+    );
+    // A turn made on the new model, so the switch is not just a field: the reply is real and the
+    // cost is billed at the new model's rates.
+    await cdp.eval(
+      `(() => {
+        document.getElementById('prompt').value = 'Reply with the single word: ok';
+        document.getElementById('composer').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      `!document.getElementById('send').disabled`,
+      "a turn on the newly chosen model",
+      120000,
+    );
+    check(true, "a turn runs on the model the picker selected");
+    // And it survived a restart: the choice is an entry in the session's log, so a reload — which
+    // is what a restart looks like from the page — must find the same model selected.
+    await cdp.send("Page.navigate", { url: URL });
+    await cdp.waitFor("document.readyState === 'complete'", "page reload", 20000);
+    await sleep(1500);
+    const pickerAfter = JSON.parse(await pickerState());
+    check(
+      pickerAfter.value === "deepseek-v4-pro",
+      "the chosen model comes back after a reload, because it is in the log",
+      JSON.stringify(pickerAfter),
     );
 
     console.log("\nno uncaught exceptions");

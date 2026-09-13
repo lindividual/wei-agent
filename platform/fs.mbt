@@ -33,6 +33,20 @@ pub async fn append_text(path : String, content : String) -> Unit {
 }
 
 ///|
+/// Read a file as UTF-8 text, or `None` when it is not valid UTF-8.
+///
+/// `read_text` raises on invalid bytes. That is right for a file whose format is text by
+/// definition — a session log with a broken encoding is a real problem — but wrong for a tool
+/// that walks a repository, where a binary is an ordinary thing to meet. A tool that cannot
+/// tell the two apart turns "there is a `.png` under this directory" into a dead turn, so it
+/// asks this instead and decides what a decode failure means in its own case.
+pub async fn read_text_or_none(path : String) -> String? {
+  Some(read_text(path)) catch {
+    _ => None
+  }
+}
+
+///|
 /// The first `max_bytes` of a file, decoded lossily.
 ///
 /// Used to describe a session without parsing it. A prefix can end mid-character
@@ -72,6 +86,56 @@ pub async fn path_exists(path : String) -> Bool {
 }
 
 ///|
+/// The first `max_bytes` of a file as raw bytes, or `None` when it cannot be read.
+///
+/// No decoding and no loss: this is for callers that need the actual bytes, which in practice
+/// means an image on its way to base64. `read_prefix` decodes, which is right for describing a
+/// text file and wrong for carrying a picture, where every byte matters and "mostly right" is a
+/// corrupt image.
+pub async fn read_bytes_prefix(path : String, max_bytes : Int) -> Bytes? {
+  if !path_exists(path) {
+    return None
+  }
+  let file = try @fs.open(path, mode=@fs.Mode::ReadOnly) catch {
+    _ => return None
+  } noraise {
+    file => file
+  }
+  defer file.close()
+  let size = file.size()
+  let wanted = if size < max_bytes.to_int64() {
+    size.to_int()
+  } else {
+    max_bytes
+  }
+  if wanted <= 0 {
+    return Some(b"")
+  }
+  let buffer = FixedArray::make(wanted, b'\x00')
+  let read = file.read_at(buffer, position=0L, len=wanted)
+  let exact = FixedArray::make(read, b'\x00')
+  for i in 0..<read {
+    exact[i] = buffer[i]
+  }
+  Some(Bytes::from_array(exact))
+}
+
+///|
+/// The size of a file in bytes, or `None` when it cannot be read.
+pub async fn size_of(path : String) -> Int64? {
+  if !path_exists(path) {
+    return None
+  }
+  let file = try @fs.open(path, mode=@fs.Mode::ReadOnly) catch {
+    _ => return None
+  } noraise {
+    file => file
+  }
+  defer file.close()
+  Some(file.size())
+}
+
+///|
 /// Whether the path is a directory.
 ///
 /// Opening it is the only reliable test, and opening a file fails — so a failure
@@ -81,6 +145,28 @@ pub async fn is_directory(path : String) -> Bool {
   try {
     let dir = @fs.opendir(path)
     dir.close()
+    true
+  } catch {
+    _ => false
+  } noraise {
+    result => result
+  }
+}
+
+///|
+/// Whether the path is a regular file.
+///
+/// The counterpart of `is_directory`, and here for the same reason: `open` on a directory can
+/// succeed, so "it is not a directory" is not the same question as "it is a file". A path that is
+/// neither — a socket, a broken symlink — is not a file either, which is what a caller wanting to
+/// read something out of a directory means by asking.
+pub async fn is_file(path : String) -> Bool {
+  if !path_exists(path) || is_directory(path) {
+    return false
+  }
+  try {
+    let file = @fs.open(path, mode=@fs.Mode::ReadOnly)
+    file.close()
     true
   } catch {
     _ => false

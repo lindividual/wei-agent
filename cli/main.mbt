@@ -75,7 +75,7 @@ async fn main {
   }
 
   let spec : @core.RequestSpec = {
-    model: "deepseek-v4-flash",
+    model: @core.default_model_id(),
     messages: [
       @core.User({
         content: [@core.Text(prompt)],
@@ -119,9 +119,11 @@ async fn main {
     response.body,
     api="openai-completions",
     provider="deepseek",
-    model="deepseek-v4-flash",
+    // From the catalog rather than restated: this binary's whole job is to prove the real chain
+    // works, so it must price the call the way every other caller does.
+    model=@core.default_model_id(),
     timestamp=@env.now().reinterpret_as_int64(),
-    pricing=@core.deepseek_v4_flash_pricing(),
+    pricing=@core.default_model().pricing,
   )
 
   match message {

@@ -49,6 +49,7 @@ test "each workspace is a details element, open only when active" {
       workspace("/work/two", false, [session("/b.jsonl", "second", false)], 0),
     ],
     1_700_000_000_000L,
+    false,
   ).render()
   assert_eq(count_of(html, "<details"), 2)
   // Exactly one workspace is open, and it is the active one.
@@ -76,6 +77,7 @@ test "a click carries what the server needs to act on" {
       ),
     ],
     1_700_000_000_000L,
+    false,
   ).render()
   assert_true(html.contains("data-session=\"/store/x.jsonl\""), msg=html)
   assert_true(html.contains("data-session=\"/store/y.jsonl\""), msg=html)
@@ -87,24 +89,111 @@ test "a click carries what the server needs to act on" {
 }
 
 ///|
-test "sessions beyond the cap are counted, not dropped silently" {
+/// A session is one line, and the parts of it are in that line: the label and the age inside the
+/// control that opens it, the two actions beside it. This is the shape the stylesheet hangs off —
+/// the age gives up its place to the actions under the pointer — so it is asserted here rather
+/// than left to a browser run to notice.
+test "a session is one line: label, age, then the actions" {
+  let html = render_sessions(
+    [
+      workspace(
+        "/work/one",
+        true,
+        [session("/store/a.jsonl", "a question", true)],
+        0,
+      ),
+    ],
+    1_700_000_000_000L,
+    false,
+  ).render()
+  // One row per session, not a row plus something under it.
+  assert_eq(count_of(html, "<li"), 1)
+  let open_at = match html.find("data-session=\"/store/a.jsonl\"") {
+    Some(at) => at
+    None => -1
+  }
+  let open_end = match html[open_at:].find("</button>") {
+    Some(at) => open_at + at
+    None => -1
+  }
+  assert_true(open_at >= 0 && open_end > open_at, msg=html)
+  let inside = html[open_at:open_end].to_owned()
+  assert_true(inside.contains("class=\"label\""), msg=inside)
+  assert_true(inside.contains("class=\"age\""), msg=inside)
+  assert_true(inside.contains("just now"), msg=inside)
+  // The actions are outside it, or clicking delete would also open the session.
+  let after = html[open_end:].to_owned()
+  assert_true(after.contains("class=\"acts\""), msg=html)
+  assert_true(after.contains("data-delete=\"/store/a.jsonl\""), msg=html)
+  assert_true(after.contains("data-rename"), msg=html)
+  // The label is what the age would otherwise be confused for: a name, not a time.
+  assert_true(inside.contains("a question"), msg=inside)
+}
+
+///|
+/// A session with nothing in it yet reads as a name rather than as a gap. The row is clickable,
+/// nameable and deletable like any other, and a blank in the list reads as one that failed to load.
+test "a session with no first message still has a name" {
+  let html = render_sessions(
+    [workspace("/work/one", true, [session("/a.jsonl", "", true)], 0)],
+    1_700_000_000_000L,
+    false,
+  ).render()
+  assert_true(
+    html.contains("<span class=\"label\">New session</span>"),
+    msg=html,
+  )
+  assert_false(html.contains("(empty session)"), msg=html)
+}
+
+///|
+/// Every workspace offers a new session, and says which one it is. A folded workspace hides its
+/// own, which is the point of folding; the open one has to have it, or a reader with one project
+/// has no visible way to start a conversation.
+test "each workspace offers a new session in its own name" {
+  let html = render_sessions(
+    [
+      workspace("/work/one", true, [session("/a.jsonl", "first", true)], 0),
+      workspace("/work/two", false, [session("/b.jsonl", "second", false)], 0),
+    ],
+    1_700_000_000_000L,
+    false,
+  ).render()
+  assert_eq(count_of(html, "data-new="), 2)
+  assert_true(html.contains("data-new=\"/work/one\""), msg=html)
+  assert_true(html.contains("data-new=\"/work/two\""), msg=html)
+  // Identical visible copy is fine when the position says which project it belongs to; the
+  // accessible name is what has to be unambiguous.
+  assert_true(html.contains("aria-label=\"new session in one\""), msg=html)
+  assert_true(html.contains("aria-label=\"new session in two\""), msg=html)
+}
+
+///|
+test "sessions beyond the cap are offered, not dropped silently" {
   let html = render_sessions(
     [workspace("/work/one", true, [session("/a.jsonl", "first", true)], 4)],
     1_700_000_000_000L,
+    false,
   ).render()
-  // Precise substring: "placeholder" also contains "older", which made this assertion lie.
-  assert_true(html.contains("… 4 older</div>"), msg=html)
-  // Nothing to say when everything is listed.
+  // A count alone is a dead end: what the reader needs is the way to the other four.
+  assert_true(html.contains("data-more=\"/work/one\""), msg=html)
+  assert_true(html.contains(">Show 4 more<"), msg=html)
+  assert_true(
+    html.contains("aria-label=\"show 4 more sessions in one\""),
+    msg=html,
+  )
+  // Nothing to offer when everything is listed.
   let complete = render_sessions(
     [workspace("/work/one", true, [session("/a.jsonl", "first", true)], 0)],
     1_700_000_000_000L,
+    false,
   ).render()
-  assert_false(complete.contains("older</div>"), msg=complete)
+  assert_false(complete.contains("data-more"), msg=complete)
 }
 
 ///|
 test "an empty store says so" {
-  let html = render_sessions([], 1_700_000_000_000L).render()
+  let html = render_sessions([], 1_700_000_000_000L, false).render()
   assert_true(html.contains("no saved sessions yet"), msg=html)
   assert_true(html.contains("id=\"sessions\""), msg=html)
 }
@@ -134,6 +223,7 @@ test "a session label is escaped" {
       ),
     ],
     1_700_000_000_000L,
+    false,
   ).render()
   assert_false(html.contains("<script>"), msg=html)
   assert_true(html.contains("&lt;script&gt;"), msg=html)
@@ -160,6 +250,7 @@ test "a running session is marked in the list" {
       ),
     ],
     1_700_000_000_000L,
+    false,
   ).render()
   assert_true(html.contains("class=\"session running\""), msg=html)
   assert_eq(count_of(html, "class=\"dot\""), 1)
@@ -174,7 +265,10 @@ test "a running session is marked in the list" {
 test "a transcript carries its session" {
   let messages : Array[@core.ContextMessage] = []
   let html = render_transcript(messages, session="/store/one.jsonl").render()
-  assert_true(html.contains("data-shown-session=\"/store/one.jsonl\""), msg=html)
+  assert_true(
+    html.contains("data-shown-session=\"/store/one.jsonl\""),
+    msg=html,
+  )
   assert_false(html.contains("data-session="), msg=html)
 }
 
@@ -191,12 +285,79 @@ test "a titled workspace and the add row" {
     hidden: 0,
   }
   let html = render_sidebar([
-    el("div", attrs=[attr("id", "tasks")], children=[]),
-    frag([render_sessions([titled], 1_700_000_000_000L), render_add_workspace()]),
+    el(Div, attrs=[attr("id", "tasks")], children=[]),
+    frag([
+      render_sessions([titled], 1_700_000_000_000L, false),
+      render_add_workspace(false),
+    ]),
   ]).render()
   assert_true(html.contains(">the app<"), msg=html)
   // The path stays reachable even when a title is shown instead.
   assert_true(html.contains("title=\"/Users/x/src/app\""), msg=html)
   assert_true(html.contains("id=\"add-workspace\""), msg=html)
   assert_true(html.contains("placeholder=\"/path/to/project\""), msg=html)
+}
+
+///|
+/// The folder chooser appears only when the host can open one, and the path field stays either
+/// way.
+///
+/// Two claims in one test on purpose: the button's presence is a function of `can_pick`, and the
+/// field is not. A host with no desktop session gets a row that still adds workspaces, which is the
+/// half that must not be lost when the dialog is unavailable.
+test "the chooser is offered only where it can open" {
+  let offered = render_add_workspace(true).render()
+  assert_true(offered.contains("id=\"workspace-pick\""), msg=offered)
+  // Before the field it fills in, so a reader who does not know the path reaches it first.
+  let pick_at = match offered.find("id=\"workspace-pick\"") {
+    Some(at) => at
+    None => -1
+  }
+  let field_at = match offered.find("id=\"workspace-path\"") {
+    Some(at) => at
+    None => -1
+  }
+  assert_true(pick_at >= 0 && field_at >= 0 && pick_at < field_at, msg=offered)
+  // Outside the form, so it cannot submit one: the dialog answers with a folder, and a button that
+  // submitted the field beside it would add whatever path happened to be half-typed.
+  let form_at = match offered.find("<form") {
+    Some(at) => at
+    None => -1
+  }
+  assert_true(form_at >= 0 && pick_at < form_at, msg=offered)
+  assert_true(offered.contains("type=\"button\""), msg=offered)
+  assert_true(offered.contains("id=\"workspace-path\""), msg=offered)
+  // Without a chooser: no button, and the path field is still there.
+  let typed = render_add_workspace(false).render()
+  assert_false(typed.contains("id=\"workspace-pick\""), msg=typed)
+  assert_true(typed.contains("id=\"workspace-path\""), msg=typed)
+  assert_true(typed.contains("id=\"add-workspace\""), msg=typed)
+}
+
+///|
+/// The fold-away control has to be inside the sidebar, because that is the one region a refresh
+/// does not replace — put it in the bar and it would be rebuilt, and its open state thrown away,
+/// on every turn. This pins the placement rather than the styling.
+test "the sidebar carries the navigation toggle, ahead of the regions" {
+  let html = render_sidebar([
+    el(Div, attrs=[attr("id", "sessions")], children=[]),
+  ]).render()
+  assert_true(
+    html.contains("id=\"nav-toggle\""),
+    msg="the narrow-screen fold has no control: \{html}",
+  )
+  assert_true(html.contains("aria-expanded=\"false\""), msg=html)
+  // Ahead of the regions, so it is the first thing reachable when everything else is folded.
+  let toggle_at = match html.find("nav-toggle") {
+    Some(at) => at
+    None => -1
+  }
+  let sessions_at = match html.find("id=\"sessions\"") {
+    Some(at) => at
+    None => -1
+  }
+  assert_true(
+    toggle_at >= 0 && sessions_at >= 0 && toggle_at < sessions_at,
+    msg=html,
+  )
 }

@@ -268,10 +268,12 @@ pub(all) struct StoredWorkspace {
   cwd : String
   /// What to call it, when the reader has said. `None` means "use the last path component".
   title : String?
-  /// Newest first, capped by the caller.
+  /// Newest first, every session the workspace holds.
+  ///
+  /// Not capped here. A list is a *display* limit — one workspace showing its ten newest is a
+  /// decision about a column, not about a store — and the caller that draws the column is the one
+  /// that also knows when the reader asked to see past it.
   sessions : Array[StoredSession]
-  /// How many sessions the workspace holds, including the ones not listed.
-  total : Int
   /// Last write across the workspace, for ordering the list.
   modified : Int64
 } derive(Eq, Debug)
@@ -288,10 +290,14 @@ pub(all) struct StoredWorkspace {
 /// A directory whose newest session has an unreadable header is skipped rather than
 /// guessed at — listing it under the wrong directory would offer to move the agent
 /// somewhere it has never been.
-pub async fn list_workspaces(
-  root : String,
-  max_sessions : Int,
-) -> Array[StoredWorkspace] {
+///
+/// Every session of every workspace is listed, however many there are. That is a
+/// readdir and a stat per file — both of which the ordering already needs — and what
+/// it costs is bounded by the store rather than by the page. What is *not* done here
+/// is reading the sessions themselves: a description is read per session the caller
+/// decides to show, so "how much of this does the page replay" stays the caller's
+/// question.
+pub async fn list_workspaces(root : String) -> Array[StoredWorkspace] {
   let out : Array[StoredWorkspace] = []
   if !path_exists(root) {
     return out
@@ -324,11 +330,6 @@ pub async fn list_workspaces(
       Some(record) => record.title
       None => None
     }
-    let shown = if sessions.length() > max_sessions {
-      sessions[:max_sessions].to_owned()
-    } else {
-      sessions
-    }
     let modified = if sessions.is_empty() {
       // An empty workspace sorts by when it was added.
       match @fs.mtime(dir) {
@@ -337,14 +338,7 @@ pub async fn list_workspaces(
     } else {
       sessions[0].modified
     }
-    out.push({
-      dir,
-      cwd,
-      title,
-      sessions: shown,
-      total: sessions.length(),
-      modified,
-    })
+    out.push({ dir, cwd, title, sessions, modified, })
   }
   if out.length() > 1 {
     out.sort_by((a, b) => {
@@ -397,5 +391,43 @@ pub async fn newest_session(root : String, cwd : String) -> String? {
     None
   } else {
     Some(sessions[0].path)
+  }
+}
+
+///|
+/// What a deleted session's name carries, so it is out of every listing but still on disk.
+///
+/// `sessions_in` filters by `.jsonl`, so moving the name out of that suffix is the entire
+/// mechanism: nothing else has to learn a rule about trash, and the bytes stay where they were.
+/// That second part is what makes a mis-click recoverable by hand, in a shell, after the page that
+/// offered to undo it is long gone. A conversation log is the thing this program makes; an
+/// accidental click should not be able to destroy one.
+pub fn deleted_suffix() -> String {
+  ".deleted"
+}
+
+///|
+/// Take a session out of the store by renaming it aside.
+///
+/// A rename rather than a removal, for the reason above. Failing is silent by design: the reader
+/// asked for it to be out of the list, and afterwards it is out of the list — a file that was
+/// already gone, or a directory that cannot be written, is not something they can act on. The
+/// caller checks whether it was there if it needs to say so.
+pub async fn delete_session(path : String) -> Unit {
+  try @fs.rename(path, path + deleted_suffix()) catch {
+    _ => ()
+  } noraise {
+    _ => ()
+  }
+}
+
+///|
+/// Put a deleted session back where it was. The inverse of `delete_session`, and a no-op when there
+/// is nothing to put back — a stale Undo button in an old tab, or a second click.
+pub async fn restore_session(path : String) -> Unit {
+  try @fs.rename(path + deleted_suffix(), path) catch {
+    _ => ()
+  } noraise {
+    _ => ()
   }
 }

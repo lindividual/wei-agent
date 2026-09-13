@@ -315,3 +315,48 @@ pub async fn live_of(pids : Array[Int]) -> Array[Int] {
   }
   out
 }
+
+// ── Persistence ────────────────────────────────────────────────────────────
+
+///|
+/// Where the job records live: `~/.pi-mb/jobs.json`.
+///
+/// Beside the session store and the settings, for the same reason both are there: this is a
+/// second implementation keeping its own state, and it does not write into pi's directories.
+pub fn jobs_path(home : String) -> String {
+  "\{home}/.pi-mb/jobs.json"
+}
+
+///|
+/// How much of the file to read.
+///
+/// A job record is a few hundred bytes and a store holds tens of them, so this is generous by an
+/// order of magnitude — the cap is here because the file is on disk and therefore editable, and a
+/// read that cannot be bounded is one that can run out of memory on start.
+fn jobs_max_bytes() -> Int {
+  262144
+}
+
+///|
+/// The recorded jobs, or an empty store when there are none to read.
+///
+/// Never raises: a missing file is a first run, and a corrupt one is read as the empty store by
+/// `parse_job_store`. Both are ordinary states for a cache of process ids, and neither should stop
+/// the server from starting.
+pub async fn load_jobs(home : String) -> @core.JobStore {
+  @core.parse_job_store(read_prefix(jobs_path(home), jobs_max_bytes()))
+}
+
+///|
+/// Write the job records out.
+///
+/// Temp file and rename, like the settings, because this is written while turns are running: a
+/// reader who kills the server mid-write must not be left with a half-written file, since the
+/// whole point of the file is to be readable after exactly that kind of end.
+pub async fn save_jobs(home : String, store : @core.JobStore) -> Unit {
+  let path = jobs_path(home)
+  let temp = "\{path}.tmp"
+  make_dirs(@core.parent_of(path))
+  write_text(temp, store.to_json().stringify() + "\n")
+  @fs.rename(temp, path)
+}

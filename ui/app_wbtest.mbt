@@ -84,25 +84,52 @@ fn test_usage(input : Int, output : Int) -> @core.Usage {
 
 ///|
 fn test_app() -> App {
+  test_app_in("/tmp/home")
+}
+
+///|
+/// The same app with a home directory the caller controls, for tests that need skill roots to
+/// resolve somewhere they can write.
+fn test_app_in(home : String) -> App {
   {
     root: "/tmp/store",
-    model: "deepseek-v4-flash",
+    default_model_id: "deepseek-v4-flash",
     base_url: "https://api.deepseek.com",
-    context_window: 1000000,
     api_key: "k",
+    key_source: "environment",
+    key_hint: "k",
+    env_key: "k",
+    pi_key: None,
+    env_key_set: true,
+    settings: @core.AppSettings::new(),
+    settings_lock: @async.Mutex(),
+    address: "127.0.0.1:8790",
+    flag_max_cost: None,
+    max_seconds: 0,
+    flag_max_rounds: None,
+    // The defaults, which is what a process launched with no limit flags and no settings file has.
+    limits: @core.choose_limits(None, None, @core.AppSettings::new()),
     tools: [],
     hub: @server.Hub::new(),
     registry: [],
     jobs: @core.JobStore::new(),
     labels: LabelCache::new(),
+    home,
+    skills_by_cwd: Map([]),
     live_pids: [42],
+    saved_jobs: "",
     displayed: "",
+    deleted: None,
+    expanded: Map([]),
+    // Off by default, which is what a test host is: `can_pick` says whether a dialog can be
+    // opened, and there is no dialog in a test run. A test that wants the button sets it.
+    can_pick: false,
   }
 }
 
 ///|
 fn runner_at(path : String, replies : Int) -> Runner {
-  Runner::new(session_with(replies), path)
+  Runner::new(session_with(replies), path, @core.default_model_id())
 }
 
 // ── the command line ───────────────────────────────────────────────────────
@@ -188,15 +215,6 @@ test "a workspace is named by its last path component" {
   assert_eq(workspace_name("relative/path"), "path")
 }
 
-///|
-test "cost keeps the digits that make it non-zero" {
-  // A turn costs a fraction of a cent; rounding to cents would print every turn as $0.00.
-  assert_eq(format_cost(0.0), "0.000000")
-  assert_eq(format_cost(0.0000345), "0.000035")
-  assert_eq(format_cost(0.05), "0.050000")
-  assert_eq(format_cost(1.2345), "1.2345")
-}
-
 // ── the sessions on screen ─────────────────────────────────────────────────
 
 ///|
@@ -255,10 +273,12 @@ test "the status line says what is happening somewhere else" {
 
 ///|
 test "a fresh session says so, an opened one says how much" {
+  // The working directory is deliberately absent: it is on the workspace row and in the bar chip's
+  // tooltip, and repeating it here buried the number that was worth reading.
   let fresh = runner_at("/store/a.jsonl", 0)
-  assert_eq(fresh.status, "new session in /work/one")
+  assert_eq(fresh.status, "new session")
   let opened = runner_at("/store/b.jsonl", 3)
-  assert_eq(opened.status, "opened 6 messages in /work/one")
+  assert_eq(opened.status, "opened 6 messages")
 }
 
 ///|
@@ -271,6 +291,7 @@ test "stopping a session asks for everything it has" {
   runner.tool = Some({
     name: "bash",
     detail: "npm run dev",
+    arguments: Json::object(Map([("command", Json::string("npm run dev"))])),
     stop: () => stopped = true,
   })
   let epoch = runner.epoch
@@ -344,33 +365,80 @@ test "the background panel separates live jobs from finished ones" {
 // ── what the bar reports ───────────────────────────────────────────────────
 
 ///|
+/// What the real app passes as overhead: a system prompt of a few hundred tokens plus seven tool
+/// schemas. Named rather than inlined because it is the same figure in every case here, and the
+/// point of the parameter is that it is *not* zero.
+const TEST_OVERHEAD : Int = 1300
+
+///|
 test "the bar reports the session's totals and its remaining context" {
-  let app = test_app()
   // Three replies at 100 in / 20 out each: the totals come from the log, so they are the same
   // after a restart as before one.
   let runner = runner_at("/store/a.jsonl", 3)
-  let chips = usage_chips(app, runner)
+  let chips = usage_chips(1_000_000, TEST_OVERHEAD, runner)
   let text = render_chips_text(chips)
   assert_true(text.contains("300 in / 60 out"), msg=text)
   assert_true(text.contains("cache"), msg=text)
   // Three replies at $0.0003 each: the bar shows the session's total.
   assert_true(text.contains("$0.000900"), msg=text)
   assert_true(text.contains("context"), msg=text)
-  // The context chip is a proportion of the window, and the window is the model's.
+  // The context chip is a proportion of the window, and the window is the model's — but the bar is
+  // only drawn when the proportion is worth drawing. Against a 1M window these few messages are a
+  // tenth of a percent, where a bar is an empty rectangle that still draws the eye. The figure is
+  // still there; only the bar is not.
+  assert_true(text.contains(" / 1M"), msg=text)
   assert_eq(
     count_of(@html.render_bar([], right=chips).render(), "class=\"meter\""),
+    0,
+    msg="a bar at a tenth of a percent is a lie, not a figure",
+  )
+  // A window this conversation actually fills most of does get its bar.
+  let tight = usage_chips(4_000, TEST_OVERHEAD, runner)
+  assert_eq(
+    count_of(@html.render_bar([], right=tight).render(), "class=\"meter\""),
     1,
   )
 }
 
 ///|
+/// Nothing spent and nothing said: no chips at all. An empty session used to open on four chips
+/// reading `0`, which is the first thing a reader saw and none of it was true of anything yet.
+test "a session with no turn behind it shows no usage figures" {
+  let fresh = runner_at("/store/fresh.jsonl", 0)
+  assert_eq(usage_chips(1_000_000, TEST_OVERHEAD, fresh).length(), 0)
+  let used = runner_at("/store/used.jsonl", 2)
+  assert_true(usage_chips(1_000_000, TEST_OVERHEAD, used).length() > 0)
+}
+
+///|
+/// The figures a turn moves get a region of their own.
+///
+/// They are refreshed several times per turn, and the bar they sit in also holds the settings
+/// panel — so replacing the bar would take down whatever the reader had opened in it.
+test "the usage chips are their own region, inside the bar" {
+  let html = @html.render_bar([], right=[@html.chip("cost", "$0.01")]).render()
+  assert_true(html.contains("id=\"usage\""), msg=html)
+  let bar = html.find("id=\"bar\"").unwrap()
+  let usage = html.find("id=\"usage\"").unwrap()
+  assert_true(bar < usage, msg=html)
+  assert_true(html.contains("$0.01"), msg=html)
+  // A bar with nothing to its right is still a region, so a refresh is always a valid replace.
+  assert_true(html.contains("<span class=\"usage\" id=\"usage\">"), msg=html)
+}
+
+///|
 test "the context chip warns when the next turn would compact" {
-  let app = test_app()
-  // A window small enough that the estimate crosses the compaction threshold.
-  let small : App = { ..app, context_window: 2000, }
   let runner = runner_at("/store/a.jsonl", 3)
-  let warned = @html.render_bar([], right=usage_chips(small, runner)).render()
-  let calm = @html.render_bar([], right=usage_chips(app, runner)).render()
+  // The window is the argument that decides this, so the two cases differ only in it: the model
+  // and the conversation are identical, and a small window is what crosses the threshold.
+  let warned = @html.render_bar(
+    [],
+    right=usage_chips(2000, TEST_OVERHEAD, runner),
+  ).render()
+  let calm = @html.render_bar(
+    [],
+    right=usage_chips(1_000_000, TEST_OVERHEAD, runner),
+  ).render()
   // The warning is the whole reason the figure is on the bar: it is the one number that changes
   // what happens next.
   assert_true(warned.contains("chip warn"), msg=warned)
@@ -378,7 +446,7 @@ test "the context chip warns when the next turn would compact" {
 }
 
 ///|
-test "the bar names the session by id and keeps the path one hover away" {
+async test "the bar names the session by id and keeps the path one hover away" {
   let app = test_app()
   let runner = runner_at(
     "/store/--a--/2026-09-12T13-29-09.716Z_16ce48e4.jsonl", 1,
@@ -479,17 +547,17 @@ fn render_chips_text(chips : Array[@html.Node]) -> String {
 test "only a real /name is a command" {
   match parse_command("/name refactor auth") {
     Some(Name(value)) => assert_eq(value, "refactor auth")
-    None => fail("expected a command")
+    _ => fail("expected a command")
   }
   // Extra spaces are the reader's, not part of the name.
   match parse_command("  /name   two   spaces  ") {
     Some(Name(value)) => assert_eq(value, "two   spaces")
-    None => fail("expected a command")
+    _ => fail("expected a command")
   }
   // Bare: report, not clear.
   match parse_command("/name") {
     Some(Name(value)) => assert_eq(value, "")
-    None => fail("expected a command")
+    _ => fail("expected a command")
   }
   // A slash that is not a command is a message, and goes to the model untouched.
   for
@@ -506,7 +574,7 @@ test "only a real /name is a command" {
 // ── the name in the list and in the bar ────────────────────────────────────
 
 ///|
-test "a named session is listed by its name, an unnamed one by its first question" {
+async test "a named session is listed by its name, an unnamed one by its first question" {
   let app = test_app()
   let named = runner_at("/store/a.jsonl", 1)
   let entry_by_name = @core.session_name_entry(Some("refactor auth"), None, 0L)
@@ -590,4 +658,688 @@ test "the transcript marks its session without inviting a switch" {
   let html = @html.render_transcript(messages, session="16ce48e4").render()
   assert_true(html.contains("data-shown-session=\"16ce48e4\""), msg=html)
   assert_false(html.contains("data-session="), msg=html)
+}
+
+///|
+/// Skills are discovered per working directory and remembered.
+///
+/// The cache is the point of the key: a scan reads files from disk, and a turn must not pay
+/// for it twice. The key is the point of the map: a session opened in another repository has
+/// its own project-local skills, so the answer cannot be global.
+async test "skills are loaded once per working directory" {
+  let home = "_build/app_skill_test/\{@core.new_entry_id()}"
+  @platform.make_dirs("\{home}/.pi/agent/skills/demo")
+  @platform.write_text(
+    "\{home}/.pi/agent/skills/demo/SKILL.md",
+    "---\nname: demo\ndescription: A skill for tests.\n---\n",
+  )
+  let app = test_app_in(home)
+  // Nothing is known before the first turn asks.
+  assert_eq(app.skills_for("/work").length(), 0)
+  app.load_skills("/work")
+  assert_eq(app.skills_for("/work").length(), 1)
+  assert_eq(app.skills_for("/work")[0].name, "demo")
+  // A second call is served from the cache rather than rescanning.
+  app.load_skills("/work")
+  assert_eq(app.skills_for("/work").length(), 1)
+  // A directory that has not been looked at is still empty, not another directory's answer.
+  assert_eq(app.skills_for("/elsewhere").length(), 0)
+}
+
+///|
+// ── settings ───────────────────────────────────────────────────────────────
+
+///|
+/// A skill switched off in settings does not reach the prompt, and switching it back on does —
+/// without a rescan, because the file never moved.
+async test "a disabled skill leaves the catalog the model receives" {
+  let home = "_build/app_skill_test/\{@core.new_entry_id()}"
+  @platform.make_dirs("\{home}/.pi/agent/skills/demo")
+  @platform.write_text(
+    "\{home}/.pi/agent/skills/demo/SKILL.md",
+    "---\nname: demo\ndescription: A skill for tests.\n---\n",
+  )
+  let app = test_app_in(home)
+  app.load_skills("/work")
+  assert_true(
+    @core.skill_catalog_prompt(app.skills_for("/work")).contains("demo"),
+  )
+  app.settings = app.settings.with_skill_enabled("demo", false)
+  // The panel still lists it — that is the only place it can be turned back on — while the
+  // catalog the model gets is empty.
+  assert_eq(app.discovered_skills("/work").length(), 1)
+  assert_eq(app.skills_for("/work").length(), 0)
+  assert_eq(@core.skill_catalog_prompt(app.skills_for("/work")), "")
+  // And back on, with no second scan.
+  app.settings = app.settings.with_skill_enabled("demo", true)
+  assert_eq(app.skills_for("/work").length(), 1)
+}
+
+///|
+/// The rule this feature is: a workspace's own file wins, the saved text fills in where there is
+/// none, and the panel says which of the two is in force. Checked through the real filesystem
+/// because the point being pinned is that an edit to `AGENTS.md` reaches the *next* prompt — the
+/// one thing a cache here would quietly break.
+async test "a workspace AGENTS.md reaches the prompt and the saved text steps aside" {
+  let home = "_build/app_agents_test/\{@core.new_entry_id()}"
+  let cwd = "_build/app_agents_test/\{@core.new_entry_id()}/project"
+  @platform.make_dirs(cwd)
+  let app = test_app_in(home)
+  app.settings = app.settings.with_agents_md("From the settings panel.")
+  let runner : Runner = { ..runner_at("/store/a.jsonl", 0), cwd, }
+  // No file yet: the saved text is what the turn sends, and the panel says so.
+  assert_true(
+    app.system_prompt(runner).contains("From the settings panel."),
+    msg=app.system_prompt(runner),
+  )
+  assert_true(render_settings_panel(app, runner).contains("saved in settings"))
+  // Writing the file changes what the next turn sends, without a restart and without a rescan.
+  @platform.write_text("\{cwd}/AGENTS.md", "Run moon test before committing.")
+  let prompt = app.system_prompt(runner)
+  assert_true(prompt.contains("Run moon test before committing."), msg=prompt)
+  assert_false(prompt.contains("From the settings panel."), msg=prompt)
+  let panel = render_settings_panel(app, runner)
+  assert_true(panel.contains("AGENTS.md in this workspace"), msg=panel)
+  // The fallback is still in the box, because it still applies everywhere else — and the preview
+  // is the file, so the two lines disagree on purpose.
+  assert_true(panel.contains("From the settings panel."), msg=panel)
+  // Removing it falls back again, which is the case a reader would notice as "my file is being
+  // ignored" if the read were cached or the source were read once.
+  @platform.write_text("\{cwd}/AGENTS.md", "  ")
+  assert_true(
+    app.system_prompt(runner).contains("From the settings panel."),
+    msg=app.system_prompt(runner),
+  )
+  // And with neither, the prompt is exactly what it was before any instructions existed.
+  app.settings = app.settings.with_agents_md("")
+  let bare = app.system_prompt(runner)
+  assert_false(bare.contains("From the settings panel."), msg=bare)
+  assert_true(bare.contains("## How to work"), msg=bare)
+}
+
+///|
+/// Saving the instructions reports which source is in force, because the workspace case is the one
+/// where a save is invisible: a repository with its own `AGENTS.md` keeps using it.
+async test "saving instructions says whether they are the ones being sent" {
+  let home = "_build/app_agents_test/\{@core.new_entry_id()}"
+  let cwd = "_build/app_agents_test/\{@core.new_entry_id()}/project"
+  @platform.make_dirs(cwd)
+  let app = test_app_in(home)
+  let runner : Runner = { ..runner_at("/store/a.jsonl", 0), cwd, }
+  let saved = apply_settings_post(
+    app,
+    runner,
+    @core.SettingsPost::ApplyAgentsMd(text="Prefer small diffs."),
+  )
+  assert_eq(@platform.load_settings(home).agents_md, "Prefer small diffs.")
+  assert_true(saved.contains("the next turn in a workspace without"), msg=saved)
+  // Standing in a workspace that has its own file, the same save is reported as overruled — the
+  // one message that stops "I saved it and nothing changed" reading as a bug.
+  @platform.write_text("\{cwd}/AGENTS.md", "Repository rules.")
+  let overruled = apply_settings_post(
+    app,
+    runner,
+    @core.SettingsPost::ApplyAgentsMd(text="Prefer small diffs."),
+  )
+  assert_true(overruled.contains("takes precedence"), msg=overruled)
+  // Clearing it is said plainly rather than as a save of nothing.
+  let cleared = apply_settings_post(
+    app,
+    runner,
+    @core.SettingsPost::ApplyAgentsMd(text=""),
+  )
+  assert_eq(@platform.load_settings(home).agents_md, "")
+  assert_true(cleared.contains("cleared"), msg=cleared)
+}
+
+///|
+/// The instructions block sits in the panel the page renders, and the object that reaches the
+/// model is built from the same function the panel read.
+async test "the panel and the prompt agree about the instructions" {
+  let home = "_build/app_agents_test/\{@core.new_entry_id()}"
+  let cwd = "_build/app_agents_test/\{@core.new_entry_id()}/project"
+  @platform.make_dirs(cwd)
+  @platform.write_text("\{cwd}/AGENTS.md", "Panel and prompt agree.")
+  let app = test_app_in(home)
+  let runner : Runner = { ..runner_at("/store/a.jsonl", 0), cwd, }
+  let view = settings_view(app, runner)
+  assert_eq(view.instructions_source, "AGENTS.md in this workspace")
+  assert_eq(view.instructions_preview, "Panel and prompt agree.")
+  assert_true(app.system_prompt(runner).contains(view.instructions_preview))
+}
+
+///|
+/// The panel renders what the process is actually doing: the session's own working directory, and
+/// the skills of *that* directory rather than of wherever the server started.
+async test "the settings panel describes the displayed session's workspace" {
+  let home = "_build/app_skill_test/\{@core.new_entry_id()}"
+  @platform.make_dirs("\{home}/.pi/agent/skills/global-one")
+  @platform.write_text(
+    "\{home}/.pi/agent/skills/global-one/SKILL.md",
+    "---\nname: global-one\ndescription: Everywhere.\n---\n",
+  )
+  @platform.make_dirs("/tmp/project/.pi/skills/local-one")
+  @platform.write_text(
+    "/tmp/project/.pi/skills/local-one/SKILL.md", "---\nname: local-one\ndescription: Only in the project.\n---\n",
+  )
+  let app = test_app_in(home)
+  let runner = runner_at("/store/a.jsonl", 0)
+  // A session in another repository: the panel must describe *its* workspace, not the one the
+  // server was started in.
+  let runner : Runner = { ..runner, cwd: "/tmp/project", }
+  let html = render_settings_panel(app, runner)
+  assert_true(html.contains("global-one"), msg=html)
+  assert_true(html.contains("local-one"), msg=html)
+  // The store is the one the process was started with, not a guess from the cwd.
+  assert_true(html.contains("/tmp/store"), msg=html)
+  assert_true(html.contains("deepseek-v4-flash"), msg=html)
+  // A key that came from the environment is reported as such, because a saved key that is being
+  // ignored is the confusing case.
+  assert_true(html.contains("DEEPSEEK_API_KEY is set"), msg=html)
+  assert_true(html.contains("from DEEPSEEK_API_KEY"), msg=html)
+}
+
+///|
+/// Applying a form computes the disabled set from what the page was showing, so an unchecked box
+/// means off and a name the page never showed is not invented.
+test "a posted skill set becomes the disabled list the panel was showing" {
+  let discovered : Array[@core.Skill] = [
+    { name: "alpha", description: "a", path: "/a", },
+    { name: "beta", description: "b", path: "/b", },
+  ]
+  // Everything checked: nothing is off, including a name that was off before.
+  assert_eq(
+    disabled_after_apply(discovered, ["beta"], ["alpha", "beta"]).length(),
+    0,
+  )
+  // One unchecked: that one is off.
+  let off = disabled_after_apply(discovered, [], ["alpha"])
+  assert_eq(off.length(), 1)
+  assert_eq(off[0], "beta")
+  // A name in the previous list that has no file stays off, because the page showed it and the
+  // reader left it unchecked.
+  let stale : Array[@core.Skill] = []
+  let kept = disabled_after_apply(stale, ["gone"], [])
+  assert_eq(kept.length(), 1)
+  assert_eq(kept[0], "gone")
+  // A name the page never showed and the reader never saw is not switched off by omission.
+  let unknown = disabled_after_apply(discovered, [], [
+    "alpha", "beta", "new-one",
+  ])
+  assert_eq(unknown.length(), 0)
+}
+
+///|
+/// Saving a limit changes what the *next* turn runs under, and the message says which values are in
+/// force rather than which were typed.
+async test "a saved limit is adopted on the next turn, and reported as it will be used" {
+  let home = "_build/app_settings_test/\{@core.new_entry_id()}"
+  @platform.make_dirs(home)
+  let app = test_app_in(home)
+  let runner = runner_at("/store/a.jsonl", 0)
+  // The defaults are in force before anything is saved.
+  assert_eq(app.limits.max_cost.source, @core.Default)
+  let message = apply_settings_post(
+    app,
+    runner,
+    @core.SettingsPost::ApplyLimits(max_rounds=Some(40), max_cost=Some(0.25)),
+  )
+  assert_true(message.contains("limits saved"), msg=message)
+  assert_true(message.contains("0.25"), msg=message)
+  // In force immediately: the next turn reads the app's limits, not the file.
+  assert_eq(app.limits.max_rounds.value, 40.0)
+  assert_eq(app.limits.max_rounds.source, @core.Saved)
+  assert_eq(app.limits.max_cost.value, 0.25)
+  assert_eq(app.limits.max_cost.source, @core.Saved)
+  // And on disk, so a restart keeps them.
+  let reloaded = @platform.load_settings(home)
+  assert_eq(reloaded.max_rounds, Some(40))
+  assert_eq(reloaded.max_cost, Some(0.25))
+  // Zero is kept as zero rather than treated as "unset": it is how a reader removes the bound.
+  ignore(
+    apply_settings_post(
+      app,
+      runner,
+      @core.SettingsPost::ApplyLimits(max_rounds=Some(0), max_cost=Some(0.0)),
+    ),
+  )
+  assert_eq(app.limits.max_cost.value, 0.0)
+  assert_eq(@platform.load_settings(home).max_cost, Some(0.0))
+  // Clearing both goes back to the built-in defaults rather than to no bound, and the file records
+  // that the reader has no opinion.
+  let cleared = apply_settings_post(
+    app,
+    runner,
+    @core.SettingsPost::ApplyLimits(max_rounds=None, max_cost=None),
+  )
+  assert_eq(app.limits.max_rounds.source, @core.Default)
+  assert_eq(app.limits.max_cost.value, @core.default_max_cost())
+  assert_true(@platform.load_settings(home).max_cost is None)
+  assert_true(cleared.contains("200 calls"), msg=cleared)
+}
+
+///|
+/// A limit a launch flag pinned is saved but not in force, and the reader is told which flag is in
+/// the way — the one case where the panel accepts an edit that does nothing, and the worst one to
+/// leave silent.
+async test "a flag keeps its precedence over a saved limit, and says so" {
+  let home = "_build/app_settings_test/\{@core.new_entry_id()}"
+  @platform.make_dirs(home)
+  let base = test_app_in(home)
+  let app : App = {
+    ..base,
+    flag_max_cost: Some(0.1),
+    flag_max_rounds: None,
+    limits: @core.choose_limits(None, Some(0.1), @core.AppSettings::new()),
+  }
+  // The run flag wins even before anything is saved.
+  assert_eq(app.limits.max_cost.value, 0.1)
+  assert_eq(app.limits.max_cost.source, @core.Flag)
+  let runner = runner_at("/store/a.jsonl", 0)
+  let message = apply_settings_post(
+    app,
+    runner,
+    @core.SettingsPost::ApplyLimits(max_rounds=Some(40), max_cost=Some(5.0)),
+  )
+  // Saved, because the setting is still what a restart without the flag would use.
+  let reloaded = @platform.load_settings(home)
+  assert_eq(reloaded.max_cost, Some(5.0))
+  assert_eq(reloaded.max_rounds, Some(40))
+  // But the cost limit in force is still the flag's, and the call limit — which the flag did not
+  // pin — is the saved one.
+  assert_eq(app.limits.max_cost.value, 0.1)
+  assert_eq(app.limits.max_cost.source, @core.Flag)
+  assert_eq(app.limits.max_rounds.value, 40.0)
+  assert_eq(app.limits.max_rounds.source, @core.Saved)
+  assert_true(message.contains("--max-cost"), msg=message)
+  assert_true(message.contains("still in force"), msg=message)
+}
+
+///|
+/// Saving a key through the panel changes what the next turn sends, and never changes what the
+/// environment said — a saved key is a fallback, not an override.
+async test "saving a key writes it, adopts it, and reports where it came from" {
+  let home = "_build/app_settings_test/\{@core.new_entry_id()}"
+  @platform.make_dirs(home)
+  let app = test_app_in(home)
+  // No environment key in this app, so a saved one is what gets used.
+  let app2 : App = {
+    ..app,
+    env_key: "",
+    env_key_set: false,
+    api_key: "",
+    key_source: "none",
+    key_hint: "",
+  }
+  let runner = runner_at("/store/a.jsonl", 0)
+  let message = apply_settings_post(
+    app2,
+    runner,
+    @core.SettingsPost::SaveKey(key="sk-panel", clear=false),
+  )
+  assert_true(message.contains("next turn"), msg=message)
+  assert_eq(app2.api_key, "sk-panel")
+  assert_eq(app2.key_source, "saved")
+  assert_eq(app2.settings.saved_api_key, "sk-panel")
+  assert_eq(@platform.load_settings(home).saved_api_key, "sk-panel")
+  // Clearing it takes it back out, and says what is in use instead — which here is nothing.
+  let cleared = apply_settings_post(
+    app2,
+    runner,
+    @core.SettingsPost::SaveKey(key="", clear=true),
+  )
+  assert_true(cleared.contains("no key is set"), msg=cleared)
+  assert_eq(app2.api_key, "")
+  assert_eq(app2.key_source, "none")
+  assert_eq(@platform.load_settings(home).saved_api_key, "")
+  // With the environment set, the saved key is written and reported as a fallback rather than
+  // adopted — the difference between "saved" and "in use" is the whole point of the report.
+  let app3 : App = { ..app, env_key: "sk-env", env_key_set: true, }
+  app3.set_key(app3.resolve_key())
+  assert_eq(app3.key_source, "environment")
+  let reported = apply_settings_post(
+    app3,
+    runner,
+    @core.SettingsPost::SaveKey(key="sk-panel", clear=false),
+  )
+  assert_true(reported.contains("DEEPSEEK_API_KEY is in use"), msg=reported)
+  assert_eq(app3.api_key, "sk-env")
+  assert_eq(@platform.load_settings(home).saved_api_key, "sk-panel")
+}
+
+///|
+/// The status line names the cost limit when that is what stopped the turn.
+///
+/// A turn stopped by a guard is not the same thing as a model that stalled, and the reader
+/// deciding whether to raise the limit needs to be told which happened. The money is already
+/// spent when this is printed, so it is part of the message rather than a separate figure.
+test "the status line says when the cost limit stopped a turn" {
+  let session = session_with(1)
+  let result : @agent.TurnResult = {
+    session,
+    replies: [],
+    model_calls: 79,
+    tool_calls: 60,
+    compactions: 0,
+    usage: {
+      input: 1000,
+      output: 200,
+      cache_read: 0,
+      cache_write: 0,
+      reasoning: None,
+      total_tokens: 1200,
+      cost: {
+        input: 0.1,
+        output: 0.2,
+        cache_read: 0.0,
+        cache_write: 0.0,
+        total: 1.25,
+      },
+    },
+    settled: false,
+    cost_limit_hit: true,
+    time_limit_hit: false,
+    truncated: false,
+  }
+  let text = status_text(result, false)
+  assert_true(text.contains("at the $1.2500 cost limit"), msg=text)
+  // A stalled model reads differently, so the two cannot be confused.
+  let stalled = status_text({ ..result, cost_limit_hit: false, }, false)
+  assert_true(stalled.contains("gave up"), msg=stalled)
+  assert_false(stalled.contains("cost limit"), msg=stalled)
+}
+
+///|
+/// The time limit names itself too, for the same reason the cost limit does: the reader's
+/// response differs. A turn cut short by the clock was making progress and may be worth
+/// resuming with a longer bound, which is not true of a model that was looping.
+test "the status line says when the time limit stopped a turn" {
+  let session = session_with(1)
+  let result : @agent.TurnResult = {
+    session,
+    replies: [],
+    model_calls: 40,
+    tool_calls: 30,
+    compactions: 0,
+    usage: {
+      input: 100,
+      output: 50,
+      cache_read: 0,
+      cache_write: 0,
+      reasoning: None,
+      total_tokens: 150,
+      cost: {
+        input: 0.01,
+        output: 0.01,
+        cache_read: 0.0,
+        cache_write: 0.0,
+        total: 0.02,
+      },
+    },
+    settled: false,
+    cost_limit_hit: false,
+    time_limit_hit: true,
+    truncated: false,
+  }
+  let text = status_text(result, false)
+  assert_true(text.contains("at the time limit"), msg=text)
+  // The three guards are distinguishable; a round-limit stop must not read as a time one.
+  let rounds = status_text({ ..result, time_limit_hit: false, }, false)
+  assert_true(rounds.contains("gave up"), msg=rounds)
+  assert_false(rounds.contains("time limit"), msg=rounds)
+}
+
+///|
+/// A turn that finished normally leaves the status line empty, because the figures that used to be
+/// copied here now live on the footer under the reply — and the footer is written for a live turn as
+/// well as for a reloaded one. Two copies of the same numbers is where a reader stops believing
+/// either of them.
+test "a finished turn says nothing on the status line; its figures are on the footer" {
+  let session = session_with(1)
+  let result : @agent.TurnResult = {
+    session,
+    replies: [],
+    model_calls: 1,
+    tool_calls: 0,
+    compactions: 0,
+    usage: {
+      input: 100,
+      output: 384000,
+      cache_read: 0,
+      cache_write: 0,
+      reasoning: None,
+      total_tokens: 384100,
+      cost: {
+        input: 0.01,
+        output: 0.5,
+        cache_read: 0.0,
+        cache_write: 0.0,
+        total: 0.51,
+      },
+    },
+    settled: true,
+    cost_limit_hit: false,
+    time_limit_hit: false,
+    truncated: true,
+  }
+  let text = status_text(result, false)
+  assert_eq(
+    text,
+    "",
+    msg="a finished turn should not restate its own figures: \{text}",
+  )
+  // And what it used to say is still said — on the footer, which carries the counts and the
+  // truncation note (pinned in `html/turn_stats_test.mbt`).
+  let footer = @html.render_turn_footer(
+    "stats-1",
+    @html.turn_stats_of(session.context().messages),
+  ).render()
+  assert_true(footer.contains("model call"), msg=footer)
+}
+
+///|
+/// The limits are flags, and they are optional: an absent flag means "no opinion", which is what
+/// lets the panel's saved value win — while a value typed here still wins over that saved value.
+///
+/// The value matters in a way the other flags do not: these are the only bounds on what an
+/// unattended turn can spend or how long it can keep trying, so they have to be settable without
+/// editing code — and each has to survive the round trip through the parser as a number, not a
+/// string that happens to look like one. Zero is kept distinct from absent, because it is the off
+/// switch.
+test "the limits are parsed, and zero is distinct from absent" {
+  assert_true(parse_args(["ui"]).max_cost is None)
+  assert_true(parse_args(["ui"]).max_rounds is None)
+  assert_eq(parse_args(["ui", "--max-cost", "0.25"]).max_cost, Some(0.25))
+  assert_eq(parse_args(["ui", "--max-rounds", "40"]).max_rounds, Some(40))
+  // Zero is the off switch, which is why it cannot be collapsed into "not given".
+  assert_eq(parse_args(["ui", "--max-cost", "0"]).max_cost, Some(0.0))
+  assert_eq(parse_args(["ui", "--max-rounds", "0"]).max_rounds, Some(0))
+  // Each flag is independent: setting one does not clear the other.
+  let both = parse_args(["ui", "--max-cost", "2", "--max-rounds", "7"])
+  assert_eq(both.max_cost, Some(2.0))
+  assert_eq(both.max_rounds, Some(7))
+  // A malformed value is refused rather than becoming zero, which would silently mean unlimited —
+  // the opposite of what someone typing a limit intends.
+  let bad = try {
+    ignore(parse_args(["ui", "--max-cost", "cheap"]))
+    false
+  } catch {
+    _ => true
+  } noraise {
+    raised => raised
+  }
+  assert_true(bad, msg="a non-numeric cost should raise")
+  let negative = try {
+    ignore(parse_args(["ui", "--max-cost", "-1"]))
+    false
+  } catch {
+    _ => true
+  } noraise {
+    raised => raised
+  }
+  assert_true(negative, msg="a negative cost should raise")
+}
+
+// ── the model, per session ─────────────────────────────────────────────────
+
+///|
+/// A bare `/model` reports rather than switching, and says what there is to switch to.
+test "a model command reports the session's model and the alternatives" {
+  match parse_command("/model") {
+    Some(Model(value)) => assert_eq(value, "")
+    _ => fail("expected a command")
+  }
+  match parse_command("/model   deepseek-v4-pro  ") {
+    Some(Model(value)) => assert_eq(value, "deepseek-v4-pro")
+    _ => fail("expected a command")
+  }
+  // Not a command: an id is prose until the `/model` prefix says otherwise, and these would
+  // otherwise be swallowed.
+  for
+    text in [
+      "/models", "/modeldeepseek", "/tmp/model is broken", "what is 1/model?",
+    ] {
+    assert_true(
+      parse_command(text) is None,
+      msg="\{text} should not be a command",
+    )
+  }
+  let runner = runner_at("/store/a.jsonl", 0)
+  let report = report_model(runner)
+  assert_true(report.contains("deepseek-v4-flash"), msg=report)
+  // Every alternative is named, because the reader asking is usually one who cannot remember an id.
+  for id in @core.model_ids() {
+    assert_true(report.contains(id), msg=report)
+  }
+}
+
+///|
+/// A session's model comes from its own log, so resuming one does not quietly change what it runs
+/// on — and a new session takes the flag it was started with.
+test "a session's model is read from its log, and a new one takes the flag" {
+  let fresh = runner_at("/store/new.jsonl", 0)
+  assert_eq(fresh.model_id, "deepseek-v4-flash", msg="the catalog default")
+  // A session whose log recorded the pro model comes back on it, even though this process
+  // defaults to flash.
+  let session = session_with(1)
+  let entry = @core.model_change_entry("deepseek", "deepseek-v4-pro", None, 0L)
+  let opened = @core.Session::new(session.header, [entry])
+  let resumed = Runner::new(opened, "/store/old.jsonl", "deepseek-v4-flash")
+  assert_eq(resumed.model_id, "deepseek-v4-pro")
+  // A process pointed at another default gives it to a session that recorded nothing. An empty
+  // session, because an assistant message is itself a record of the model that produced it — a
+  // session whose one reply came from flash is on flash however the process was started.
+  let empty = runner_at("/store/flag.jsonl", 0)
+  assert_eq(empty.model_id, "deepseek-v4-flash")
+  let session_no_entries = session_with(0)
+  let pointed = Runner::new(
+    session_no_entries, "/store/flag.jsonl", "deepseek-v4-pro",
+  )
+  assert_eq(pointed.model_id, "deepseek-v4-pro")
+  // A session with a reply on flash reads back as flash even when the process default is pro:
+  // the log is the record, and the flag only decides what a *new* session starts on.
+  let answered = Runner::new(
+    session, "/store/answered.jsonl", "deepseek-v4-pro",
+  )
+  assert_eq(answered.model_id, "deepseek-v4-flash")
+}
+
+///|
+/// Switching writes a `model_change` entry and adopts it, so the choice survives a restart and
+/// the next turn cannot be billed at the old model's rates.
+async test "switching a model appends the entry and takes effect" {
+  let home = "_build/app_model_test/\{@core.new_entry_id()}"
+  @platform.make_dirs(home)
+  let app = test_app_in(home)
+  let shown = runner_at("\{home}/session.jsonl", 0)
+  app.registry.push(shown)
+  app.displayed = shown.path
+  set_session_model(shown, "deepseek-v4-pro")
+  assert_eq(shown.model_id, "deepseek-v4-pro")
+  assert_true(shown.status.contains("V4 Pro"), msg=shown.status)
+  // The entry is in the in-memory session, which is what stops the next turn's `run_turn` from
+  // appending a second, contradictory one.
+  assert_eq(shown.session.context().model.unwrap().model_id, "deepseek-v4-pro")
+  // And on disk, which is what makes it survive the process.
+  let reloaded = @platform.load_session(shown.path)
+  assert_eq(reloaded.context().model.unwrap().model_id, "deepseek-v4-pro")
+  // The picker now shows it, so the control and the session agree.
+  assert_eq(model_picker(app, shown).current_id, "deepseek-v4-pro")
+}
+
+///|
+/// A session whose log names a model this build does not have is still usable, still shows the id
+/// its log recorded, and offers the models that exist — rather than silently claiming to run
+/// something else.
+test "an unknown model in the log is offered back, not hidden" {
+  let app = test_app()
+  let shown = runner_at("/store/a.jsonl", 0)
+  shown.model_id = "deepseek-v9-someday"
+  let picker = model_picker(app, shown)
+  assert_eq(picker.current_id, "deepseek-v9-someday")
+  assert_true(picker.models.length() > @core.model_catalog().length())
+  assert_eq(picker.models[0].id, "deepseek-v9-someday")
+  // The chip reports the id the log holds, and the fallback is not hidden from the tooltip path.
+  let report = report_model(shown)
+  assert_true(report.contains("unknown to this build"), msg=report)
+}
+
+///|
+/// The picker is disabled while a turn runs: the entry would be appended off the turn's own leaf.
+test "a running turn locks the picker" {
+  let app = test_app()
+  let runner = runner_at("/store/a.jsonl", 0)
+  assert_false(model_picker(app, runner).locked)
+  runner.busy = true
+  assert_true(model_picker(app, runner).locked)
+  runner.busy = false
+  runner.waiting = 1
+  assert_true(
+    model_picker(app, runner).locked,
+    msg="a queued prompt is work in flight",
+  )
+}
+
+///|
+/// A session whose last turn was stopped says so when it is opened again.
+///
+/// The transcript cannot answer this: a conversation stopped at the cost limit and one that
+/// finished both end with a message. After a restart the status line is the only place left that
+/// knows, which is why the reason is written to the log rather than kept in memory.
+test "opening a session reports why its last turn ended" {
+  let cwd = "/work/repo"
+  let ending = @core.turn_outcome_entry(@core.CostLimit, 79, 1.25, None, 0L)
+  let header : @core.SessionHeader = {
+    id: "s",
+    timestamp: @core.format_iso_utc(0L),
+    cwd,
+    parent_session: None,
+    version: Some(3),
+  }
+  let session = @core.Session::new(header, [
+    {
+      id: "u1",
+      parent_id: None,
+      timestamp: @core.format_iso_utc(0L),
+      kind: @core.Message(
+        message=@core.User({ content: [@core.Text("hello")], timestamp: 0L, }),
+      ),
+    },
+    ending,
+  ])
+  let runner = Runner::new(session, "/store/s.jsonl", "deepseek-v4-flash")
+  assert_true(runner.status.contains("cost limit"), msg=runner.status)
+  // A session with nothing unusual to report reads the way it always did.
+  let plain = @core.Session::new(header, [
+    {
+      id: "u1",
+      parent_id: None,
+      timestamp: @core.format_iso_utc(0L),
+      kind: @core.Message(
+        message=@core.User({ content: [@core.Text("hello")], timestamp: 0L, }),
+      ),
+    },
+  ])
+  let quiet = Runner::new(plain, "/store/t.jsonl", "deepseek-v4-flash")
+  assert_false(quiet.status.contains("limit"), msg=quiet.status)
 }

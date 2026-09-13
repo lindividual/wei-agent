@@ -120,7 +120,16 @@ fn routes_with(regions : Array[@html.Patch], seen : Array[String]) -> Routes {
     switch_session: path => seen.push("session:\{path}"),
     new_session: dir => seen.push("new:\{dir}"),
     add_workspace: dir => seen.push("workspace:\{dir}"),
+    choose_workspace: fn() { seen.push("pick") },
+    rename: name => seen.push("name:\{name}"),
+    delete_session: path => seen.push("delete:\{path}"),
+    undo_delete: path => seen.push("undo:\{path}"),
+    more: cwd => seen.push("more:\{cwd}"),
     kill_job: id => seen.push("kill:\{id}"),
+    settings: body => seen.push("settings:\{body}"),
+    set_model: id => seen.push("model:\{id}"),
+    continue_turn: path => seen.push("continue:\{path}"),
+    dismiss_turn: path => seen.push("dismiss:\{path}"),
   }
 }
 
@@ -196,11 +205,20 @@ async test "abort, open and new reach the application" {
     ignore(read_response(port, post_request("/session", path), 3000))
     let cwd = "/tmp/another-project"
     ignore(read_response(port, post_request("/new", cwd), 3000))
+    ignore(read_response(port, post_request("/more", "\{cwd} "), 3000))
+    // The typed path is trimmed, and the chooser carries no body — it is the one POST whose
+    // argument is a dialog rather than the request.
+    ignore(read_response(port, post_request("/workspace", "\{cwd}  "), 3000))
+    ignore(read_response(port, post_request("/workspace/pick", ""), 3000))
     @async.sleep(50)
     assert_eq(seen, [
       "abort:/tmp/store/a.jsonl",
       "session:\{path}",
       "new:\{cwd}",
+      // The workspace is addressed by its directory on both routes that take one, and both trim.
+      "more:\{cwd}",
+      "workspace:\{cwd}",
+      "pick",
     ])
   })
 }
@@ -233,6 +251,43 @@ async test "broadcasts reach a connected subscriber" {
     )
     assert_true(text.contains("\"op\":\"status\""), msg=text)
     assert_true(text.contains("working"), msg=text)
+  })
+}
+
+///|
+/// The settings routes hand the form body over as it arrived.
+///
+/// The transport is deliberately not the thing that decodes a key or a skill, so what is checked
+/// here is only that every path reaches the handler — including a body that is already
+/// percent-encoded, which must not be decoded twice (once here and once by the application).
+async test "the settings routes pass the form body through" {
+  let seen : Array[String] = []
+  let routes = routes_with([], seen)
+  with_server(routes, async fn(port) {
+    ignore(
+      read_response(port, post_request("/settings/key", "key=sk-a%2Bb"), 3000),
+    )
+    ignore(
+      read_response(port, post_request("/settings/skills", "skill=alpha"), 3000),
+    )
+    ignore(
+      read_response(
+        port,
+        post_request("/settings/limits", "max_cost=0.5"),
+        3000,
+      ),
+    )
+    ignore(
+      read_response(
+        port,
+        post_request("/settings/agents", "agents=1&agents_md=Be+tidy."),
+        3000,
+      ),
+    )
+    @async.sleep(50)
+    assert_eq(seen, [
+      "settings:key=sk-a%2Bb", "settings:skill=alpha", "settings:max_cost=0.5", "settings:agents=1&agents_md=Be+tidy.",
+    ])
   })
 }
 

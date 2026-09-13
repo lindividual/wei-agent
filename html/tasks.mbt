@@ -57,7 +57,7 @@ pub fn render_tasks(items : Array[TaskItem]) -> Node {
     let meta : Array[Node] = [
       txt(item.phase),
       txt(" · "),
-      el("time", attrs=[attr("data-since", "\{item.since}")], children=[
+      el(Time, attrs=[attr("data-since", "\{item.since}")], children=[
         txt(age_from(item.since)),
       ]),
     ]
@@ -65,13 +65,13 @@ pub fn render_tasks(items : Array[TaskItem]) -> Node {
       meta.push(txt(" · \{item.queued} queued"))
     }
     rows.push(
-      el("div", attrs=[cls("task")], children=[
-        el("div", attrs=[cls("row")], children=[
-          el("span", attrs=[cls("label"), attr("title", item.path)], children=[
+      el(Div, attrs=[cls("task")], children=[
+        el(Div, attrs=[cls("row")], children=[
+          el(Span, attrs=[cls("label"), attr("title", item.path)], children=[
             txt(label),
           ]),
           el(
-            "button",
+            Button,
             attrs=[
               cls("stop"),
               attr("type", "button"),
@@ -81,14 +81,14 @@ pub fn render_tasks(items : Array[TaskItem]) -> Node {
             children=[txt("Stop")],
           ),
         ]),
-        el("div", attrs=[cls("tool")], children=meta),
+        el(Div, attrs=[cls("tool")], children=meta),
       ]),
     )
   }
   // Nothing running: an empty container, not an empty heading. A section that is usually
   // empty should not take up space or attention.
   el(
-    "div",
+    Div,
     attrs=[attr("id", "tasks")],
     children=if rows.is_empty() { [] } else { [panel("Running", rows)] },
   )
@@ -117,61 +117,99 @@ pub(all) struct JobItem {
 /// Separate from the turn panel above it because the two answer different questions: a turn is
 /// work the reader is waiting on, a job is work that is still there after they stopped waiting.
 /// That second thing is the one that gets forgotten.
+///
+/// Only the most recent few *finished* jobs are shown. They are kept so a reader can see what they
+/// left behind, but a session that runs a dozen commands leaves a dozen of them, and the panel sits
+/// above the session list — eight `completed` cards push the thing the reader came to click off the
+/// screen. Live jobs are never dropped: those are the ones with a Kill button, and hiding one would
+/// hide the only way to stop it.
 pub fn render_jobs(items : Array[JobItem], now : Int64) -> Node {
-  let rows : Array[Node] = []
+  let live : Array[JobItem] = []
+  let done : Array[JobItem] = []
   for item in items {
-    let meta : Array[Node] = [
-      txt(
-        if item.detail == "" {
-          item.status
-        } else {
-          "\{item.status} · \{item.detail}"
-        },
-      ),
-      txt(" · "),
-      el("time", attrs=[attr("data-since", "\{now - item.age_ms}")], children=[
-        txt(duration_label(item.age_ms)),
-      ]),
-    ]
-    if !item.pids.is_empty() {
-      meta.push(txt(" · pid \{pid_text(item.pids)}"))
-    }
-    let head : Array[Node] = [
-      el("span", attrs=[cls("label"), attr("title", item.label)], children=[
-        txt(item.label),
-      ]),
-    ]
     if item.live {
-      head.push(
-        el(
-          "button",
-          attrs=[
-            cls("stop"),
-            attr("type", "button"),
-            attr("data-kill", item.id),
-            attr("title", "stop this job and everything it started"),
-          ],
-          children=[txt("Kill")],
-        ),
+      live.push(item)
+    } else {
+      done.push(item)
+    }
+  }
+  // `list()` already orders live first and newest first within each group, so the first few of the
+  // finished ones are the first few the reader would recognise.
+  let shown_done = if done.length() > JOBS_SHOWN_FINISHED {
+    done[:JOBS_SHOWN_FINISHED].to_owned()
+  } else {
+    done
+  }
+  let rows : Array[Node] = []
+  for item in live {
+    rows.push(job_row(item, now))
+  }
+  for item in shown_done {
+    rows.push(job_row(item, now))
+  }
+  let dropped = done.length() - shown_done.length()
+  let children : Array[Node] = if rows.is_empty() {
+    []
+  } else {
+    let panel_children = rows
+    if dropped > 0 {
+      // Said rather than silently cut, so the panel never claims to be the whole history.
+      panel_children.push(
+        el(Div, attrs=[cls("meta")], children=[txt("… \{dropped} older")]),
       )
     }
-    let children : Array[Node] = [
-      el("div", attrs=[cls("row")], children=head),
-      el("div", attrs=[cls("tool")], children=meta),
-    ]
-    rows.push(
+    [panel("Background", panel_children)]
+  }
+  el(Div, attrs=[attr("id", "jobs")], children~)
+}
+
+///|
+/// How many finished jobs the background panel lists before it starts counting instead.
+const JOBS_SHOWN_FINISHED : Int = 3
+
+///|
+/// One job, as the panel draws it.
+fn job_row(item : JobItem, now : Int64) -> Node {
+  let meta : Array[Node] = [
+    txt(
+      if item.detail == "" {
+        item.status
+      } else {
+        "\{item.status} · \{item.detail}"
+      },
+    ),
+    txt(" · "),
+    el(Time, attrs=[attr("data-since", "\{now - item.age_ms}")], children=[
+      txt(duration_label(item.age_ms)),
+    ]),
+  ]
+  if !item.pids.is_empty() {
+    meta.push(txt(" · pid \{pid_text(item.pids)}"))
+  }
+  let head : Array[Node] = [
+    el(Span, attrs=[cls("label"), attr("title", item.label)], children=[
+      txt(item.label),
+    ]),
+  ]
+  if item.live {
+    head.push(
       el(
-        "div",
-        attrs=[cls(if item.live { "task" } else { "task done" })],
-        children~,
+        Button,
+        attrs=[
+          cls("stop"),
+          attr("type", "button"),
+          attr("data-kill", item.id),
+          attr("title", "stop this job and everything it started"),
+        ],
+        children=[txt("Kill")],
       ),
     )
   }
-  el(
-    "div",
-    attrs=[attr("id", "jobs")],
-    children=if rows.is_empty() { [] } else { [panel("Background", rows)] },
-  )
+  let children : Array[Node] = [
+    el(Div, attrs=[cls("row")], children=head),
+    el(Div, attrs=[cls("tool")], children=meta),
+  ]
+  el(Div, attrs=[cls(if item.live { "task" } else { "task done" })], children~)
 }
 
 ///|

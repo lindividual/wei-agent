@@ -148,13 +148,81 @@ fn pids_text(pids : Array[Int]) -> String {
 // ── read ───────────────────────────────────────────────────────────────────
 
 ///|
+/// The largest image the read tool will carry, in bytes.
+///
+/// The base64 that goes on the wire is a third larger than the file, and this build has no way to
+/// shrink a picture — resizing needs an image library, and the alternative to refusing is a request
+/// body that grows until the provider rejects it. Four mebibytes is comfortably above a screenshot
+/// (a full-screen PNG of a dense page is a few hundred kilobytes) and comfortably below the body
+/// limit of every provider this build talks to.
+fn max_image_bytes() -> Int {
+  4 * 1024 * 1024
+}
+
+///|
+/// Read an image file as an image the model can be shown.
+///
+/// The text block is not decoration: it is what a text-only model ends up seeing in place of the
+/// picture once the request builder degrades the image, so it has to say which file and what kind.
+/// The path is included because the model may want to refer to the file afterwards.
+async fn read_image(
+  name : String,
+  full : String,
+  kind : @core.ImageKind,
+) -> @core.ToolOutput {
+  let size = match size_of(full) {
+    Some(size) => size
+    None => return @core.ToolOutput::error("Could not read: \{name}")
+  }
+  if size > max_image_bytes().to_int64() {
+    return @core.ToolOutput::error(
+      "\{name} is \{size / 1024L}KB, past the \{max_image_bytes() / 1024 / 1024}MB image limit. " +
+      "Resize it first, or read a region of it with another tool.",
+    )
+  }
+  let bytes = match read_bytes_prefix(full, max_image_bytes()) {
+    Some(bytes) => bytes
+    None => return @core.ToolOutput::error("Could not read: \{name}")
+  }
+  let mime = kind.mime_type()
+  let content : Array[@core.Content] = [
+    // Same shape pi writes, so a reader of either log sees the same thing.
+    @core.Content::Text(
+      "Read image file [\{mime}] \{name} (\{bytes.length()} bytes)",
+    ),
+    @core.Content::Image(data=@base64.encode(bytes), mime_type=mime),
+  ]
+  { content, is_error: false, details: None, }
+}
+
+///|
 async fn run_read(arguments : Json, cwd : String) -> @core.ToolOutput {
   let path = @core.arg_required_string(arguments, "path")
   let full = resolve_path(cwd, path)
   if !path_exists(full) {
     return @core.ToolOutput::error("File not found: \{path}")
   }
-  let content = read_text(full)
+  // An image is the one "binary" a model can be shown, so it is settled first. Deciding by file
+  // name would refuse a screenshot saved without an extension and would hand a `.txt` that is
+  // really a PNG to the text reader, which would then answer "not UTF-8 text" about a picture it
+  // could have been shown. The bytes are the evidence.
+  let head = match read_bytes_prefix(full, @core.image_signature_bytes()) {
+    Some(head) => head
+    None => b""
+  }
+  match @core.sniff_image(head) {
+    Some(kind) => return read_image(path, full, kind)
+    None => ()
+  }
+  // A binary file is a normal thing to reach for by mistake, and the answer the model needs is
+  // that it is one — not an exception that ends the whole turn.
+  let content = match read_text_or_none(full) {
+    Some(content) => content
+    None =>
+      return @core.ToolOutput::error(
+        "\{path} is not UTF-8 text, so it cannot be read as source. It is probably a binary file.",
+      )
+  }
   let all = split_lines(content)
   let total = all.length()
   let start = match @core.arg_int(arguments, "offset") {
@@ -235,7 +303,13 @@ async fn run_edit(arguments : Json, cwd : String) -> @core.ToolOutput {
   if replacements.is_empty() {
     return @core.ToolOutput::error("No edits were provided.")
   }
-  let original = read_text(full)
+  let original = match read_text_or_none(full) {
+    Some(content) => content
+    None =>
+      return @core.ToolOutput::error(
+        "\{path} is not UTF-8 text, so there is nothing to edit in it.",
+      )
+  }
   match @core.apply_edits(original, replacements) {
     // Every edit failed to apply, so nothing was written — the message says which
     // edit and why, which is what the model needs to correct it.
@@ -359,7 +433,12 @@ async fn search_file(
   limit : Int,
   out : Array[String],
 ) -> Unit {
-  let content = read_text(path)
+  // A file that is not text simply cannot contain the pattern, so it is skipped rather than
+  // reported: grepping a repository must not fail because a directory holds an image.
+  let content = match read_text_or_none(path) {
+    Some(content) => content
+    None => return
+  }
   let haystack = if ignore_case { needle.to_lower() } else { needle }
   let mut line_number = 0
   for line in content.split("\n") {

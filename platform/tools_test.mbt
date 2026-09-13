@@ -313,3 +313,139 @@ async test "an unknown tool is reported rather than crashing" {
     msg=output_text(result),
   )
 }
+
+///|
+/// A binary file is reported, not raised.
+///
+/// `read` used to call a strict decode, so reaching for an image or a compiled artifact threw
+/// out of the tool boundary — and the driver re-raised anything that was not a cancellation,
+/// which ended the entire turn. The reader got an error and no reply; the model never learned
+/// what it had done wrong. The answer belongs in the tool result.
+async test "reading a binary file is an error result, not an exception" {
+  let dir = scratch("binary")
+  let raw : FixedArray[Byte] = [b'\xff', b'\xfe', b'\x00', b'\x80']
+  @fs.write_file("\{dir}/blob.bin", Bytes::from_array(raw))
+  let read = execute_tool("read", @json.parse("{\"path\":\"blob.bin\"}"), dir)
+  assert_true(read.is_error, msg=output_text(read))
+  assert_true(
+    output_text(read).contains("not UTF-8 text"),
+    msg=output_text(read),
+  )
+}
+
+///|
+/// Grep over a directory holding a binary skips it rather than failing.
+async test "grep skips a binary file and still finds the text" {
+  let dir = scratch("grep-binary")
+  @fs.write_file(
+    "\{dir}/blob.bin",
+    Bytes::from_array(FixedArray::make(4, b'\xff')),
+  )
+  write_text("\{dir}/notes.txt", "needle here\n")
+  let hits = execute_tool("grep", @json.parse("{\"pattern\":\"needle\"}"), dir)
+  assert_false(hits.is_error, msg=output_text(hits))
+  assert_true(output_text(hits).contains("notes.txt"), msg=output_text(hits))
+}
+
+///|
+/// Reading an image returns the image, not a complaint about UTF-8.
+///
+/// The file is built from raw bytes rather than committed as a fixture: what is under test is the
+/// signature check and the block that gets produced, not anyone's ability to decode a PNG, and a
+/// test that needed a real encoder would be testing the encoder.
+async test "read returns an image block for an image file" {
+  let dir = scratch("read-image")
+  // A PNG signature followed by bytes a decoder would reject. The reader does not decode, and must
+  // not: what the model needs is what is in the file.
+  let bytes = Bytes::from_array([
+    b'\x89', b'\x50', b'\x4e', b'\x47', b'\x0d', b'\x0a', b'\x1a', b'\x0a', b'\x00',
+    b'\x01',
+  ])
+  @fs.write_file("\{dir}/shot.png", bytes)
+  let output = execute_tool("read", @json.parse("{\"path\":\"shot.png\"}"), dir)
+  assert_false(output.is_error, msg=output_text(output))
+  // Two blocks: the note that says what this is, and the image itself.
+  assert_eq(output.content.length(), 2, msg=output_text(output))
+  match output.content[1] {
+    @core.Content::Image(data~, mime_type~) => {
+      assert_eq(mime_type, "image/png")
+      // The bytes on the wire are the file's bytes, base64 encoded and nothing else.
+      assert_eq(@base64.decode(data), bytes)
+    }
+    _ => fail("the second block must be the image")
+  }
+  // The note carries the media type and the path, because on a text-only model that note is all
+  // the model ever sees of this file.
+  let note = output_text(output)
+  assert_true(note.contains("image/png"), msg=note)
+  assert_true(note.contains("shot.png"), msg=note)
+}
+
+///|
+/// The format is decided by the bytes, not by the name. This is the case that motivates sniffing:
+/// a screenshot saved by a tool that did not add an extension.
+async test "an image is recognized without an extension, and text with one is read as text" {
+  let dir = scratch("read-image-sniff")
+  @fs.write_file(
+    "\{dir}/screenshot",
+    Bytes::from_array([
+      b'\x89', b'\x50', b'\x4e', b'\x47', b'\x0d', b'\x0a', b'\x1a', b'\x0a',
+    ]),
+  )
+  let output = execute_tool(
+    "read",
+    @json.parse("{\"path\":\"screenshot\"}"),
+    dir,
+  )
+  assert_false(output.is_error, msg=output_text(output))
+  assert_eq(output.content.length(), 2, msg=output_text(output))
+  // And the reverse: a `.png` that is really text is read as text, so a mistaken name cannot cost
+  // the reader the contents.
+  @fs.write_file("\{dir}/not-really.png", "hello\n")
+  let text = execute_tool(
+    "read",
+    @json.parse("{\"path\":\"not-really.png\"}"),
+    dir,
+  )
+  assert_false(text.is_error)
+  assert_eq(text.content.length(), 1, msg=output_text(text))
+  assert_true(output_text(text).contains("hello"), msg=output_text(text))
+}
+
+///|
+/// An image past the cap is refused with a reason rather than sent and rejected by the provider.
+async test "an oversized image is refused by name and size" {
+  let dir = scratch("read-image-big")
+  // Written in one call: appending would open with the default create mode and truncate, so the
+  // file would end up the size of the last chunk.
+  let size = 5 * 1024 * 1024
+  let bytes = FixedArray::make(size, b'\x00')
+  let signature : Array[Byte] = [
+    b'\x89', b'\x50', b'\x4e', b'\x47', b'\x0d', b'\x0a', b'\x1a', b'\x0a',
+  ]
+  for i in 0..<signature.length() {
+    bytes[i] = signature[i]
+  }
+  @fs.write_file("\{dir}/huge.png", Bytes::from_array(bytes))
+  let output = execute_tool("read", @json.parse("{\"path\":\"huge.png\"}"), dir)
+  assert_true(output.is_error, msg=output_text(output))
+  let message = output_text(output)
+  assert_true(message.contains("huge.png"), msg=message)
+  assert_true(message.contains("image limit"), msg=message)
+}
+
+///|
+/// A binary that is not an image still gets the old answer, unchanged.
+async test "a non-image binary still reads as not text" {
+  let dir = scratch("read-binary")
+  @fs.write_file(
+    "\{dir}/blob.bin",
+    Bytes::from_array([b'\x00', b'\xff', b'\xfe', b'\x00']),
+  )
+  let output = execute_tool("read", @json.parse("{\"path\":\"blob.bin\"}"), dir)
+  assert_true(output.is_error)
+  assert_true(
+    output_text(output).contains("not UTF-8 text"),
+    msg=output_text(output),
+  )
+}

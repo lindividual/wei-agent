@@ -222,3 +222,173 @@ test "a job with no pids yet is left alone" {
   assert_false(store.settle_gone(_pid => false, now=100L))
   assert_true(store.get(id).unwrap().is_live())
 }
+
+// ── Persistence ────────────────────────────────────────────────────────────
+
+///|
+/// A store written and read back keeps every field that matters.
+///
+/// The point of the file is the pids: without them the next start knows a job existed but not what
+/// to do about it, which is the difference between a record and a note.
+test "a job store round-trips through JSON" {
+  let store = JobStore::new()
+  let live = store.start(
+    kind="bash",
+    label="npm run dev",
+    session="/a/session.jsonl",
+    started_at=1000L,
+    pids=[41, 42],
+  )
+  let done = store.start(
+    kind="bash",
+    label="ls",
+    session="/a/session.jsonl",
+    started_at=2000L,
+    pids=[43],
+  )
+  store.finish(done, Completed, detail="exit code: 0", finished_at=3000L)
+  // A second live job, to check the counter is not simply reset by what was read.
+  let next = store.start(
+    kind="bash",
+    label="sleep 100",
+    session="/a/session.jsonl",
+    started_at=4000L,
+    pids=[44],
+  )
+  let restored = parse_job_store(store.to_json().stringify())
+  assert_eq(restored.jobs.length(), 3)
+  let back = restored.get(live).unwrap()
+  assert_eq(back.label, "npm run dev")
+  assert_eq(back.session, "/a/session.jsonl")
+  assert_eq(back.pids, [41, 42])
+  assert_true(back.is_live())
+  let settled = restored.get(done).unwrap()
+  assert_eq(settled.status, Completed)
+  assert_eq(settled.detail, "exit code: 0")
+  assert_eq(settled.finished_at, Some(3000L))
+  // Ids continue past what was read rather than restarting at bash-1, which would let a new job
+  // share an id with one still running from the previous run.
+  let fresh = restored.start(
+    kind="bash",
+    label="next",
+    session="/a",
+    started_at=5000L,
+    pids=[],
+  )
+  assert_false(fresh == live)
+  assert_false(fresh == next)
+}
+
+///|
+/// A file that cannot be read is an empty store, not a failure to start.
+test "a corrupt store reads as empty" {
+  assert_eq(parse_job_store("").jobs.length(), 0)
+  assert_eq(parse_job_store("not json at all").jobs.length(), 0)
+  assert_eq(parse_job_store("{\"jobs\":\"nope\"}").jobs.length(), 0)
+  // A truncated write: the record is unusable and is dropped, which is the reason the format is
+  // read tolerantly rather than trusted.
+  assert_eq(parse_job_store("{\"jobs\":[{\"id\":\"bash-1\"").jobs.length(), 0)
+}
+
+///|
+/// Starting again after a crash: what is still there stays live, what is not is reported lost.
+///
+/// This is the whole reason the records are written down. A job whose process survived is one the
+/// reader can still find and kill; a job whose process is gone is one nobody witnessed the end of,
+/// and saying so is better than leaving it on the panel claiming to run forever.
+test "reconcile keeps the survivors and marks the rest lost" {
+  let store = JobStore::new()
+  let surviving = store.start(
+    kind="bash",
+    label="npm run dev",
+    session="/a",
+    started_at=0L,
+    pids=[41, 42],
+  )
+  let orphaned = store.start(
+    kind="bash",
+    label="sleep 100",
+    session="/a",
+    started_at=0L,
+    pids=[43],
+  )
+  let finished = store.start(
+    kind="bash",
+    label="ls",
+    session="/a",
+    started_at=0L,
+    pids=[44],
+  )
+  store.finish(finished, Completed, detail="exit code: 0", finished_at=1L)
+  // Only pid 42 is still there — the command's shell exited and its child is what survived, which
+  // is exactly the case several pids are recorded for.
+  let lost = store.reconcile(pid => pid == 42, 99L)
+  assert_eq(lost, 1)
+  assert_true(store.get(surviving).unwrap().is_live())
+  assert_eq(store.get(surviving).unwrap().pids, [41, 42])
+  // The one with nothing behind it says what happened rather than pretending.
+  let gone = store.get(orphaned).unwrap()
+  assert_eq(gone.status, Failed)
+  assert_true(gone.detail.contains("lost"), msg=gone.detail)
+  // A job that had already settled is not touched: it was not running, so there is nothing to
+  // reconcile, and its recorded exit code must survive.
+  let untouched = store.get(finished).unwrap()
+  assert_eq(untouched.status, Completed)
+  assert_eq(untouched.detail, "exit code: 0")
+}
+
+///|
+/// A real epoch-millisecond timestamp survives the round trip.
+///
+/// This is the regression test for a bug that the round-trip test above could not see: it used
+/// timestamps of a few thousand, which fit in an `Int`. A real `startedAt` is around 1.79e12, and
+/// this platform's `Int` is 32-bit, so reading it through `Int` saturated it to `2147483647` — a job
+/// that had been running for a minute came back claiming to have started in 1970, and the panel
+/// printed an age of 496,426 hours. Times have to be read as `Int64`.
+test "an epoch-millisecond timestamp round-trips exactly" {
+  let started = 1789283993636L
+  let finished = 1789284993636L
+  let store = JobStore::new()
+  let id = store.start(
+    kind="bash",
+    label="npm run dev",
+    session="/a",
+    started_at=started,
+    pids=[41],
+  )
+  store.finish(id, Completed, detail="exit code: 0", finished_at=finished)
+  let restored = parse_job_store(store.to_json().stringify())
+  let job = restored.get(id).unwrap()
+  assert_eq(job.started_at, started)
+  assert_eq(job.finished_at, Some(finished))
+  // The consequence, stated as the reader sees it: the age is a minute, not half a million hours.
+  assert_eq(job.age_ms(finished), 1000000L)
+  assert_eq(duration_label_of(job.age_ms(finished)), "16m 40s")
+}
+
+///|
+/// The age of a still-running job is measured from now, and of a settled one from its end.
+test "age is measured against now while running" {
+  let store = JobStore::new()
+  let id = store.start(
+    kind="bash",
+    label="sleep 100",
+    session="/a",
+    started_at=1789283993636L,
+    pids=[41],
+  )
+  // A minute later.
+  assert_eq(store.get(id).unwrap().age_ms(1789284053636L), 60000L)
+}
+
+///|
+fn duration_label_of(ms : Int64) -> String {
+  let seconds = ms / 1000L
+  if seconds < 60L {
+    "\{seconds}s"
+  } else if seconds < 3600L {
+    "\{seconds / 60L}m \{seconds % 60L}s"
+  } else {
+    "\{seconds / 3600L}h \{(seconds % 3600L) / 60L}m"
+  }
+}

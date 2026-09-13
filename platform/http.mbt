@@ -12,6 +12,73 @@ pub(all) struct HttpResponse {
 } derive(Eq, Debug)
 
 ///|
+/// Why a call to the model endpoint failed, split by whether another attempt could help.
+///
+/// The split is the whole point of the type. A connection that dropped, a stream that went
+/// quiet, a 5xx or a 429 are all the endpoint failing to answer *this time*, and the next
+/// attempt can get a real answer. A 401 or a 400 is the endpoint answering — it will answer the
+/// same way however many times it is asked, so retrying only spends the reader's time and buys
+/// another identical failure.
+///
+/// The platform raises this rather than deciding: how many attempts, how long to wait between
+/// them, and when a reader has already seen too much to retry are all the caller's business.
+pub suberror ModelError {
+  /// The request never got a usable answer, and another attempt could get one.
+  Transient(String)
+  /// The endpoint answered, and will answer the same way again.
+  Permanent(String)
+}
+
+///|
+/// The message already says what happened and to which URL, so the rendering is the message.
+pub impl Show for ModelError with fn output(self, logger) {
+  match self {
+    Transient(msg) => logger.write_string(msg)
+    Permanent(msg) => logger.write_string(msg)
+  }
+}
+
+///|
+/// Whether a status code describes a condition that could clear on its own.
+///
+/// 408 (the server gave up waiting for the request) and 429 (too many requests) are about
+/// timing, not about the request; 5xx is the server failing at its job. Everything else in the
+/// 4xx range is about the request itself — a bad key, a malformed body, a context that is too
+/// long — and repeating it is pointless.
+fn status_is_transient(code : Int) -> Bool {
+  code == 408 || code == 429 || code >= 500
+}
+
+///|
+/// Classify a failure at the transport boundary, as the error to raise.
+///
+/// Two jobs, and both matter.
+///
+/// **Cancellation passes through untouched.** Cancellation is an ordinary error in this runtime,
+/// and it is not a failure of the request: it means the caller stopped wanting the answer — the
+/// reader pressed Stop, or the turn's task group was torn down. Turning it into a transient
+/// failure would turn "the reader gave up" into "ask the model again", which is the opposite of
+/// what they asked for. `is_being_cancelled` is checked as well as `is_cancellation_error`,
+/// because the latter is documented as not always accurate during cancellation handling.
+///
+/// **Everything else is transient, including errors that are not `OSError`s.** That is the point
+/// of routing every transport call through here: a peer that closes the connection before
+/// answering surfaces as `ReaderClosed`, a reset surfaces as an `OSError`, and both are the same
+/// condition as far as the caller is concerned — the request never got an answer, and asking
+/// again could get one. A boundary that classified only the errors it happened to expect is how
+/// a raw error type ends up on a reader's status line.
+///
+/// Generic in its result so it can stand in for any call: it never returns a value, it only
+/// raises one of the two classified errors. Spelling that as `Unit` would force every call site
+/// into a shape that discards a real result type.
+fn[T] transport_failure(context : String, err : Error) -> T raise {
+  if @async.is_cancellation_error(err) || @async.is_being_cancelled() {
+    raise err
+  }
+  raise Transient("\{context}: \{err}")
+}
+
+///|
 /// POST a JSON body and read the whole response back.
 ///
 /// Deliberately not streaming: `core`'s SSE parser consumes a complete body, so
@@ -69,23 +136,50 @@ pub async fn post_sse(
   for name, value in headers {
     http_headers.set(@http.CaseInsensitiveString(name), value)
   }
-  let client = @http.post_stream(url, headers=http_headers)
+  // Connecting and sending are the two failures that say nothing about the request, so they are
+  // transient: nothing about the answer was learned, and asking again is the only way to learn it.
+  let client = try @http.post_stream(url, headers=http_headers) catch {
+    err => transport_failure("could not reach \{url}", err)
+  } noraise {
+    client => client
+  }
   defer client.close()
-  client.write(body)
+  try client.write(body) catch {
+    err => transport_failure("could not send the request to \{url}", err)
+  } noraise {
+    _ => ()
+  }
   // Waiting for the response headers is its own chance to hang: `end_request` blocks
   // until the status line arrives, which is *before* the first byte of the body. A
   // timeout around the read loop alone would leave the most likely stall — a
   // connection that was accepted and then forgotten — unbounded.
-  let response = match
-    @async.with_timeout_opt(idle_timeout_ms, () => client.end_request()) {
+  //
+  // It is also the one call that both writes and reads. The buffered writer holds the tail of the
+  // body until this point, so a failure here can come from either direction: a socket that will
+  // not take the rest of the request, or a peer that closed before answering. Both are classified,
+  // and that is why this call goes through the same helper as the two around it rather than being
+  // left bare — leaving it bare is what put `OSError("@socket.Tcp::write(): …")` in front of a
+  // reader, and it is the kind of gap that reappears wherever a boundary is written by hand.
+  let finishing : async () -> @http.Response = async fn() {
+    try client.end_request() catch {
+      err => transport_failure("could not send the request to \{url}", err)
+    } noraise {
+      response => response
+    }
+  }
+  let response = match @async.with_timeout_opt(idle_timeout_ms, finishing) {
     Some(response) => response
     None =>
-      raise Failure::Failure(
-        "model endpoint sent no response within \{idle_timeout_ms}ms",
+      raise Transient(
+        "the model endpoint sent no response within \{idle_timeout_ms}ms",
       )
   }
   if response.code != 200 {
-    raise Failure::Failure("model endpoint returned HTTP \{response.code}")
+    let message = "the model endpoint returned HTTP \{response.code}"
+    if status_is_transient(response.code) {
+      raise Transient(message)
+    }
+    raise Permanent(message)
   }
 
   let buffer = FixedArray::make(4096, b'\x00')
@@ -100,12 +194,20 @@ pub async fn post_sse(
     // a slow but live response is never cut off.
     let count = match
       @async.with_timeout_opt(idle_timeout_ms, () => {
-        client.read(buffer, offset=0, max_len=buffer.length())
+        // A connection that breaks mid-response raises rather than returning a short read, and
+        // whether that is worth retrying depends on how much of the answer already reached the
+        // reader — which only the caller knows. So it is classified here as transient and left
+        // for the caller to decide.
+        try client.read(buffer, offset=0, max_len=buffer.length()) catch {
+          err => transport_failure("the model stream broke mid-response", err)
+        } noraise {
+          count => count
+        }
       }) {
       Some(count) => count
       None =>
-        raise Failure::Failure(
-          "model stream sent nothing for \{idle_timeout_ms}ms",
+        raise Transient(
+          "the model stream sent nothing for \{idle_timeout_ms}ms",
         )
     }
     if count <= 0 {

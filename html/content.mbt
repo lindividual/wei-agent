@@ -55,6 +55,10 @@ pub fn pair_tools(
 /// `safe=true` makes cmark drop raw HTML embedded in the markdown, which matters
 /// because the markdown is model output. Without it, a model could emit a script
 /// tag inside a code block's sibling and have it execute.
+///
+/// `strict=false` enables cmark's extensions, which is what makes tables render as
+/// tables. The two flags are independent: the extensions widen the grammar, `safe`
+/// still constrains what the grammar is allowed to produce.
 pub fn markdown(text : String) -> Node raise {
-  Raw(@cmark_html.render(text, safe=true))
+  Raw(@cmark_html.render(text, safe=true, strict=false))
 }
