@@ -88,8 +88,62 @@ function storeDirName(cwd) {
   return `--${body}--`;
 }
 
-/// A session file the server will accept: a header, then two entries.
-function sessionFile(cwd, label) {
+/// A session file the server will accept: a header, then `turns` exchanges.
+///
+/// `turns` exists so a check can seed a conversation taller than the viewport: what the page does
+/// with the scroll position is only observable when there is something to scroll.
+function sessionFile(cwd, label, turns = 1) {
+  const id = Math.random().toString(16).slice(2, 10);
+  const at = new Date(1700000000000).toISOString();
+  const line = (o) => JSON.stringify(o);
+  const exchange = (n) => [
+    line({
+      type: "message",
+      id: `u${n}`,
+      parentId: n === 1 ? null : `a${n - 1}`,
+      timestamp: at,
+      message: {
+        role: "user",
+        content: [{ type: "text", text: n === 1 ? label : `question ${n}` }],
+        timestamp: 1700000000000,
+      },
+    }),
+    line({
+      type: "message",
+      id: `a${n}`,
+      parentId: `u${n}`,
+      timestamp: at,
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: `an answer of a few lines, for ${n}.\n\nWith a second paragraph so the conversation is tall enough to need scrolling.` }],
+        api: "openai-completions",
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: 1700000000000,
+      },
+    }),
+  ];
+  const seeded = [line({ type: "session", version: 3, id, timestamp: at, cwd })];
+  for (let n = 1; n <= turns; n++) seeded.push(...exchange(n));
+  return { id, text: seeded.join("\n") + "\n" };
+}
+
+/// The same, for a session with only a header and one exchange.
+function shortSessionFile(cwd, label) {
+  return sessionFile(cwd, label, 1);
+}
+
+/// Unused: kept for the older call shape.
+function sessionFileLegacy(cwd, label) {
   const id = Math.random().toString(16).slice(2, 10);
   const at = new Date(1700000000000).toISOString();
   const line = (o) => JSON.stringify(o);
@@ -487,7 +541,9 @@ async function main() {
     );
     const otherDir = join(store, storeDirName(otherCwd));
     mkdirSync(otherDir, { recursive: true });
-    const seeded = sessionFile(otherCwd, "seeded question from the other project");
+    // Deliberately long: the scroll position is only observable on a conversation taller than the
+    // window, and the reader's complaint was about exactly those.
+    const seeded = sessionFile(otherCwd, "seeded question from the other project", 24);
     writeFileSync(join(otherDir, `2020-01-01T00-00-00.000Z_${seeded.id}.jsonl`), seeded.text);
 
     // A reload, because the sidebar is only re-rendered on connect, on a switch and
@@ -533,6 +589,31 @@ async function main() {
       )) === true,
       "the other workspace is the active one now",
     );
+
+    // Opening a session lands at its end. Landing at the top of a long conversation means scrolling
+    // past all of it before reading anything, which is what the reader complained about.
+    const atBottom = async () =>
+      await cdp.eval(
+        "window.innerHeight + window.scrollY >= document.body.offsetHeight - 40",
+      );
+    check(await atBottom(), "opening a session lands at the newest content");
+    check(
+      (await cdp.eval("document.body.offsetHeight")) > (await cdp.eval("window.innerHeight")),
+      "and the seeded session is long enough for that to mean something",
+    );
+
+    // A page load does the same: the first thing rendered is the end of the conversation.
+    await cdp.eval("window.scrollTo(0, 0)");
+    check(!(await atBottom()), "the check can scroll away from the bottom");
+    await cdp.send("Page.navigate", { url: URL });
+    await cdp.waitFor("document.readyState === 'complete'", "page reload", 20000);
+    await sleep(1500);
+    await cdp.waitFor(
+      `document.getElementById('transcript').textContent.includes('seeded question from the other project')`,
+      "the long session to be on screen after the reload",
+      20000,
+    );
+    check(await atBottom(), "a fresh page load lands at the newest content too");
     check(
       (await cdp.eval("document.querySelectorAll('#sessions .session.current').length")) === 1,
       "exactly one session is marked current",
