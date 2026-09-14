@@ -26,6 +26,14 @@ pub fn stylesheet() -> String {
     "  --radius-sm: .3rem;", "  --radius: .5rem;", "  --radius-lg: .75rem;", "  --text-xs: .78rem;",
     "  --text-sm: .86rem;", "  --text-base: .95rem;", "  --leading: 1.55;", "  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;",
     "  --sans: ui-sans-serif, system-ui, -apple-system, sans-serif;", "  --sidebar-width: 17rem;",
+    // The width the page is laid out in, and the reason it is a token: the settings panel pins to
+    // the page's bottom-left corner and has to land on the same column the sidebar occupies, so it
+    // asks for the same number rather than carrying a second copy of it.
+     "  --layout-max: 82rem;",
+    // The height of the title line, which the narrow-screen layout needs as a number: the folded
+    // navigation sticks directly underneath it, and a second sticky element with `top: 0` would sit
+    // on top of the first rather than below it.
+     "  --titlebar-h: 2.33rem;",
     // How much of reasoning is shown while it is still arriving. In lines rather than in pixels,
     // so it is the same amount of text whatever the type scale becomes: the box is sized from
     // `--leading`, which is what `body`'s own `font` shorthand sets the line height to. Change one
@@ -55,7 +63,7 @@ pub fn stylesheet() -> String {
     "code { font-family: var(--mono); font-size: .95em; }", "summary { cursor: pointer; color: var(--muted); font-size: var(--text-sm); padding-block: var(--space-1); }",
     "details[open] > summary { margin-bottom: var(--space-2); }",
     // ── layout ──────────────────────────────────────────────────────────────
-     ".layout { display: flex; align-items: flex-start; gap: var(--space-5); max-width: 82rem; margin: 0 auto; }",
+     ".layout { display: flex; align-items: flex-start; gap: var(--space-5); max-width: var(--layout-max); margin: 0 auto; }",
     ".column { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 100vh; }",
     ".titlebar { position: sticky; top: 0; z-index: 2; display: flex; align-items: baseline; gap: var(--space-2); padding: var(--space-2) var(--space-4); background: var(--bg); border-bottom: 1px solid var(--line); font-size: var(--text-sm); }",
     // The name takes the line and ellipsises; nothing else is on it. A reader scrolled far into an
@@ -338,12 +346,22 @@ pub fn stylesheet() -> String {
     // they watch, and the sidebar is already the busiest column on the page. Pinned to the bottom
     // left corner of the page, which is the one spot no region is ever patched into — so it is
     // where the reader left it, whatever the conversation is doing.
-     "details.settings { position: fixed; left: var(--space-4); bottom: var(--space-4); z-index: 4; font-size: var(--text-sm); }",
+    //
+    // `left` follows the layout's own left edge: the page is a centred column of `--layout-max`, so
+    // a plain `1rem` would leave the panel adrift to the left of everything else on a wide screen.
+    // `max()` is what says "the layout's edge, but never off the edge of a narrow one".
+     "details.settings { position: fixed; left: max(var(--space-4), calc((100vw - var(--layout-max)) / 2 + var(--space-4))); bottom: var(--space-4); z-index: 4; font-size: var(--text-sm); }",
     "details.settings > summary { list-style: none; cursor: pointer; color: var(--muted); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .1rem .5rem; white-space: nowrap; }",
     "details.settings > summary::-webkit-details-marker { display: none; }", "details.settings[open] > summary { color: var(--fg); border-color: var(--line-strong); }",
     // The panel is taken out of flow, and opens upward: it is anchored to the bottom of the window,
     // so growing down would put most of it off the screen.
-     ".settings-body { position: absolute; left: 0; bottom: calc(100% + var(--space-2)); z-index: 3; width: min(34rem, calc(100vw - 2rem)); max-height: 75vh; overflow-y: auto; text-align: left; background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: 0 12px 32px rgba(0, 0, 0, .18); padding: var(--space-4); }",
+    // The panel opens *upward* and stays inside the sidebar's column, and the second half of that
+    // is the part worth explaining. It used to hang off the right end of the top bar, where 34rem
+    // was free. From the bottom-left corner that width reaches across the column the conversation
+    // is in — over the composer, which is where the reader's hands are, and it covered the input
+    // it was sharing a line with. The left column is the sidebar's, and a panel drawn in it cannot
+    // collide with anything: the transcript and the composer both start to its right.
+     ".settings-body { position: absolute; left: 0; bottom: calc(100% + var(--space-2)); z-index: 3; width: calc(var(--sidebar-width) - var(--space-2)); max-height: 75vh; overflow-y: auto; text-align: left; background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: 0 12px 32px rgba(0, 0, 0, .18); padding: var(--space-3); }",
     ".settings-block { margin-bottom: var(--space-4); }", ".settings-block > h3 { margin: 0 0 var(--space-2); font-size: var(--text-xs); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }",
     ".settings-block > h3 .count { text-transform: none; letter-spacing: 0; }", ".settings .facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); margin: 0; }",
     ".settings .facts dt { color: var(--muted); }", ".settings .facts dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }",
@@ -392,23 +410,30 @@ pub fn stylesheet() -> String {
     //
     // The breakpoint is in `rem` so it follows the reader's text size rather than assuming the
     // default, which is the same reason the type scale is in `rem`.
-     "#composer { flex-wrap: wrap; }",
     // Demanding a minimum width is what makes the composer fold rather than squeeze: without a
     // basis the textarea shrinks to nothing and the buttons keep their size, which is the wrong
-    // thing to protect — the reader came to type.
+    // thing to protect — the reader came to type. Under a wide window nothing wraps; the rule is
+    // what the narrow case falls back to.
      "#composer .row { flex-wrap: wrap; }", "#composer textarea { flex: 1 1 14rem; }",
     "@media (max-width: 59.99rem) {", "  .layout { flex-direction: column; gap: 0; }",
     // One sticky header on a narrow screen, and it is the navigation. A reader halfway down a long
     // answer is far more likely to want another session than another look at the title, and the two
     // cannot both stick to the top without covering each other. Opaque, because the title scrolls
     // underneath it on the way past.
-     "  .sidebar { position: sticky; top: 0; z-index: 3; flex: none; width: auto; max-height: none; overflow: visible; padding: var(--space-2) var(--space-4); background: var(--bg); border-bottom: 1px solid var(--line); }",
+     "  .sidebar { position: sticky; top: var(--titlebar-h); z-index: 3; flex: none; width: auto; max-height: none; overflow: visible; padding: var(--space-2) var(--space-4); background: var(--bg); border-bottom: 1px solid var(--line); }",
     // Opened, it covers the page rather than pushing it down — its own scroll, bounded, so a long
     // session list does not become a very long page above the conversation.
-     "  .sidebar.open { max-height: 80vh; overflow-y: auto; }", "  .titlebar { position: static; }",
+     "  .sidebar.open { max-height: 80vh; overflow-y: auto; }",
+    // The title still sticks, and above the navigation rather than under it: it is the one line that
+    // says which conversation this is, and it is worth exactly one line of a phone screen. The
+    // navigation follows it, at `top: var(--titlebar-h)`.
+     "  .titlebar { z-index: 4; }",
     // Settings stops being a corner and joins the folded list: pinned to the bottom of a narrow
-    // window it would sit on top of the composer, which is where the reader's hands are.
-     "  details.settings { position: static; }", "  #nav-toggle { display: block; width: auto; text-align: left; color: var(--muted); border-color: var(--line); padding: var(--space-1) var(--space-3); }",
+    // window it would sit on top of the composer, which is where the reader's hands are. Laid out
+    // inline, it is one more section of the header the reader opened — with none of the panel's own
+    // chrome, because there is nothing left for it to float above.
+     "  details.settings { position: static; }", "  .settings-body { position: static; width: auto; max-height: none; border: 0; box-shadow: none; padding: 0; }",
+    "  #nav-toggle { display: block; width: auto; text-align: left; color: var(--muted); border-color: var(--line); padding: var(--space-1) var(--space-3); }",
     "  #nav-toggle[aria-expanded=true] { color: var(--fg); border-color: var(--line-strong); }",
     // Everything except the button is folded away until it is asked for. Written as "> :not(...)"
     // rather than by naming the panels, so a region added later folds with the rest.

@@ -478,31 +478,107 @@ test "the context chip warns when the next turn would compact" {
 }
 
 ///|
-/// The title is the one fact from the old bar that stays at the top, and it is the session's name.
+/// The title is the one fact from the old bar that stays at the top, and it is the session's label.
 ///
 /// The model moved to the picker under the composer and the figures moved with it, so what is left
 /// to answer "which conversation is this?" while a long answer scrolls is this line.
-async test "the title names the session and keeps the path one hover away" {
+///
+/// The wording is the sidebar's rule, asked of a real file: the reader's name for it if there is
+/// one, else the first question, else the id. Both halves are asserted here because the point of
+/// the rule is that the two places agree.
+async test "the title names the session the way the sidebar row does" {
+  let home = "_build/app_title_test/\{@core.new_entry_id()}"
+  let root = "\{home}/store"
+  @platform.make_dirs(root)
+  let app = test_app_in(home)
+  let (session, path) = create_session(root, "/work/one")
+  // The header first: a session is created empty and filled in by whoever appends the first
+  // entry, so there is nothing to append to until this line.
+  @platform.ensure_session(path, session.header)
+  let ask : @core.Entry = {
+    id: "u1",
+    parent_id: None,
+    timestamp: @core.format_iso_utc(0L),
+    kind: @core.Message(
+      message=@core.User({
+        content: [@core.Text("what does this repo do")],
+        timestamp: 0L,
+      }),
+    ),
+  }
+  @platform.append_text(path, ask.to_line())
+  let runner = Runner::new(session, path, app.default_model_id)
+  app.registry.push(runner)
+  let asked = title_node(app, runner).render()
+  assert_true(asked.contains("id=\"title\""), msg=asked)
+  assert_true(asked.contains("what does this repo do"), msg=asked)
+  // One hover away, because the label is clipped to one line and is not the file.
+  assert_true(asked.contains("title=\"\{path}\""), msg=asked)
+  assert_eq(
+    app.session_label(path, app.labels.modified_of(path)),
+    "what does this repo do",
+  )
+  // A name the reader gave wins, in both places at once.
+  @platform.append_text(
+    path,
+    @core.session_name_entry(Some("the repo tour"), Some("u1"), 0L).to_line(),
+  )
+  app.labels.forget(path)
+  let named = title_node(app, runner).render()
+  assert_true(named.contains("the repo tour"), msg=named)
+  assert_false(named.contains("what does this repo do"), msg=named)
+  assert_eq(
+    app.session_label(path, app.labels.modified_of(path)),
+    "the repo tour",
+  )
+}
+
+///|
+/// One wording for "nothing has been asked in this session yet".
+///
+/// The sidebar's row and the line above the conversation both show it, so it is a function rather
+/// than a string written twice: a reader comparing the two is checking that they agree.
+test "an unnamed, empty session has one name in both places" {
+  assert_eq(@html.display_label(""), "New session")
+  // Anything that was said, or named, is left exactly as it is.
+  assert_eq(@html.display_label("refactor auth"), "refactor auth")
+  assert_eq(
+    @html.display_label("what does this repo do"),
+    "what does this repo do",
+  )
+}
+
+///|
+/// A session with nothing in it is titled with the same words the sidebar row uses.
+///
+/// Two ways to have no label, and they are different answers on purpose. An open session nobody has
+/// typed into gets the plain words — the row in the list says them, so the line above the
+/// conversation does too. A session the store knows about but this process has not opened gets its
+/// short id, because that is also what the row shows for one, and it at least matches the file on
+/// disk.
+async test "a session with nothing in it is titled the way its row is" {
   let app = test_app()
-  let runner = runner_at(
+  // Open, and empty: the row says "New session", so the title does.
+  let fresh = runner_at("/store/fresh.jsonl", 0)
+  app.registry.push(fresh)
+  let html = title_node(app, fresh).render()
+  assert_true(html.contains(">New session</span>"), msg=html)
+  // The id is not on the line any more: the plain words are what the row says, and the path stays
+  // in the tooltip for the reader who is looking for the file.
+  assert_false(html.contains(">fresh<"), msg=html)
+  // Not open in this process: the id, which is what the sidebar resolves for a session it has not
+  // read either.
+  let closed = runner_at(
     "/store/--a--/2026-09-12T13-29-09.716Z_16ce48e4.jsonl", 1,
   )
-  let html = title_node(app, runner).render()
-  assert_true(html.contains("id=\"title\""), msg=html)
-  assert_true(html.contains("16ce48e4"), msg=html)
+  let other = title_node(app, closed).render()
+  assert_true(other.contains("16ce48e4"), msg=other)
   assert_true(
-    html.contains(
+    other.contains(
       "title=\"/store/--a--/2026-09-12T13-29-09.716Z_16ce48e4.jsonl\"",
     ),
-    msg=html,
+    msg=other,
   )
-  // A name the reader gave wins over the id, exactly as it does in the sidebar.
-  runner.session = runner.session.add_entries([
-    @core.session_name_entry(Some("refactor auth"), None, 0L),
-  ])
-  let named = title_node(app, runner).render()
-  assert_true(named.contains("refactor auth"), msg=named)
-  assert_false(named.contains(">16ce48e4<"), msg=named)
 }
 
 // ── the label cache ────────────────────────────────────────────────────────
@@ -619,22 +695,19 @@ test "only a real /name is a command" {
 ///|
 async test "a named session is listed by its name, an unnamed one by its first question" {
   let app = test_app()
-  let named = runner_at("/store/a.jsonl", 1)
-  let entry_by_name = @core.session_name_entry(Some("refactor auth"), None, 0L)
-  named.session = named.session.add_entries([entry_by_name])
-  let unnamed = runner_at("/store/b.jsonl", 1)
-  app.registry.push(named)
-  app.registry.push(unnamed)
-  // The title names the session by what the reader called it.
-  let title = title_node(app, named).render()
-  assert_true(title.contains("refactor auth"), msg=title)
-  assert_true(title.contains("title=\"/store/a.jsonl\""), msg=title)
-  // Without a name it falls back to the id, which matches the file on disk.
-  let plain = title_node(app, unnamed).render()
-  assert_true(plain.contains("b"), msg=plain)
-  assert_false(plain.contains("refactor auth"), msg=plain)
-  assert_eq(named.name_or_id(), "refactor auth")
-  assert_eq(unnamed.name_or_id(), "b")
+  // The three answers, in the order the rule prefers them: what the reader called it, what they
+  // first asked, and — for a session with neither — the id of the file on disk.
+  app.labels.store("/store/a.jsonl", 0L, {
+    label: "the first question",
+    name: None,
+  })
+  assert_eq(app.session_label("/store/a.jsonl", 0L), "the first question")
+  app.labels.store("/store/a.jsonl", 0L, {
+    label: "the first question",
+    name: Some("refactor auth"),
+  })
+  assert_eq(app.session_label("/store/a.jsonl", 0L), "refactor auth")
+  assert_eq(app.session_label("/store/b.jsonl", 0L), "b")
 }
 
 ///|

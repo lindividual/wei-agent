@@ -186,6 +186,10 @@ fn parse_args(argv : Array[String]) -> Args raise {
 /// Two questions, and both have to be yes: this host can open a dialog at all, and the reader did
 /// not ask for it not to. Answered before the page is drawn rather than when the button is
 /// pressed, because a button that cannot work is worse than no button.
+///
+/// The answer decides more than whether a button is drawn: where there is no chooser, the sidebar's
+/// add row is a path field instead, because that is the only way in. One control either way — a
+/// field beside a dialog is a second answer to a question already answered.
 async fn offers_picker(args : Args) -> Bool {
   !args.no_picker && @platform.can_pick_directory()
 }

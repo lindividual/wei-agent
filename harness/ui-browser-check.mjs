@@ -1934,7 +1934,14 @@ async function main() {
     // toggling a skill must not reset.
     check(
       (await cdp.eval("document.querySelectorAll('#settings').length")) === 1,
-      "the settings panel is in the bar",
+      "the settings panel is on the page exactly once",
+    );
+    // Pinned to the bottom-left corner, which is the one region no refresh replaces.
+    check(
+      (await cdp.eval(
+        "getComputedStyle(document.getElementById('settings')).position",
+      )) === "fixed",
+      "the settings panel is pinned rather than laid out in the flow",
     );
     // Counting both, because a refresh that sends the `<details>` instead of the body nests a
     // second panel inside the first — and that still renders, still has the ids, and still works.
@@ -2052,15 +2059,6 @@ async function main() {
       15000,
     );
     check(true, "toggling a skill posts and is acknowledged");
-    await sleep(3000);
-    console.log("  [debug] " + (await cdp.eval(`JSON.stringify({
-      bodies: document.querySelectorAll('#settings-body').length,
-      forms: document.querySelectorAll('#skills-form').length,
-      boxes: [...document.querySelectorAll('#settings-body input[type=checkbox]')].map(i => ({ v: i.value, c: i.checked })),
-      status: document.getElementById('status').textContent,
-      open: document.getElementById('settings').open,
-      inSidebar: !!document.querySelector('.sidebar #settings-body'),
-    })`)));
     await cdp.waitFor(
       `document.querySelector('#settings-body input[value="browser-demo"]')?.checked === false`,
       "the panel to come back with the skill off",

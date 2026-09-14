@@ -131,9 +131,19 @@ fn render_tasks(app : App, _shown : Runner) -> String {
 /// model is on the picker under the composer, the tokens and cost are beside it, and the one fact
 /// that has to stay at the top is which conversation this is. The path stays one hover away rather
 /// than in the line — the reader who needs it is looking for the file, not reading the page.
-fn title_node(app : App, shown : Runner) -> @html.Node {
-  let _ = app
-  @html.render_title(shown.name_or_id(), shown.path)
+///
+/// The wording is the sidebar's, through `App::session_label` and then `@html.display_label`: the
+/// name the reader gave, else the first question, else the words a session with nothing in it is
+/// shown under. One rule for both places, because they are the same answer to the same question —
+/// a reader who renames a session in the list sees the line above the conversation change with it,
+/// and a reader comparing the two is checking that they agree.
+///
+/// `modified_of` is how the cache is asked, the same way the delete notice asks it: the sidebar has
+/// already listed this session by the time the title is built, so the answer is a map lookup rather
+/// than a read of the file.
+async fn title_node(app : App, shown : Runner) -> @html.Node {
+  let label = app.session_label(shown.path, app.labels.modified_of(shown.path))
+  @html.render_title(@html.display_label(label), shown.path)
 }
 
 ///|

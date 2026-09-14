@@ -225,15 +225,6 @@ fn Runner::latest_log(self : Runner) -> @core.Session {
 }
 
 ///|
-/// What the title line calls this session.
-fn Runner::name_or_id(self : Runner) -> String {
-  match self.session.name() {
-    Some(name) => name
-    None => short_id(self.path)
-  }
-}
-
-///|
 /// Whether this session has work in flight.
 fn Runner::is_running(self : Runner) -> Bool {
   self.busy || self.waiting > 0

@@ -102,7 +102,10 @@ async fn LabelCache::label(
     Some(facts) => return facts
     None => ()
   }
-  let text = @platform.read_text(path)
+  // Empty for a file that is not there. A session is created before it is written — the first
+  // prompt is what puts a line in it — and something asking what to call it in that window is
+  // asking about a conversation with nothing in it yet, which is a description and not a failure.
+  let text = @platform.read_text_or_none(path).unwrap_or("")
   let facts : SessionFacts = {
     // The first user message is near the top of the file, so the label only needs the beginning.
     label: @core.session_label(prefix_of(text, 16 * 1024)),

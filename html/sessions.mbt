@@ -330,6 +330,24 @@ fn render_workspace(workspace : WorkspaceItem, now : Int64) -> Node {
 }
 
 ///|
+/// What to call a session nobody has named and nothing has been asked in yet.
+///
+/// The two places a session is named — the row in the list and the line above the conversation —
+/// take this from one function, because they are one answer: a reader who looks at the top of the
+/// page and then at the sidebar is checking that they agree, and a second copy of the wording is
+/// how they stop agreeing.
+///
+/// Plain words rather than the id: an id is true of the file and says nothing a reader can act on,
+/// and a blank reads as a row that failed to load.
+pub fn display_label(label : String) -> String {
+  if label == "" {
+    "New session"
+  } else {
+    label
+  }
+}
+
+///|
 /// One session, as a single line: what it is called, how long ago it was, and the two things that
 /// can be done to it.
 ///
@@ -354,7 +372,7 @@ fn render_session_row(item : SessionItem, now : Int64) -> Node {
   //
   // The same string is the accessible name of its controls, so what a screen reader announces for
   // "delete" is the name the reader can see on the row.
-  let named = if item.label == "" { "New session" } else { item.label }
+  let named = display_label(item.label)
   let inside : Array[Node] = []
   if item.running {
     // A dot rather than text: it has to be legible at a glance from any workspace. Before the
