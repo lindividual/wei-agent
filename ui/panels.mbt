@@ -1,13 +1,15 @@
 ///|
-/// The regions: the bar, the figures on it, the model picker, the two side panels, the transcript.
+/// The regions: the title above the conversation, the figures under the composer, the model picker
+/// beside them, the two side panels, the transcript.
 ///
 /// Each of these is something the browser can be sent a patch for, so each is a function from the
 /// app's state to a node. Nothing here decides anything about a turn or a request — it renders what
 /// `session.mbt` says is true and what `turn.mbt` has produced.
 ///
 /// The one structural rule is what is *not* a region: the composer is not, because replacing it would
-/// take whatever the reader is typing with it. The model picker inside it is, which is why it is
-/// patched on its own rather than as part of the form around it.
+/// take whatever the reader is typing with it. The three regions that sit in or beside it are — the
+/// figures, the model picker and Stop — which is why each is patched on its own rather than as part
+/// of the form around it.
 
 ///|
 /// Take the process table the job panel filters against.
@@ -97,6 +99,7 @@ fn render_jobs(app : App, now : Int64) -> String {
       status: job.status.to_string(),
       age_ms: job.age_ms(now),
       pids,
+      session: job.session,
     })
   }
   @html.render_jobs(items, now).render()
@@ -122,38 +125,15 @@ fn render_tasks(app : App, _shown : Runner) -> String {
 }
 
 ///|
-/// What is open: the session, the model, and — once the turn reporting fills them in — the
-/// token and cost figures for it.
+/// The session's title, pinned above the conversation.
 ///
-/// The usage figures are `right` rather than chips appended after the model chip: a session with
-/// no usage renders none of them, and the settings panel — which sits after them — must not
-/// depend on a turn having been run.
-///
-/// Async because building the panel may need to scan for skills, the first time a working
-/// directory is looked at; after that it is a map lookup.
-async fn bar_node(app : App, shown : Runner) -> @html.Node {
-  @html.render_bar(
-    [
-      // No workspace chip: the sidebar already marks which one is active, and repeating it cost
-      // the width that kept the figures on the same line.
-      // The id rather than the file name: the timestamp in the name is noise in a bar that is
-      // read at a glance, and the full path is one hover away.
-      // A name if the reader gave one; otherwise the id, which is at least short and matches the
-      // file on disk.
-      @html.chip("session", shown.name_or_id(), detail=shown.path),
-      @html.chip(
-        "model",
-        shown.model_id,
-        detail="\{workspace_name(shown.cwd)} · \{shown.cwd} · change it with the picker below or /model",
-      ),
-    ],
-    right=usage_chips(
-      @core.model_spec_for(shown.model_id).0.context_window,
-      app.overhead_tokens(app.system_prompt(shown)),
-      shown,
-    ),
-    trailing=[@html.raw(render_settings_panel(app, shown))],
-  )
+/// What is left of the information bar once its figures followed the input they describe: the
+/// model is on the picker under the composer, the tokens and cost are beside it, and the one fact
+/// that has to stay at the top is which conversation this is. The path stays one hover away rather
+/// than in the line — the reader who needs it is looking for the file, not reading the page.
+fn title_node(app : App, shown : Runner) -> @html.Node {
+  let _ = app
+  @html.render_title(shown.name_or_id(), shown.path)
 }
 
 ///|
@@ -206,8 +186,8 @@ fn model_picker(_app : App, shown : Runner) -> @html.ModelPicker {
 ///|
 /// Just the usage chips, as the region a turn refreshes.
 ///
-/// Separate from the bar so that a turn moving a number does not rebuild — and therefore does not
-/// clear — the settings panel beside it.
+/// Separate from the composer so that a turn moving a number does not rebuild it — and therefore
+/// does not touch whatever the reader is typing.
 async fn usage_node(app : App, shown : Runner) -> @html.Node {
   @html.render_usage(
     usage_chips(

@@ -257,7 +257,7 @@ async function main() {
         .filter(e => e.rect[3] < 24 || e.rect[2] < 24)
         .map(e => ({ tag: e.tag, text: e.text.slice(0, 30), rect: e.rect })),
       // How the width is spent, and how far down the page the content starts.
-      regions: visible.filter(e => ['bar', 'sidebar', 'transcript', 'composer', 'status'].includes(e.id))
+      regions: visible.filter(e => ['title', 'sidebar', 'transcript', 'composer', 'status'].includes(e.id))
         .map(e => ({ id: e.id, rect: e.rect })),
       // How much text fits on a line where the reading actually happens. 45-90 characters is the
       // usual comfortable range; outside it, the eye loses the line.
@@ -269,15 +269,18 @@ async function main() {
         const width = p.getBoundingClientRect().width;
         return { widthOfLine: Math.round(width), fontSize: size, approxChars: Math.round(width / (size * 0.5)) };
       })(),
-      // How the viewport's height is spent: chrome (bar + composer + status) versus conversation.
+      // How the viewport's height is spent: chrome (title + composer + status) versus conversation.
+      // The composer is two lines now — the box, then the figures and the model picker under it —
+      // which is the price of the figures being next to the input they describe rather than on a
+      // bar the reader scrolls past.
       heightBudget: (() => {
         const h = window.innerHeight;
-        const bar = document.getElementById('bar')?.getBoundingClientRect().height ?? 0;
+        const title = document.getElementById('title')?.getBoundingClientRect().height ?? 0;
         const composer = document.getElementById('composer')?.getBoundingClientRect().height ?? 0;
         const status = document.getElementById('status')?.getBoundingClientRect().height ?? 0;
-        return { viewport: h, bar: Math.round(bar), composer: Math.round(composer),
-                 status: Math.round(status), chrome: Math.round(bar + composer + status),
-                 chromePercent: Math.round(((bar + composer + status) / h) * 100) };
+        return { viewport: h, title: Math.round(title), composer: Math.round(composer),
+                 status: Math.round(status), chrome: Math.round(title + composer + status),
+                 chromePercent: Math.round(((title + composer + status) / h) * 100) };
       })(),
       // What the status line is saying, and how loud it is.
       statusLine: (() => {

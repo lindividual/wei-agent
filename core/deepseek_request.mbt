@@ -520,3 +520,97 @@ pub fn build_deepseek_request(spec : RequestSpec) -> Json {
   }
   Json::object(Map(fields))
 }
+
+// ── Request drift ──────────────────────────────────────────────────────────
+
+///|
+/// How one request differs from the previous one in the same turn.
+///
+/// The provider bills a request in two parts: the leading bytes it can read from the prefix cache
+/// of an earlier request, and the rest, which is charged as fresh input at fifty times the price.
+/// So the figure that decides what a call costs is not how big the request is but how far into it
+/// the two requests stop agreeing — one rewritten message in the middle ends the shared prefix
+/// there and re-bills everything after it.
+///
+/// What this measures is therefore `changed_bytes`, and what makes it trustworthy is that it is
+/// computed from the same encoding the body is built from (`convert_messages`), so it is a
+/// statement about the bytes that went out rather than about what the code intended to send.
+pub(all) struct RequestDrift {
+  /// Messages in this request, system prompt included.
+  messages : Int
+  /// Bytes those messages encode to.
+  bytes : Int
+  /// Index of the first message that differs from the previous request's. Equal to
+  /// `previous_messages` when this request only grew.
+  first_changed : Int
+  /// Messages in the previous request, or zero when there was none.
+  previous_messages : Int
+  /// Bytes from `first_changed` to the end: the part that cannot be served from the previous
+  /// request's cache.
+  changed_bytes : Int
+  /// False for the first request of a turn, where there is nothing to compare against — not the
+  /// same as a request that changed nothing, which is why it is carried rather than inferred from
+  /// a zero.
+  comparable : Bool
+} derive(Eq, Debug)
+
+///|
+/// Whether this request is the previous one plus an appended tail.
+///
+/// The property worth having: an append-only request is read from cache in full and only its tail
+/// is billed, which is why the boundary that releases messages to trimming is quantized and why
+/// this is measured at all.
+pub fn RequestDrift::appended_only(self : RequestDrift) -> Bool {
+  self.comparable && self.first_changed == self.previous_messages
+}
+
+///|
+/// Measure one request against the previous one.
+///
+/// `previous` is `None` for the first request of a turn: nothing was sent yet, so everything is
+/// fresh and there is no drift to report.
+pub fn request_drift(
+  previous : Array[Json]?,
+  current : Array[Json],
+) -> RequestDrift {
+  let sizes : Array[Int] = []
+  for message in current {
+    sizes.push(utf8_bytes(message.stringify()))
+  }
+  let mut bytes = 0
+  for size in sizes {
+    bytes += size
+  }
+  match previous {
+    None =>
+      {
+        messages: current.length(),
+        bytes,
+        first_changed: 0,
+        previous_messages: 0,
+        changed_bytes: bytes,
+        comparable: false,
+      }
+    Some(before) => {
+      let mut first = 0
+      while first < before.length() &&
+            first < current.length() &&
+            before[first] == current[first] {
+        first += 1
+      }
+      let mut changed = 0
+      for i in first..<current.length() {
+        changed += sizes[i]
+      }
+      {
+        messages: current.length(),
+        bytes,
+        first_changed: first,
+        previous_messages: before.length(),
+        changed_bytes: changed,
+        // The one case where the two requests are identical: comparable, nothing changed.
+        comparable: true,
+      }
+    }
+  }
+}

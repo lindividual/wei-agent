@@ -53,3 +53,51 @@ test "the earlier-turns reply corrects the scroll offset" {
     msg="nothing compensates for the height added above the reader",
   )
 }
+
+///|
+/// The undo note takes itself away.
+///
+/// The offer after a delete is a courtesy, not a control, and a reader who has moved on should not
+/// have to dismiss it. Two halves, and both are asserted here because the pair is what makes it a
+/// rule rather than a coincidence: the server stops rendering the note once its window has passed
+/// (`html/render_deleted` tests that), and the page takes it off screen on the same deadline for the
+/// reader who is already looking at it. Without this half, the note would sit there until the next
+/// region refresh — which may be a turn that never comes.
+test "an expired element takes itself off the page" {
+  let js = client_script()
+  assert_true(
+    js.contains("[data-expires]"),
+    msg="nothing sweeps the elements that carry a deadline",
+  )
+  assert_true(
+    js.contains("Number(node.dataset.expires) <= now"),
+    msg="the sweep does not compare the deadline against the reader's clock",
+  )
+  assert_true(
+    js.contains("node.remove()"),
+    msg="an expired element stays on the page",
+  )
+}
+
+///|
+/// A click on anything naming a session opens that session.
+///
+/// The delegation used to be scoped to `#sessions`, which was right while the sidebar was the only
+/// thing that named one. Two panels name one now — the row of a running turn, and the command of a
+/// background job — and they are the two places a reader most wants to follow the work to. A scope
+/// left in place is not a broken page but a dead label, so the selector is pinned here: whatever
+/// carries `data-session` is a way in, and the panels do not have to remember to live in the sidebar.
+///
+/// The one deliberate exclusion is still the transcript, and it is an exclusion by *absence* of the
+/// attribute rather than by scope (see `html/render_transcript`).
+test "every element naming a session is a way to open it" {
+  let js = client_script()
+  assert_true(
+    js.contains("closest('[data-session]')"),
+    msg="a click on a panel label would no longer open the session it names",
+  )
+  assert_false(
+    js.contains("closest('#sessions [data-session]')"),
+    msg="the delegation is scoped to the sidebar again, which leaves the panels' labels dead",
+  )
+}

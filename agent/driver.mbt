@@ -146,6 +146,15 @@ pub(all) struct TurnResult {
   /// "I was interrupted" — the interruption is the end of what it wrote — so unless the caller
   /// notices the stop reason, the reader is left with a sentence that stops mid-thought.
   truncated : Bool
+  /// What each request of this turn had in common with the one before it.
+  ///
+  /// One entry per model call, in order. This is the turn's own account of the thing that
+  /// actually decides what it cost: the provider bills the bytes it can read from the previous
+  /// request's prefix cache and charges the rest as fresh input at fifty times the price, so a
+  /// request that is the previous one plus a tail is nearly free while the same request with one
+  /// message rewritten in the middle is nearly all fresh. `usage` says what was billed; this says
+  /// why.
+  request_drift : Array[@core.RequestDrift]
 } derive(Debug)
 
 ///|
@@ -382,6 +391,35 @@ async fn request_model(
 }
 
 ///|
+/// The messages array of a built request body — the part a provider's prefix cache is about.
+///
+/// Taken out of the body rather than re-derived from the spec, so the figure describes the bytes
+/// that went out. The rest of the body (the tool schemas, the sampling knobs, the thinking
+/// setting) is either shared by every request or constant within a model, so it cannot be where
+/// the cached prefix ends.
+fn body_messages(body : Json) -> Array[Json] {
+  match body {
+    Object(fields) =>
+      match fields.get("messages") {
+        Some(Array(items)) => items
+        _ => []
+      }
+    _ => []
+  }
+}
+
+///|
+/// One model call and what it had in common with the previous one.
+priv struct ModelCall {
+  session : @core.Session
+  message : @core.Message
+  /// What this request shared with the last one, for the turn to report.
+  drift : @core.RequestDrift
+  /// The messages this request carried, to compare the next request against.
+  messages : Array[Json]
+}
+
+///|
 /// Call the model once and append the result.
 ///
 /// The response is parsed as it arrives so `on_delta` can report content while
@@ -395,8 +433,12 @@ async fn call_model(
   timestamp : Int64,
   on_delta : async (@core.StreamEvent) -> Unit,
   stopping : () -> Bool,
-) -> (@core.Session, @core.Message) {
+  /// The previous request of this turn, or `None` for its first.
+  previous : Array[Json]?,
+) -> ModelCall {
   let body = request_for(ctx, session, thinking_level)
+  let messages = body_messages(body)
+  let drift = @core.request_drift(previous, messages)
   let message = request_model(
     ctx,
     body.stringify(),
@@ -411,7 +453,7 @@ async fn call_model(
     // When the response finished, not when the request went out.
     now_ms(),
   )
-  (updated, message)
+  { session: updated, message, drift, messages, }
 }
 
 ///|
@@ -970,6 +1012,12 @@ pub async fn run_turn(
   let mut cost_limit_hit = false
   let mut time_limit_hit = false
   let mut truncated = false
+  // The drift of each request against the one before it, and the request to compare the next
+  // one against. Carried across the loop rather than recomputed, because what matters is the
+  // sequence: the prefix a request can be served from is the previous request's, not some
+  // ideal one.
+  let drifts : Array[@core.RequestDrift] = []
+  let mut previous_request : Array[Json]? = None
   // The deadline is read from the clock here rather than derived from the caller's `timestamp`,
   // which is the time an entry is stamped with and not necessarily "now" — a resumed session can
   // pass an older one. Measuring from this moment is the only reading that bounds how long the
@@ -1014,10 +1062,13 @@ pub async fn run_turn(
       committed(session)
     }
     rounds += 1
-    let (updated, message) = call_model(
-      ctx, session, level, timestamp, report, stopping,
+    let call = call_model(
+      ctx, session, level, timestamp, report, stopping, previous_request,
     )
-    session = updated
+    session = call.session
+    let message = call.message
+    drifts.push(call.drift)
+    previous_request = Some(call.messages)
     model_calls += 1
     usage = add_usage(usage, usage_of(message))
     // As soon as the call is in the log, so the reader watching a long turn sees what it has spent
@@ -1088,5 +1139,6 @@ pub async fn run_turn(
     cost_limit_hit,
     time_limit_hit,
     truncated,
+    request_drift: drifts,
   }
 }

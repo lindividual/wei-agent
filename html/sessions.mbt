@@ -68,54 +68,54 @@ pub fn render_sessions(
   notice? : DeletedNotice? = None,
 ) -> Node {
   let body : Array[Node] = []
+  // First, above every workspace it could add to: the list below it is the answer to the same
+  // question, and a reader who has no workspace at all sees the way in before the emptiness.
+  body.push(render_add_workspace(can_pick))
   for workspace in workspaces {
     body.push(render_workspace(workspace, now))
   }
-  if body.is_empty() {
+  if workspaces.is_empty() {
     body.push(
       el(Div, attrs=[cls("empty")], children=[txt("no saved sessions yet")]),
     )
   }
-  // The add row belongs with the list it adds to, and it is present even when the list is
-  // empty: that is exactly the state a first project is added in.
-  body.push(render_add_workspace(can_pick))
-  // At the end rather than the top. It is about a row that was *just* here, and the eye is at the
+  // Last, and only while it is fresh. It is about a row that was *just* here, and the eye is at the
   // row it was on — the end of the list is where a reader who deleted something and changed their
-  // mind will be looking.
-  body.push(render_deleted(notice))
+  // mind will be looking. It goes away on its own; see `render_deleted`.
+  match notice {
+    Some(deleted) if still_undoable(deleted, now) =>
+      body.push(render_deleted(Some(deleted)))
+    _ => ()
+  }
   el(Div, attrs=[attr("id", "sessions")], children=body)
 }
 
 ///|
-/// The row that adds a workspace: a folder to pick, and a path to type.
+/// The row that adds a workspace.
 ///
-/// Both, because neither covers the other. A dialog is what the reader who does not know the path
-/// by heart needs, and it is only there when the host has a desktop session to draw it on; a field
-/// is what works over SSH, from a phone, or for a path that is faster to paste than to navigate to.
-/// The chooser sits above the field on a line of its own rather than beside it: the sidebar is
-/// 272px wide, and three controls on one line would each be too narrow to read.
+/// One control, not two. Where the host can open a folder chooser, that is the whole row: it is
+/// what a reader who does not know the path by heart needs, and a path field beside it is a second
+/// way to answer a question the dialog already answers. The field is kept for the hosts that have
+/// no chooser — over SSH the browser is on another computer, and a dialog on the server's screen is
+/// one nobody in the room can close — and for those it is the only way in, so it is not a fallback
+/// that can rot.
 pub fn render_add_workspace(can_pick : Bool) -> Node {
-  let children : Array[Node] = []
   if can_pick {
-    // First, so it is the first thing tab reaches: the answer for a reader who does not already
-    // know the path. Deliberately outside the form below — it answers with a dialog, not with the
-    // text in the field, and a button that could submit the form would add whatever path happened
-    // to be half-typed.
-    children.push(
+    return el(Div, attrs=[cls("add-workspace")], children=[
       el(
         Button,
         attrs=[
           attr("type", "button"),
           attr("id", "workspace-pick"),
-          attr("class", "pick"),
+          cls("add"),
           attr("title", "Choose a folder on this computer"),
         ],
-        children=[txt("Choose a folder…")],
+        children=[txt("Add workspace")],
       ),
-    )
+    ])
   }
-  // The form is the path, and Enter in the field submits it the same way `Add` does.
-  children.push(
+  // The form is the path, and Enter in the field submits it the same way the button does.
+  el(Div, attrs=[cls("add-workspace")], children=[
     el(Form, attrs=[attr("id", "add-workspace")], children=[
       el(Input, attrs=[
         attr("id", "workspace-path"),
@@ -126,8 +126,7 @@ pub fn render_add_workspace(can_pick : Bool) -> Node {
       ]),
       el(Button, attrs=[attr("type", "submit")], children=[txt("Add")]),
     ]),
-  )
-  el(Div, attrs=[cls("add-workspace")], children~)
+  ])
 }
 
 ///|
@@ -135,7 +134,7 @@ pub fn render_add_workspace(can_pick : Bool) -> Node {
 /// for different reasons — a tool starting versus a session being written — so they are
 /// replaced separately rather than as one block.
 pub fn render_sidebar(nodes : Array[Node]) -> Node {
-  // The fold-away control is part of the sidebar rather than the information bar on purpose:
+  // The fold-away control is part of the sidebar rather than the title line on purpose:
   // the sidebar is the one region a refresh never replaces, so the open/closed state survives a
   // redraw. The bar is rebuilt on every turn and every settings change, and a toggle there would
   // spring shut under the reader's hand.
@@ -153,7 +152,42 @@ pub(all) struct DeletedNotice {
   path : String
   /// What the row called it, so the notice confirms *which* conversation disappeared.
   label : String
+  /// When the delete happened, so the offer can stop being shown.
+  ///
+  /// Carried here rather than left to a timer with a callback: the notice is rendered from state,
+  /// and a rule that says "show it for five seconds" has to be part of that state or the next
+  /// redraw — which happens on a turn starting somewhere else — brings it back.
+  at : Int64
 } derive(Eq, Debug)
+
+///|
+/// How long the offer to undo a delete stands.
+///
+/// Long enough to notice a mis-click and act on it, short enough that the line is gone before the
+/// next thing the reader does. A permanent offer is a row that has to be dismissed, and there is
+/// no gesture here that means "I meant it".
+pub fn undo_window_ms() -> Int64 {
+  5000L
+}
+
+///|
+/// Whether the offer is still worth showing — and so whether it is still worth honouring.
+///
+/// One rule with two callers: this decides whether the line is rendered at all, and the undo route
+/// asks it before putting a file back. A page left open past the deadline and a request replayed
+/// from a stale tab are the same question, and they must not answer it differently.
+pub fn still_undoable(notice : DeletedNotice, now : Int64) -> Bool {
+  now - notice.at < undo_window_ms()
+}
+
+///|
+/// When the offer stops standing, as an absolute time the page can compare against its own clock.
+///
+/// Absolute rather than a countdown, because the page and the server do not share a clock offset
+/// and the page's own `Date.now()` is the one that knows when the reader's second has passed.
+fn undo_deadline(notice : DeletedNotice) -> Int64 {
+  notice.at + undo_window_ms()
+}
 
 ///|
 /// The line that says what was deleted, with the way back.
@@ -165,30 +199,45 @@ pub(all) struct DeletedNotice {
 /// already stopped reading. Putting the label here instead means the thing they clicked is named
 /// at the moment they can still be surprised by it, with the fix one click away.
 ///
+/// It also goes away by itself (`undo_window_ms`). An offer that stays until it is used is a row
+/// the reader has to dismiss to be rid of, which is a second decision charged to a gesture they
+/// have already finished making.
+///
 /// The file is renamed rather than removed, so this button is a convenience and not the only way
 /// back: the bytes are still on disk under a predictable name, and `restore` is a rename.
 ///
-/// Always rendered, empty when there is nothing to undo — a patch target has to exist in the page
-/// or the first delete after a reload would have nowhere to land.
+/// Rendered empty when there is none. The whole list is one patch target, so there is no container
+/// here that has to exist for a later delete to land in.
 pub fn render_deleted(notice : DeletedNotice?) -> Node {
   let children : Array[Node] = match notice {
     None => []
     Some(deleted) =>
       [
-        el(Div, attrs=[cls("undo")], children=[
-          el(Span, attrs=[cls("label"), attr("title", deleted.path)], children=[
-            txt("Deleted \{deleted.label}"),
-          ]),
-          el(
-            Button,
-            attrs=[
-              cls("undo-button"),
-              attr("type", "button"),
-              attr("data-undo", deleted.path),
-            ],
-            children=[txt("Undo")],
-          ),
-        ]),
+        el(
+          Div,
+          attrs=[
+            cls("undo"),
+            // The page takes the line away when this passes. The server stops rendering it on the
+            // same rule (`still_undoable`), so a reload after the deadline shows nothing either —
+            // this attribute is what makes it go away while the reader is looking at it, without a
+            // frame a second from the server to say "still nothing".
+            attr("data-expires", "\{undo_deadline(deleted)}"),
+          ],
+          children=[
+            el(Span, attrs=[cls("label"), attr("title", deleted.path)], children=[
+              txt("Deleted \{deleted.label}"),
+            ]),
+            el(
+              Button,
+              attrs=[
+                cls("undo-button"),
+                attr("type", "button"),
+                attr("data-undo", deleted.path),
+              ],
+              children=[txt("Undo")],
+            ),
+          ],
+        ),
       ]
   }
   el(Div, attrs=[attr("id", "deleted")], children~)

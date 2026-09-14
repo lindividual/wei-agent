@@ -65,7 +65,8 @@ struct Runner {
   mut session : @core.Session
   /// The log including the turn that is running, as the last commit left it.
   ///
-  /// Set by the driver as the turn writes, and cleared when it ends. The figures on the bar are
+  /// Set by the driver as the turn writes, and cleared when it ends. The figures under the composer
+  /// are
   /// read from here, because each model call's tokens and cache reads are known the moment it
   /// returns and waiting for the turn to end would hide the whole of a twenty-round turn. It is
   /// also the newest copy of the log, which is what a failed turn has to be rendered from — the
@@ -162,9 +163,9 @@ fn Runner::new(
       None => None
     }
   }
-  // The working directory is not repeated here. It is on the workspace row the reader just clicked
-  // and in the bar chip's tooltip, and a temp path with a hash in the middle was most of the line
-  // while the part worth reading — how much was opened — was a couple of words at the front.
+  // The working directory is not repeated here. It is on the workspace row the reader just clicked,
+  // and a temp path with a hash in the middle was most of the line while the part worth reading —
+  // how much was opened — was a couple of words at the front.
   let status = match ending {
     Some(why) =>
       if session.entries.length() == 0 {
@@ -214,8 +215,8 @@ fn Runner::new(
 /// the committed session otherwise.
 ///
 /// One function because "which copy" is the thing that is easy to get wrong, and every reader that
-/// wants the log as it now stands has to give the same answer: the bar's figures while a turn runs,
-/// and the rendering of a turn that failed half way through.
+/// wants the log as it now stands has to give the same answer: the figures under the composer while
+/// a turn runs, and the rendering of a turn that failed half way through.
 fn Runner::latest_log(self : Runner) -> @core.Session {
   match self.in_flight_session {
     Some(in_flight) => in_flight
@@ -224,7 +225,7 @@ fn Runner::latest_log(self : Runner) -> @core.Session {
 }
 
 ///|
-/// What the bar calls this session.
+/// What the title line calls this session.
 fn Runner::name_or_id(self : Runner) -> String {
   match self.session.name() {
     Some(name) => name
@@ -310,9 +311,9 @@ async fn App::load_skills(self : App, cwd : String) -> Unit {
 /// the agent works expects the next turn to be the one that picks the edit up. The two callers
 /// await the same function, so they still cannot disagree.
 ///
-/// It is read more often than once per turn now that the bar's context figure is refreshed on every
-/// commit of a running turn, which is a handful of stats and one small read — the price of the
-/// figure meaning what it says at the moment it is read.
+/// It is read more often than once per turn now that the context figure under the composer is
+/// refreshed on every commit of a running turn, which is a handful of stats and one small read —
+/// the price of the figure meaning what it says at the moment it is read.
 ///
 /// The instructions come before the catalog, which is the order of specificity: how this workspace
 /// wants to work, then what can be asked of it.

@@ -169,11 +169,11 @@ async fn run_prompt(
       ).to_sse(),
     )
   }
-  // The bar's figures are per session and come from the log, so they are recomputed when a
-  // turn changes them rather than on every frame — and only the figures are replaced, so a reader
-  // typing a key into the settings panel does not lose it because a turn ended or a model call
-  // came back.
-  let refresh_bar = async fn() {
+  // The figures under the composer are per session and come from the log, so they are recomputed
+  // when a turn changes them rather than on every frame — and only the figures are replaced, so a
+  // reader typing a key into the settings panel does not lose it because a turn ended or a model
+  // call came back.
+  let refresh_figures = async fn() {
     app.hub.broadcast(
       @html.Patch::Replace(
         target="usage",
@@ -181,13 +181,13 @@ async fn run_prompt(
       ).to_sse(),
     )
   }
-  // The same refresh, only when the committing turn belongs to the session on screen. The bar's
-  // figures are the *displayed* session's, so a turn running somewhere else would send the same
-  // bytes to every tab on every one of its model calls, and several sessions running at once is
-  // exactly when that adds up.
-  let refresh_bar_if_shown = async fn() {
+  // The same refresh, only when the committing turn belongs to the session on screen. Those figures
+  // are the *displayed* session's, so a turn running somewhere else would send the same bytes to
+  // every tab on every one of its model calls, and several sessions running at once is exactly when
+  // that adds up.
+  let refresh_figures_if_shown = async fn() {
     if app.displayed == runner.path {
-      refresh_bar()
+      refresh_figures()
     }
   }
   // The model picker locks while a turn runs, and that is a change to the *displayed* session's
@@ -206,7 +206,7 @@ async fn run_prompt(
   status("working…")
   refresh_sidebar()
   refresh_tasks()
-  refresh_bar()
+  refresh_figures()
   refresh_picker()
   refresh_stop()
   refresh_jobs()
@@ -462,7 +462,7 @@ async fn run_prompt(
         // the log the moment the response ends.
         on_commit=async fn(in_flight) {
           runner.in_flight_session = Some(in_flight)
-          refresh_bar_if_shown()
+          refresh_figures_if_shown()
         },
         on_tool_process=handle => {
           runner.phase = match handle {
@@ -625,7 +625,7 @@ async fn run_prompt(
   runner.in_flight_session = None
   refresh_sidebar()
   refresh_tasks()
-  refresh_bar()
+  refresh_figures()
   // Unlocked again: the turn is over, so the model can be changed for the next one.
   refresh_picker()
   // And there is nothing left to stop in this session.

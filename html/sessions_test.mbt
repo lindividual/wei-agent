@@ -299,39 +299,79 @@ test "a titled workspace and the add row" {
 }
 
 ///|
-/// The folder chooser appears only when the host can open one, and the path field stays either
-/// way.
+/// One way in, not two: the chooser where there is one, the path field where there is not.
 ///
-/// Two claims in one test on purpose: the button's presence is a function of `can_pick`, and the
-/// field is not. A host with no desktop session gets a row that still adds workspaces, which is the
-/// half that must not be lost when the dialog is unavailable.
-test "the chooser is offered only where it can open" {
+/// The reader who does not know the path by heart is the one this row is for, and a dialog answers
+/// them outright — a field beside it is a second way to answer a question that is already answered.
+/// The field is not a fallback that can rot: over SSH it is the only way in.
+test "one way in: the chooser, or the field where there is no chooser" {
   let offered = render_add_workspace(true).render()
   assert_true(offered.contains("id=\"workspace-pick\""), msg=offered)
-  // Before the field it fills in, so a reader who does not know the path reaches it first.
-  let pick_at = match offered.find("id=\"workspace-pick\"") {
-    Some(at) => at
-    None => -1
-  }
-  let field_at = match offered.find("id=\"workspace-path\"") {
-    Some(at) => at
-    None => -1
-  }
-  assert_true(pick_at >= 0 && field_at >= 0 && pick_at < field_at, msg=offered)
-  // Outside the form, so it cannot submit one: the dialog answers with a folder, and a button that
-  // submitted the field beside it would add whatever path happened to be half-typed.
-  let form_at = match offered.find("<form") {
-    Some(at) => at
-    None => -1
-  }
-  assert_true(form_at >= 0 && pick_at < form_at, msg=offered)
+  assert_true(offered.contains("Add workspace"), msg=offered)
+  // One control, so no field beside it and no form at all: there is nothing here that could be
+  // submitted with a half-typed path.
+  assert_false(offered.contains("id=\"workspace-path\""), msg=offered)
+  assert_false(offered.contains("<form"), msg=offered)
   assert_true(offered.contains("type=\"button\""), msg=offered)
-  assert_true(offered.contains("id=\"workspace-path\""), msg=offered)
-  // Without a chooser: no button, and the path field is still there.
+  // Without a chooser: no button, and the path field is the whole row.
   let typed = render_add_workspace(false).render()
   assert_false(typed.contains("id=\"workspace-pick\""), msg=typed)
   assert_true(typed.contains("id=\"workspace-path\""), msg=typed)
   assert_true(typed.contains("id=\"add-workspace\""), msg=typed)
+}
+
+///|
+/// The add row is the first thing in the list, above the workspaces it could add to.
+///
+/// A reader with no saved workspace sees the way in before the emptiness, and a reader with twenty
+/// does not have to scroll past them to find it.
+test "the add row comes before the workspaces" {
+  let html = render_sessions(
+    [workspace("/work/one", true, [session("/a.jsonl", "first", true)], 0)],
+    1_700_000_000_000L,
+    true,
+  ).render()
+  let add = match html.find("id=\"workspace-pick\"") {
+    Some(at) => at
+    None => -1
+  }
+  let list = match html.find("class=\"workspace active\"") {
+    Some(at) => at
+    None => -1
+  }
+  assert_true(add >= 0 && list >= 0 && add < list, msg=html)
+}
+
+///|
+/// The offer to undo a delete stands for five seconds and then is not rendered at all.
+///
+/// Freshness is decided here rather than by a timer elsewhere, because the panel is redrawn for
+/// reasons that have nothing to do with the delete — a turn starting in another session — and a
+/// notice whose lifetime lived outside the state would come back on the next redraw.
+test "the undo offer expires" {
+  let now = 1_700_000_000_000L
+  let notice : DeletedNotice = {
+    path: "/store/x.jsonl",
+    label: "gone",
+    at: now,
+  }
+  let fresh = render_sessions([], now + 4999L, true, notice=Some(notice)).render()
+  assert_true(fresh.contains("data-undo=\"/store/x.jsonl\""), msg=fresh)
+  assert_true(fresh.contains("Deleted gone"), msg=fresh)
+  let stale = render_sessions(
+    [],
+    now + undo_window_ms(),
+    true,
+    notice=Some(notice),
+  ).render()
+  assert_false(stale.contains("data-undo="), msg=stale)
+  // Not an empty box left behind: the whole line goes, which is the point of expiring it.
+  assert_false(stale.contains("Deleted gone"), msg=stale)
+  // And with nothing deleted there is nothing to show.
+  assert_false(
+    render_sessions([], now, true).render().contains("data-undo="),
+    msg="a notice should not appear from nowhere",
+  )
 }
 
 ///|

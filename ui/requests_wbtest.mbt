@@ -432,10 +432,12 @@ async test "every region the snapshot replaces exists in the page" {
       _ => ()
     }
   }
-  // Named rather than counted: "six replaces" would pass with the wrong six. Every repeatable
-  // region is here, and the status line is the eighth frame.
+  // Named rather than counted: "seven replaces" would pass with the wrong seven. Every repeatable
+  // region is here, and the status line is the eighth frame. What is *not* here is as deliberate:
+  // the composer, which holds whatever the reader is typing, and the settings panel, which is drawn
+  // once and never replaced.
   assert_eq(targets, [
-    "transcript", "sessions", "tasks", "jobs", "bar", "model-picker", "stop",
+    "transcript", "sessions", "tasks", "jobs", "title", "model-picker", "stop",
   ])
   assert_eq(patches.length(), 8)
   match patches[7] {
@@ -454,7 +456,7 @@ async test "the page carries the composer and the picker exactly once" {
   for
     id in [
       "transcript", "sessions", "composer", "prompt", "send", "stop", "status", "model-picker",
-      "bar", "tasks", "jobs",
+      "title", "usage", "tasks", "jobs", "settings-body",
     ] {
     let wanted = "id=\"" + id + "\""
     assert_eq(
@@ -472,16 +474,18 @@ async test "the page carries the composer and the picker exactly once" {
 }
 
 ///|
-/// A host that *can* open a dialog offers the button, next to the path field it complements.
+/// A host that *can* open a dialog gets the chooser, and only the chooser.
 async test "a host with a chooser offers it in the sidebar" {
   let home = "_build/requests_test/\{@core.new_entry_id()}"
   @platform.make_dirs(home)
   let h = harness_with(home, true)
   let page = h.requests.page()
   assert_true(page.contains("id=\"workspace-pick\""), msg=page)
-  // Both ways to add are still there: the chooser cannot serve a reader who is not at this machine,
-  // and the field cannot serve one who does not know the path.
-  assert_true(page.contains("id=\"workspace-path\""), msg=page)
+  assert_true(page.contains("Add workspace"), msg=page)
+  // No path field beside it: on this host the field is a second way to answer a question the dialog
+  // already answers. A host without a chooser is the one that gets the field, and that is the test
+  // above this one.
+  assert_false(page.contains("id=\"workspace-path\""), msg=page)
 }
 
 // ── the queued display changes ─────────────────────────────────────────────
@@ -745,6 +749,36 @@ async test "undo restores the session and clears the offer" {
   h.requests.undo_delete(doomed)
   assert_true(@platform.path_exists(doomed), msg="undo should restore the file")
   assert_true(h.app.deleted is None, msg="a used offer should be gone")
+}
+
+///|
+/// An offer that has been on screen past its window is not acted on.
+///
+/// Two ways to reach this and neither is exotic: a tab left open while the reader does something
+/// else, and a POST replayed after a reconnect. Both arrive as a click on a button the page has
+/// already taken away (`ui/assets.mbt` sweeps it on the deadline the server rendered), and the file
+/// going back anyway would be a restore nobody asked for — of a session they deleted on purpose.
+///
+/// The offer is still cleared: it is spent either way, and leaving it would keep the panel redrawing
+/// a line that can no longer do anything.
+async test "an expired undo offer is refused rather than honoured" {
+  let h = harness()
+  let doomed = h.shown.path
+  h.requests.delete(doomed)
+  assert_true(h.app.deleted is Some(_), msg="the offer should be up")
+  // Aged past the window by hand: what is being asserted is the rule, not the passing of five
+  // seconds, and a test that slept for them would be a test nobody waits for.
+  let stale = match h.app.deleted {
+    Some(notice) => { ..notice, at: notice.at - @html.undo_window_ms(), }
+    None => fail("the offer should be up")
+  }
+  h.app.deleted = Some(stale)
+  h.requests.undo_delete(doomed)
+  assert_false(
+    @platform.path_exists(doomed),
+    msg="an expired offer must not bring the session back",
+  )
+  assert_true(h.app.deleted is None, msg="a spent offer should be gone")
 }
 
 ///|

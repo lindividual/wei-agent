@@ -26,6 +26,10 @@ pub fn build_system_prompt(
     "- Read before you write. Do not edit a file you have not read.\n" +
     "- Prefer several small, verifiable steps over one large change.\n" +
     "- When a command fails, read the error before retrying; do not repeat a failing command unchanged.\n" +
+    "- Reach for `script` when a step needs more than two or three reads, when you would loop or\n" +
+    "  aggregate over files, or when a command's raw output is much larger than the part you need:\n" +
+    "  it runs a program and returns a digest instead of the raw output. For a single file, `read`\n" +
+    "  is cheaper.\n" +
     "- Report what you did and what you found. If you could not finish a task, say so plainly rather than implying success.\n",
   )
   // In the order given, and skipping the empty ones: a caller assembles these from whatever the

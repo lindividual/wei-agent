@@ -57,14 +57,17 @@ pub fn stylesheet() -> String {
     // ── layout ──────────────────────────────────────────────────────────────
      ".layout { display: flex; align-items: flex-start; gap: var(--space-5); max-width: 82rem; margin: 0 auto; }",
     ".column { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 100vh; }",
-    ".bar { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); padding: var(--space-2) var(--space-4); background: var(--bg); border-bottom: 1px solid var(--line); }",
-    ".bar .spacer { flex: 1 1 auto; }", "#transcript { flex: 1 1 auto; padding: var(--space-5) var(--space-4) var(--space-6); }",
-    // The chips on the right are wrapped so a turn can replace just them. They used to be direct
-    // children of the bar, which meant refreshing a number rebuilt the bar — and once the settings
-    // panel lived there, closed whatever the reader had open in it.
-     ".bar .usage { display: inline-flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; }",
+    ".titlebar { position: sticky; top: 0; z-index: 2; display: flex; align-items: baseline; gap: var(--space-2); padding: var(--space-2) var(--space-4); background: var(--bg); border-bottom: 1px solid var(--line); font-size: var(--text-sm); }",
+    // The name takes the line and ellipsises; nothing else is on it. A reader scrolled far into an
+    // answer still has to be able to say which conversation this is.
+     ".titlebar .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }",
+    "#transcript { flex: 1 1 auto; padding: var(--space-5) var(--space-4) var(--space-6); }",
+    // The chips under the composer are wrapped so a turn can replace just them. They used to be on
+    // the bar at the top of the page, where a number the reader was not watching took the line the
+    // title needed.
+     ".usage { display: inline-flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; min-width: 0; }",
     // ── sidebar ─────────────────────────────────────────────────────────────
-     ".sidebar { flex: 0 0 var(--sidebar-width); position: sticky; top: 0; max-height: 100vh; overflow-y: auto; padding: var(--space-4) var(--space-2) var(--space-6) var(--space-4); font-size: var(--text-sm); }",
+     ".sidebar { flex: 0 0 var(--sidebar-width); position: sticky; top: 0; max-height: 100vh; overflow-y: auto; padding: var(--space-4) var(--space-2) 4.5rem var(--space-4); font-size: var(--text-sm); }",
     ".sidebar details.workspace { margin-bottom: var(--space-2); padding-left: var(--space-2); border-left: 1px solid var(--line); }",
     ".sidebar details.workspace > summary { display: flex; align-items: center; gap: var(--space-2); font-weight: 600; color: var(--fg); opacity: .85; padding: var(--space-1) var(--space-1); }",
     ".sidebar details.workspace.active > summary { opacity: 1; }",
@@ -153,16 +156,25 @@ pub fn stylesheet() -> String {
     ".panel .task .row { display: flex; align-items: center; gap: var(--space-2); }",
     // `min-width: 0` on the flexible half, or a long session label refuses to shrink and
     // squeezes the button next to it down to an ellipsis.
-     ".panel .task .label { min-width: 0; }", ".panel .task .label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+     ".panel .task .label { min-width: 0; }",
+    // The label is the way to that session: a button, so the panel answers "what is that?" with
+    // "here it is". Most specific match on purpose — both `.panel .task button` (the Stop button's
+    // shape) and the plain label rule would otherwise decide parts of it.
+     ".panel .task button.label { flex: 1 1 auto; min-width: 0; width: auto; text-align: left; padding: 0; border: 0; background: transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+    ".panel .task button.label:hover { color: var(--accent); background: transparent; }",
     ".panel .task .tool { font-family: var(--mono); font-size: var(--text-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
     ".panel .task form { display: flex; }", ".panel .task button { flex: 0 0 auto; width: auto; border-color: var(--line-strong); padding: var(--space-1) var(--space-2); }",
     ".panel input[type=text] { width: 100%; font: inherit; font-size: var(--text-sm); color: inherit; background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: var(--space-2); }",
-    // The pick row on top, the path row beneath it. The field is the half that shrinks; `Add` keeps
-    // its width, or a long path would squash it to an ellipsis.
-     ".add-workspace { display: flex; flex-direction: column; gap: var(--space-1); margin-top: var(--space-2); padding: 0 var(--space-2); }",
+    // The pick row, or — on a host that cannot open a dialog — the path row that stands in for it.
+    // One line either way, at the top of the list it adds to: the workspaces below are the answer
+    // to the same question, and a reader who has none sees the way in before the emptiness.
+     ".add-workspace { margin-bottom: var(--space-2); padding: 0 var(--space-2); }",
     ".add-workspace form { display: flex; gap: var(--space-1); }", ".add-workspace input { flex: 1 1 auto; min-width: 0; font: inherit; font-size: var(--text-sm); color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); }",
     ".add-workspace button { flex: 0 0 auto; width: auto; border-color: var(--line-strong); padding: var(--space-1) var(--space-2); }",
-    ".add-workspace .pick { width: 100%; }",
+    // The one control here that is an invitation rather than a thing in the list: dashed, so it
+    // reads as the empty slot a workspace will fill.
+     ".sidebar button.add { width: 100%; color: var(--muted); border-color: var(--line); border-style: dashed; font-size: var(--text-sm); padding: var(--space-1) var(--space-2); }",
+    ".sidebar button.add:hover { color: var(--fg); border-color: var(--line-strong); }",
     // ── conversation ────────────────────────────────────────────────────────
      ".exchange { margin-bottom: var(--space-5); }", ".user { background: var(--surface); border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-3); white-space: pre-wrap; }",
     ".user > :first-child, .text > :first-child { margin-top: 0; }", ".user > :last-child, .text > :last-child { margin-bottom: 0; }",
@@ -284,7 +296,12 @@ pub fn stylesheet() -> String {
     ".interrupted .btn-row { display: flex; gap: var(--space-2); }", ".interrupted button { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: var(--space-1) var(--space-3); cursor: pointer; }",
     // ── status + composer ───────────────────────────────────────────────────
      ".status { color: var(--muted); font-size: var(--text-sm); padding: 0 var(--space-4) var(--space-1); text-align: center; }",
-    "#composer { position: sticky; bottom: 0; display: flex; gap: var(--space-2); padding: var(--space-3) var(--space-4); background: var(--bg); border-top: 1px solid var(--line); }",
+    // Two lines: the box with what sends it, and under that the figures with the model picker. A
+    // column rather than a row, because everything on the second line is narrower than the box and
+    // nothing on it should be able to squeeze the box.
+     "#composer { position: sticky; bottom: 0; display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); background: var(--bg); border-top: 1px solid var(--line); }",
+    "#composer .row { display: flex; gap: var(--space-2); }", "#composer .foot { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }",
+    "#composer .foot .spacer { flex: 1 1 auto; }",
     // ── the empty conversation ──────────────────────────────────────────────
     // Centred and bounded, because this is the one thing on an otherwise blank page and a line of
     // text stranded at the top-left of a large empty area reads as a rendering fault.
@@ -311,19 +328,22 @@ pub fn stylesheet() -> String {
     "#commands .cmd { flex: 0 0 auto; font-family: var(--mono); font-size: var(--text-xs); }",
     "#commands .what { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }",
     "#composer textarea { flex: 1 1 auto; resize: none; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: var(--space-2) var(--space-3); }",
-    // The model picker sits at the bottom of the composer's trailing edge. It is last in the DOM
-    // so that a narrow window wraps it under the buttons rather than squeezing the textarea.
-     "#model-picker { flex: 0 0 auto; align-self: flex-end; max-width: 12rem; font: inherit; font-size: var(--text-xs); color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space-1); cursor: pointer; }",
+    // The model picker is last in the foot row, so a narrow window wraps it under the figures
+    // rather than squeezing them.
+     "#model-picker { flex: 0 0 auto; max-width: 12rem; font: inherit; font-size: var(--text-xs); color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space-1); cursor: pointer; }",
     "#model-picker:hover { color: var(--fg); border-color: var(--line-strong); }",
     "#model-picker:disabled { opacity: .5; cursor: default; }",
     // ── settings ────────────────────────────────────────────────────────────
     // A floating panel rather than a sidebar section: it is a place a reader goes, not a thing
-    // they watch, and the sidebar is already the busiest column on the page. Anchored to the
-    // right of the bar, so opening it does not move anything the reader was reading.
-     "details.settings { position: relative; font-size: var(--text-sm); }", "details.settings > summary { list-style: none; cursor: pointer; color: var(--muted); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .1rem .5rem; white-space: nowrap; }",
+    // they watch, and the sidebar is already the busiest column on the page. Pinned to the bottom
+    // left corner of the page, which is the one spot no region is ever patched into — so it is
+    // where the reader left it, whatever the conversation is doing.
+     "details.settings { position: fixed; left: var(--space-4); bottom: var(--space-4); z-index: 4; font-size: var(--text-sm); }",
+    "details.settings > summary { list-style: none; cursor: pointer; color: var(--muted); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .1rem .5rem; white-space: nowrap; }",
     "details.settings > summary::-webkit-details-marker { display: none; }", "details.settings[open] > summary { color: var(--fg); border-color: var(--line-strong); }",
-    // The panel is taken out of flow, so a long skill list cannot push the conversation down.
-     ".settings-body { position: absolute; right: 0; top: calc(100% + var(--space-2)); z-index: 3; width: min(34rem, calc(100vw - 2rem)); max-height: 75vh; overflow-y: auto; text-align: left; background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: 0 12px 32px rgba(0, 0, 0, .18); padding: var(--space-4); }",
+    // The panel is taken out of flow, and opens upward: it is anchored to the bottom of the window,
+    // so growing down would put most of it off the screen.
+     ".settings-body { position: absolute; left: 0; bottom: calc(100% + var(--space-2)); z-index: 3; width: min(34rem, calc(100vw - 2rem)); max-height: 75vh; overflow-y: auto; text-align: left; background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: 0 12px 32px rgba(0, 0, 0, .18); padding: var(--space-4); }",
     ".settings-block { margin-bottom: var(--space-4); }", ".settings-block > h3 { margin: 0 0 var(--space-2); font-size: var(--text-xs); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }",
     ".settings-block > h3 .count { text-transform: none; letter-spacing: 0; }", ".settings .facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); margin: 0; }",
     ".settings .facts dt { color: var(--muted); }", ".settings .facts dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }",
@@ -376,20 +396,22 @@ pub fn stylesheet() -> String {
     // Demanding a minimum width is what makes the composer fold rather than squeeze: without a
     // basis the textarea shrinks to nothing and the buttons keep their size, which is the wrong
     // thing to protect — the reader came to type.
-     "#composer textarea { flex: 1 1 14rem; }", "@media (max-width: 59.99rem) {",
-    "  .layout { flex-direction: column; gap: 0; }",
+     "#composer .row { flex-wrap: wrap; }", "#composer textarea { flex: 1 1 14rem; }",
+    "@media (max-width: 59.99rem) {", "  .layout { flex-direction: column; gap: 0; }",
     // One sticky header on a narrow screen, and it is the navigation. A reader halfway down a long
-    // answer is far more likely to want another session than another look at the cost, and the two
-    // cannot both stick to the top without covering each other. Opaque, because the bar scrolls
+    // answer is far more likely to want another session than another look at the title, and the two
+    // cannot both stick to the top without covering each other. Opaque, because the title scrolls
     // underneath it on the way past.
      "  .sidebar { position: sticky; top: 0; z-index: 3; flex: none; width: auto; max-height: none; overflow: visible; padding: var(--space-2) var(--space-4); background: var(--bg); border-bottom: 1px solid var(--line); }",
     // Opened, it covers the page rather than pushing it down — its own scroll, bounded, so a long
     // session list does not become a very long page above the conversation.
-     "  .sidebar.open { max-height: 80vh; overflow-y: auto; }", "  .bar { position: static; }",
-    "  #nav-toggle { display: block; width: auto; text-align: left; color: var(--muted); border-color: var(--line); padding: var(--space-1) var(--space-3); }",
+     "  .sidebar.open { max-height: 80vh; overflow-y: auto; }", "  .titlebar { position: static; }",
+    // Settings stops being a corner and joins the folded list: pinned to the bottom of a narrow
+    // window it would sit on top of the composer, which is where the reader's hands are.
+     "  details.settings { position: static; }", "  #nav-toggle { display: block; width: auto; text-align: left; color: var(--muted); border-color: var(--line); padding: var(--space-1) var(--space-3); }",
     "  #nav-toggle[aria-expanded=true] { color: var(--fg); border-color: var(--line-strong); }",
     // Everything except the button is folded away until it is asked for. Written as "> :not(...)"
-    // rather than by naming the three panels, so a region added later folds with the rest.
+    // rather than by naming the panels, so a region added later folds with the rest.
      "  .sidebar > :not(#nav-toggle) { display: none; }", "  .sidebar.open > :not(#nav-toggle) { display: block; }",
     "  #transcript { padding: var(--space-4) var(--space-4) var(--space-5); }", "}",
   ].join("\n")

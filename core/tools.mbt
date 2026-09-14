@@ -326,6 +326,7 @@ pub fn builtin_tools() -> Array[ToolDef] {
     glob_tool(),
     grep_tool(),
     note_tool(),
+    script_tool(),
   ]
 }
 

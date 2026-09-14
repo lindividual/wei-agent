@@ -50,6 +50,7 @@ pub async fn execute_tool(
     "edit" => run_edit(arguments, cwd)
     "glob" => run_glob(arguments, cwd)
     "grep" => run_grep(arguments, cwd)
+    "script" => run_script(arguments, cwd)
     // Recording a note is the driver's job: it writes what the tool returns.
     "note" =>
       @core.ToolOutput::text("Note recorded.").with_details(

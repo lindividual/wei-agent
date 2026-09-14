@@ -94,6 +94,22 @@ pub fn arg_array(arguments : Json, key : String) -> Array[Json] {
   }
 }
 
+///|
+/// An array-of-strings argument, ignoring any element that is not a string.
+///
+/// For arguments forwarded verbatim to a program the script runs: a non-string
+/// element is a mistake worth dropping rather than a reason to fail the call.
+pub fn arg_strings(arguments : Json, key : String) -> Array[String] {
+  let out : Array[String] = []
+  for item in arg_array(arguments, key) {
+    match item {
+      String(s) => out.push(s)
+      _ => ()
+    }
+  }
+  out
+}
+
 // ── Output formatting ──────────────────────────────────────────────────────
 
 ///|

@@ -231,7 +231,7 @@ pub fn render_piece(id : String, piece : Piece) -> Node {
 
 ///|
 /// What one turn took: the counts a reader uses to tell "did some work" from "did a lot",
-/// and the figures the bar shows for a whole session, per turn instead of accumulated.
+/// and the figures shown under the composer for a whole session, per turn instead of accumulated.
 pub(all) struct TurnStats {
   model_calls : Int
   tool_calls : Int
@@ -1172,38 +1172,30 @@ pub fn render_thinking_stream(
 }
 
 ///|
-/// The figures on the right of the bar, as their own element.
+/// The figures under the composer, as their own element.
 ///
 /// Wrapped and given an id because those are the chips a turn changes — usage, cost, how full the
-/// context is — and they are refreshed several times per turn. Replacing the whole bar to move a
-/// number would take the rest of it down with them, including the settings panel the reader may
-/// be typing in.
+/// context is — and they are refreshed several times per turn. Replacing the composer to move a
+/// number would take down whatever the reader is typing, so the chips are their own region inside
+/// it.
 pub fn render_usage(chips : Array[Node]) -> Node {
   el(Span, attrs=[cls("usage"), attr("id", "usage")], children=chips)
 }
 
 ///|
-/// The information bar above the conversation: what is open, on what model, at what cost.
+/// The session's title, pinned above the conversation.
 ///
-/// A region of its own rather than part of the transcript, because it changes for reasons
-/// the transcript does not (a figure updating, a session being switched) and replacing the
-/// whole conversation to refresh a number would be absurd.
+/// This is what is left of the information bar once its figures followed the input they describe
+/// (see `composer`): the model is on the picker there, the tokens and cost are under it, and the
+/// one thing that has to stay at the top is which conversation the reader is looking at — a long
+/// answer scrolls the beginning of it away.
 ///
-/// `trailing` is for the settings panel: it belongs at this end of the bar, and it must survive a
-/// refresh of `right`, which is why the chips are wrapped in their own element rather than
-/// replaced as part of the bar.
-pub fn render_bar(
-  left : Array[Node],
-  right? : Array[Node],
-  trailing? : Array[Node],
-) -> Node {
-  let children : Array[Node] = left
-  children.push(el(Span, attrs=[cls("spacer")], children=[]))
-  children.push(render_usage(right.unwrap_or([])))
-  for node in trailing.unwrap_or([]) {
-    children.push(node)
-  }
-  el(Div, attrs=[cls("bar"), attr("id", "bar")], children~)
+/// A region of its own, because renaming a session changes it and nothing else on the page.
+/// `detail` is the session's path, kept one hover away rather than in the line.
+pub fn render_title(name : String, detail : String) -> Node {
+  el(Div, attrs=[cls("titlebar"), attr("id", "title")], children=[
+    el(Span, attrs=[cls("name"), attr("title", detail)], children=[txt(name)]),
+  ])
 }
 
 ///|
@@ -1259,6 +1251,12 @@ pub fn render_commands(hints : Array[CommandHint]) -> Node {
 /// The composer, which lives outside the transcript so that replacing the transcript never
 /// touches what the reader is typing.
 ///
+/// Two lines: the box with Send and Stop, and under it the figures with the model picker. The
+/// second line is why the form is a column — the model used to sit in the corner of the first one,
+/// where it competed with the box for width, and the figures used to be on a bar at the top, where
+/// they competed with the conversation for attention. Both describe the next message rather than
+/// the one being read, so both belong at the input.
+///
 /// `running` decides whether Stop is offered. The button used to be live in every state and do
 /// nothing when there was nothing to stop: a control that lies about being available is worse than
 /// one that is absent, and the state it lies about is the one the reader reaches for in a hurry.
@@ -1268,23 +1266,40 @@ pub fn composer(
   model : ModelPicker,
   running : Bool,
   hints : Array[CommandHint],
+  /// The session's figures — tokens, cost, context — on the line under the box. Chips, not nodes:
+  /// `render_usage` wraps them, and it is the same wrapper the turn patches through, so the first
+  /// frame and every later one are the same element with the same id.
+  ///
+  /// Passed in rather than rendered here because they are the displayed session's. Landing in the
+  /// composer is what keeps them next to the input they describe without the box being rebuilt.
+  figures : Array[Node],
 ) -> Node {
+  let foot : Array[Node] = [render_usage(figures)]
+  foot.push(el(Span, attrs=[cls("spacer")], children=[]))
+  foot.push(render_model_picker(model))
   el(Form, attrs=[attr("id", "composer")], children=[
     // First, so the list opens *above* the box rather than below the buttons: the reader's eyes are
     // already at the bottom of the page, and suggestions belong between what they are writing and
     // the answer they are waiting for.
     render_commands(hints),
-    el(Textarea, attrs=[
-      attr("id", "prompt"),
-      attr("rows", "2"),
-      attr("placeholder", "Ask something… (Cmd+Enter to send)"),
-      attr("autofocus", ""),
+    // The box and what sends it, on one line: the input stays as wide as it was, now that the
+    // model picker has moved down to the figures rather than taking the corner of this row.
+    el(Div, attrs=[cls("row")], children=[
+      el(Textarea, attrs=[
+        attr("id", "prompt"),
+        attr("rows", "2"),
+        attr("placeholder", "Ask something… (Cmd+Enter to send)"),
+        attr("autofocus", ""),
+      ]),
+      el(Button, attrs=[attr("id", "send"), attr("type", "submit")], children=[
+        txt("Send"),
+      ]),
+      stop_button(running),
     ]),
-    el(Button, attrs=[attr("id", "send"), attr("type", "submit")], children=[
-      txt("Send"),
-    ]),
-    stop_button(running),
-    render_model_picker(model),
+    // The figures the reader checks between messages, and the model the next one will run on:
+    // under the box rather than over the conversation, where they were competing with it for the
+    // top of the screen.
+    el(Div, attrs=[cls("foot")], children=foot),
   ])
 }
 

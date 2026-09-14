@@ -73,8 +73,7 @@ async fn Requests::say(self : Requests, text : String) -> Unit {
 }
 
 ///|
-/// The regions that change: everything except the composer, and so except the text the reader is
-/// in the middle of typing.
+/// The regions that change: everything except the text the reader is typing, which no region owns.
 async fn Requests::regions(self : Requests) -> Array[@html.Patch] {
   let app = self.app
   let shown = app.shown()
@@ -90,10 +89,10 @@ async fn Requests::regions(self : Requests) -> Array[@html.Patch] {
       target="jobs",
       html=render_jobs(app, @env.now().reinterpret_as_int64()),
     ),
-    @html.Patch::Replace(target="bar", html=bar_node(app, shown).render()),
-    // The picker is patched on its own, never as part of the composer: rebuilding the composer
-    // would replace the textarea and take whatever the reader is in the middle of typing with it.
-    // Replacing just the `<select>` leaves the box alone.
+    // Which session is on screen changes when the reader switches, and the model picker that
+    // shows it lives in the composer — so only the picker is replaced, never the form around it.
+    // Replacing the form would take whatever the reader is in the middle of typing with it.
+    @html.Patch::Replace(target="title", html=title_node(app, shown).render()),
     picker_patch(app, shown),
     // Stop follows the turn: live while one is running, disabled otherwise. Replaced on its own
     // for the same reason the picker is — rebuilding the composer would replace the textarea.
@@ -206,7 +205,7 @@ async fn Requests::rename(self : Requests, value : String) -> Unit {
     @platform.append_entry(shown.path, entry)
     shown.session = shown.session.add_entries([entry])
     shown.status = "named \{value}"
-    // The sidebar row and the bar chip both change, and both are regions.
+    // The sidebar row and the title line both change, and both are regions.
     self.refresh()
   }
 }
@@ -505,21 +504,32 @@ async fn Requests::page(self : Requests) -> String {
   // scanned would come out as a directory with none. Either way the list is built before the page
   // that shows it.
   app.load_skills(shown.cwd)
-  // The sidebar holds two regions with different reasons to change: what is running, and what
-  // exists.
+  // The sidebar holds the regions with different reasons to change: what is running, what exists,
+  // and the settings panel. That last one is not a region at all — it is drawn once here, pinned to
+  // the bottom left corner of the window by the stylesheet, and it survives every refresh because
+  // nothing replaces the sidebar. On a narrow screen, where the sidebar is the folded header, it
+  // joins the list instead of the corner.
   let sidebar = @html.render_sidebar([
     @html.raw(render_tasks(app, shown)),
     @html.raw(render_jobs(app, @env.now().reinterpret_as_int64())),
     @html.raw(workspace_items_and_render(app, shown)),
+    @html.raw(render_settings_panel(app, shown)),
   ])
   let column = @html.el(Div, attrs=[@html.cls("column")], children=[
-    bar_node(app, shown),
+    title_node(app, shown),
     transcript_node(app, shown),
     @html.render_status(app.status_line(shown)),
     @html.composer(
       model_picker(app, shown),
       shown.is_running(),
       command_hints(app, shown),
+      // The figures, drawn by the same function the turn refreshes them with: one renderer for
+      // `#usage`, so the first frame and every later one are the same node.
+      usage_chips(
+        @core.model_spec_for(shown.model_id).0.context_window,
+        app.overhead_tokens(app.system_prompt(shown)),
+        shown,
+      ),
     ),
   ])
   let body = @html.el(Div, attrs=[@html.cls("layout")], children=[
@@ -622,7 +632,7 @@ async fn Requests::delete(self : Requests, path : String) -> Unit {
     Some(runner) => app.display(runner)
     None => ()
   }
-  app.deleted = Some({ path, label, })
+  app.deleted = Some({ path, label, at: @env.now().reinterpret_as_int64(), })
   self.refresh()
 }
 
@@ -687,12 +697,21 @@ async fn Requests::earlier(self : Requests) -> Unit {
 /// called `<something>.deleted` — so putting it back cannot overwrite a different conversation.
 async fn Requests::undo_delete(self : Requests, _path : String) -> Unit {
   let app = self.app
+  let now = @env.now().reinterpret_as_int64()
+  // Freshness is asked the same way the rendering asks it. The notice is drawn with a deadline and
+  // taken off screen by the page when it passes, so a click arriving after that is a click on a
+  // button that is no longer there — a stale tab, or a request replayed. Putting the file back
+  // anyway would be a restore nobody asked for.
+  let live = match app.deleted {
+    Some(notice) => @html.still_undoable(notice, now)
+    None => false
+  }
   match app.deleted {
-    Some(notice) => {
+    Some(notice) if live => {
       @platform.restore_session(notice.path)
       app.labels.forget(notice.path)
     }
-    None => ()
+    _ => ()
   }
   // Cleared whatever happened: the offer is for the click that just happened, and an Undo button
   // that outlives its usefulness has to be explained.

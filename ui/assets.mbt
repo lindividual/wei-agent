@@ -279,16 +279,22 @@ pub fn client_script() -> String {
     // stale by the time it is clicked, and the server is the one that can check.
      "  if (event.target.closest('[data-continue]')) {", "    land = true;", "    fetch('/continue', { method: 'POST', body: '' }).catch(() => {});",
     "    return;", "  }", "  if (event.target.closest('[data-dismiss]')) {", "    fetch('/dismiss', { method: 'POST', body: '' }).catch(() => {});",
-    "    return;", "  }", "  // Scoped to the sidebar. `[data-session]` used to be on the transcript too, and then every",
-    "  // click in the conversation — opening a block, selecting text — asked to switch sessions.",
-    // Scoped to the sidebar, and to the row's own button: the button fills the row, so every part
-    // of a row that looks clickable is. `[data-session]` used to be on the transcript too, and then
-    // every click in the conversation — opening a block, selecting text — asked to switch sessions.
-     "  const open = event.target.closest('#sessions [data-session]');", "  if (open) {",
-    "    // Asking for a session is asking to be shown its end.", "    land = true;",
-    // And on a narrow screen it is also an answer to the fold: the reader picked from the list,
-    // so the list has done its job. Left open it would sit on top of the conversation they chose.
-     "    const folded = document.querySelector('.sidebar.open');", "    if (folded) {",
+    "    return;", "  }",
+    // The rows that name a session: the sidebar's own, and the labels in the Running and Background
+    // panels. Those two answer "something is happening elsewhere" and "that process is still
+    // running", and the reader's next move is usually to go and look — so their labels open the
+    // session rather than making them find it in the list.
+    //
+    // Deliberately not on the transcript. `[data-session]` used to be there, and then every click in
+    // the conversation — opening a block, selecting text — asked the server to switch to it. The id
+    // it carried is short, so no file was found by that name and a new session was started instead:
+    // the transcript was replaced by an empty one on the next click.
+     "  const open = event.target.closest('[data-session]');", "  if (open) {", "    // Asking for a session is asking to be shown its end.",
+    "    land = true;",
+    // On a narrow screen picking from the list is also an answer to the fold: the list has done its
+    // job, and left open it would sit on top of the conversation the reader just chose. A label in
+    // one of the panels is not a pick from that list, so it leaves the fold alone.
+     "    const folded = document.querySelector('.sidebar.open');", "    if (folded && open.closest('.sidebar')) {",
     "      folded.classList.remove('open');", "      const toggle = document.getElementById('nav-toggle');",
     "      if (toggle) toggle.setAttribute('aria-expanded', 'false');", "    }",
     "    fetch('/session', { method: 'POST', body: open.dataset.session }).catch(() => {});",
@@ -349,6 +355,17 @@ pub fn client_script() -> String {
     "    const seconds = Math.max(0, Math.round((now - Number(node.dataset.since)) / 1000));",
     "    if (seconds < 60) node.textContent = seconds + 's';", "    else if (seconds < 3600) node.textContent = Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';",
     "    else node.textContent = Math.floor(seconds / 3600) + 'h ' + Math.floor((seconds % 3600) / 60) + 'm';",
+    "  }",
+    // And the elements that are only true until a moment has passed. One attribute, one meaning: an
+    // element carrying `data-expires` is an offer with a deadline, and it takes itself away when
+    // the deadline is behind the reader. The server stops rendering it on the same rule, so this is
+    // what makes it go while the page is open — the alternative is a frame from the server to say
+    // "still nothing", four times, to move something that is already on the page.
+    //
+    // The undo note after a delete is the only user today, and the reason it is worth an attribute
+    // is that the offer is a courtesy rather than a control: a reader who has moved on should not
+    // have to dismiss it.
+     "  for (const node of document.querySelectorAll('[data-expires]')) {", "    if (Number(node.dataset.expires) <= now) node.remove();",
     "  }", "}", "setInterval(tick, 1000);",
   ].join("\n")
 }

@@ -75,7 +75,7 @@ pub(all) struct LimitView {
 ///|
 /// Format a dollar limit so it round-trips through the field that shows it.
 ///
-/// The four decimals are the status line's, so a value copied out of the bar and pasted back is the
+/// The four decimals are the status line's, so a value copied out of the folder and pasted back is the
 /// same number. A value with no cents does not grow four of them, because `1` reads better than
 /// `1.0000` in a field someone is about to edit.
 pub fn format_limit_cost(value : Double) -> String {

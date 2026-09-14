@@ -780,12 +780,12 @@ entry 之间（模型、工具），四十条 entry 共用一个时间戳的日�
 
 ```bash
 moon test                    # 全包
-moon test -p core            # 258 个测试
-moon test -p platform        # 52 个测试，工具、存储、工作区注册表、后台进程、设置文件与传输失败分类
-moon test -p html            # 63 个测试，含标签表、侧边栏结构、设置面板、模型下拉框与 4 个注入测试
-moon test -p server          # 9 个测试，起真 socket 验传输
-moon test -p agent           # 25 个测试，假模型端到端跑 turn（含停下时杀掉命令、后台任务登记）
-moon test -p ui              # ui 自己 29 个；这个包依赖全链，所以实际会跑 468 个（其中 ui 自己 54 个白盒）
+moon test -p core            # 276 个测试
+moon test -p platform        # 61 个测试，工具、存储、工作区注册表、后台进程、设置文件与传输失败分类
+moon test -p html            # 104 个测试，含标签表、侧边栏结构、设置面板、模型下拉框与 4 个注入测试
+moon test -p server          # 10 个测试，起真 socket 验传输
+moon test -p agent           # 28 个测试，假模型端到端跑 turn（含停下时杀掉命令、后台任务登记、请求前缀只增不减）
+moon test -p ui              # ui 自己 29 个；这个包依赖全链，所以实际会跑 561 个（其中 ui 自己 54 个白盒）
 moon run verify              # 全量：160 个文件、46,399 条 entry 往返
 moon run cli -- "hello"      # 打一次真实 DeepSeek，端到端
 node harness/ui-browser-check.mjs   # 真实浏览器验收（自己起 headless Chrome）
@@ -855,6 +855,7 @@ moon run pi -- "Run 'ls' and tell me how many files are in this directory."
 | 侧边栏刷新 | 20 工作区 × 10 会话 × 64KB：**88-150ms / 次**，而一个 turn 刷新两次 | 已修：按 `(路径, mtime)` 缓存标签（mtime 本来就有，不必额外 stat）+ 前缀 64KB→16KB：**冷 82ms、之后 17-22ms** |
 | 大会话的整页与切换 | 最大的真实会话（92 条、257KB）：`GET /` **13ms / 242KB**，一次切换发 **236KB** | 暂不修。它随会话线性增长（投影：5MB 会话 → 每次切换约 5MB HTML）。触发条件是「单个会话超过一两 MB 或几百轮」，那时的修法是「只渲染最近 N 轮 + 加载更早」 |
 | turn 中途刷新顶条 | 一轮 turn 会重建 bar 好几次；设置面板就在同一条 bar 里 | 已修：数字收进独立的 `usage` 区域，turn 只替换它，不会把读者正在输入的面板清掉（也不会重建整条 bar 的 HTML） |
+| **瘦身对前缀缓存的净收益** | 9 个真实会话、3500 次调用：不裁剪 prompt 总量是现在的 **1.45×**（省下约 339M cache-read = **$0.95**），而被裁剪改写的调用另有 **7%**，多付约 **$0.60** 的 fresh input | **净赚约 $0.35，维持现状**。试过「低于压缩阈值就不裁剪」的版本（为了让请求永远只增不减），算完是**亏的**：省下的 fresh（约 $1.06）抵不过多发的 cache-read（约 $1.42），所以回退了。见下 |
 
 流式那条值得展开，因为它的形状是**平方**而不是「慢」：`SetText` 每帧重发**整段累积文本**，
 阈值又是 8/64 个字符，于是 39KB 的思考变成 599 帧 × 平均 20KB = **12.2MB**，客户端还要把一个
@@ -867,6 +868,37 @@ moon run pi -- "Run 'ls' and tell me how many files are in this directory."
 
 `html/patch_test.mbt` 有一条属性测试钉住它：把 4 万字符按小块喂进去，所有帧携带的文本量
 **恰好等于**全文长度，帧数不超过 `长度 / 阈值 + 1` —— 平方行为会立刻让它失败。
+
+### 前缀缓存：修的是量尺
+
+账单里唯一一处能靠读日志发现、又确实属于我们的浪费，是**把已经发过的内容改写一遍再发**。
+DeepSeek 按前缀缓存计费：请求开头与上一次相同的部分按 cache read 收（一方 token 的价
+钱的五十分之一），剩下全按 fresh input 收。所以决定花费的不是请求多大，而是**它和上一次
+从第几个字节开始不一样**——中间改写一条消息，它之后的所有内容都要重新计费。
+
+原来这件事没有量尺：日志里有 `usage`（被记了什么），但没有任何东西说明**为什么**。现在每
+一轮的 `TurnResult` 带一份 `request_drift`，每个模型调用一条，报告这次请求与上一次的共同
+前缀、从哪里开始不同、不同的那段有多少字节。它取的是**实际发出去的那份 messages**
+（`convert_messages` 编出来的同一份），不是对请求的再描述——能量出和线上不一致的数，
+比没有数更坏。`moon run pi` 会把它打出来：
+
+```
+request 0: 2 messages, 14467 bytes (first of the turn)
+request 1: 4 messages, 16299 bytes, changed 1832 from message 2 of 2 (append-only)
+request 2: 6 messages, 16939 bytes, changed 640 from message 4 of 4 (append-only)
+```
+
+**量完的结论是「不动」**，这也是它值得写下来的原因：
+
+- 把 3500 次真实调用按「这次请求比上次小」筛出来，只有 **7%**——即真的发生了裁剪改写。
+- 这些改写多付约 **$0.60** 的 fresh input；而裁剪本身省下的 cache-read 约 **$0.95**。
+  净赚 **$0.35**，方向是对的，就是不多。
+- 于是试了「请求没超过压缩阈值就不裁剪」（理论上请求从此只增不减，缓存永不失手）：
+  省下的 fresh 约 $1.06，但要多读约 1.45 倍的 prompt，cache-read 多 **$1.42**。**净亏**。
+  代码回退了，只留下这次测量。
+
+留一条教训：**「不要改写已发送的内容」这条设计意图，本身不是结论**。裁剪的动机是省 token，
+而 cache read 也是 token——省掉它们省下的钱，得跟改写它们的代价比过才算数。
 
 ## 已知限制
 

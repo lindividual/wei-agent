@@ -107,6 +107,21 @@ async fn main {
     "model calls \{result.model_calls}, tool calls \{result.tool_calls}, \{elapsed}ms",
   )
   println("session entries \{result.session.entries.length()}")
+  // What each request had in common with the last, which is the other half of what the call
+  // cost: the provider reads the shared prefix from cache and charges the rest as fresh input.
+  // A turn whose requests are all append-only should show every change at the end of the
+  // previous request; a rewrite anywhere earlier is billed from there to the end of the request.
+  for i, drift in result.request_drift {
+    if !drift.comparable {
+      println(
+        "request \{i}: \{drift.messages} messages, \{drift.bytes} bytes (first of the turn)",
+      )
+    } else {
+      println(
+        "request \{i}: \{drift.messages} messages, \{drift.bytes} bytes, changed \{drift.changed_bytes} from message \{drift.first_changed} of \{drift.previous_messages}\{if drift.appended_only() { " (append-only)" } else { " (REWROTE)" }}",
+      )
+    }
+  }
 
   // Report what the log actually contains, since that is the artifact everything
   // else is derived from.

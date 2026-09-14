@@ -66,32 +66,51 @@ test "an unknown model stays listed and selected" {
 }
 
 ///|
-/// The composer carries the picker and keeps the things that must not move: the textarea, the
-/// send and stop buttons, and the form the prompt is submitted through.
+/// The composer carries the picker and the figures, and keeps the things that must not move: the
+/// textarea, the send and stop buttons, and the form the prompt is submitted through.
+///
+/// The picker used to sit in the corner of the box's own row. It is on the line under it now,
+/// beside the figures — so this pins the two ids that the composer is the only home for, and the
+/// region the picker is replaced through.
 test "the composer holds the picker without disturbing what was there" {
-  let html = composer(picker("deepseek-v4-flash", false), true, commands()).render()
+  let html = composer(picker("deepseek-v4-flash", false), true, commands(), [
+    chip("cost", "$0.01"),
+  ]).render()
   assert_true(html.contains("id=\"composer\""), msg=html)
   assert_true(html.contains("id=\"prompt\""), msg=html)
   assert_true(html.contains("id=\"send\""), msg=html)
   assert_true(html.contains("id=\"stop\""), msg=html)
   assert_true(html.contains("id=\"model-picker\""), msg=html)
   // The id is the patch target, so it must appear exactly once — a second one would make which
-  // element gets replaced depend on document order.
+  // element gets replaced depend on document order. The same goes for the figures, which arrive as
+  // a region of their own.
   assert_eq(count_of(html, "id=\"model-picker\""), 1)
+  assert_eq(count_of(html, "id=\"usage\""), 1)
+  assert_true(html.contains("$0.01"), msg=html)
+  // The figures are under the box, not beside it: the input keeps the width it had.
+  let box = match html.find("id=\"prompt\"") {
+    Some(at) => at
+    None => -1
+  }
+  let figures = match html.find("id=\"usage\"") {
+    Some(at) => at
+    None => -1
+  }
+  assert_true(box >= 0 && figures > box, msg=html)
 }
 
 ///|
 /// Stop is offered while there is something to stop and greyed out when there is not, rather than
 /// being live in every state and doing nothing in two of them.
 test "Stop is disabled when no turn is running in this session" {
-  let idle = composer(picker("deepseek-v4-flash", false), false, commands()).render()
+  let idle = composer(picker("deepseek-v4-flash", false), false, commands(), []).render()
   assert_true(idle.contains("id=\"stop\""), msg=idle)
   assert_true(
     idle.contains("disabled"),
     msg="idle Stop should be disabled: \{idle}",
   )
   assert_true(idle.contains("nothing is running"), msg=idle)
-  let busy = composer(picker("deepseek-v4-flash", false), true, commands()).render()
+  let busy = composer(picker("deepseek-v4-flash", false), true, commands(), []).render()
   assert_false(
     busy.contains("disabled"),
     msg="running Stop should be live: \{busy}",

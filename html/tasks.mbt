@@ -14,7 +14,9 @@
 ///|
 /// One session with work in flight.
 pub(all) struct TaskItem {
-  /// What a click on Stop sends back.
+  /// What a click on Stop sends back — and what a click on the label sends to the display: the
+  /// row is about a session, and the reader who wants to see it should not have to find it in the
+  /// sidebar first.
   path : String
   /// The question being answered, if a turn is running.
   label : String
@@ -67,9 +69,20 @@ pub fn render_tasks(items : Array[TaskItem]) -> Node {
     rows.push(
       el(Div, attrs=[cls("task")], children=[
         el(Div, attrs=[cls("row")], children=[
-          el(Span, attrs=[cls("label"), attr("title", item.path)], children=[
-            txt(label),
-          ]),
+          // The label is the way to the session, not just a name for it: the panel's whole job is
+          // to say that something is happening elsewhere, and the reader's next move is usually to
+          // go and look. It carries the same `data-session` the sidebar row does, so the one client
+          // handler covers both.
+          el(
+            Button,
+            attrs=[
+              cls("label"),
+              attr("type", "button"),
+              attr("data-session", item.path),
+              attr("title", "show this session"),
+            ],
+            children=[txt(label)],
+          ),
           el(
             Button,
             attrs=[
@@ -106,6 +119,9 @@ pub(all) struct JobItem {
   age_ms : Int64
   /// The processes still alive for it, so a reader can recognise them in `ps`.
   pids : Array[Int]
+  /// The session that started it, so the row can offer a way back to it. Empty for a record whose
+  /// owning session is not known, which the row then shows without a link.
+  session : String
 } derive(Eq, Debug)
 
 ///|
@@ -147,9 +163,25 @@ fn job_row(item : JobItem, now : Int64) -> Node {
     meta.push(txt(" · pid \{pid_text(item.pids)}"))
   }
   let head : Array[Node] = [
-    el(Span, attrs=[cls("label"), attr("title", item.label)], children=[
-      txt(item.label),
-    ]),
+    // Same as the running panel's label: a job belongs to a session, and "which one?" is the
+    // question a reader has when a process they do not remember starting is listed here.
+    el(
+      Button,
+      attrs=[
+        cls("label"),
+        attr("type", "button"),
+        attr("data-session", item.session),
+        attr(
+          "title",
+          if item.session == "" {
+            item.label
+          } else {
+            "\{item.label} — show the session that started it"
+          },
+        ),
+      ],
+      children=[txt(item.label)],
+    ),
     el(
       Button,
       attrs=[

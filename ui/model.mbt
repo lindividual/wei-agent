@@ -52,7 +52,7 @@ async fn set_session_model(shown : Runner, id : String) -> Unit {
   shown.model_id = id
   let spec = @core.model_spec_for(id).0
   shown.status = "model: \{spec.label()}"
-  // No refresh here: the bar's model chip and its cost and context figures all change, and the
-  // caller is the one that knows what to re-render. It used to take the region list as a parameter,
-  // which made this function's interface wider than the work it does.
+  // No refresh here: the picker that shows the model and the cost and context figures beside it
+  // both change, and the caller is the one that knows what to re-render. It used to take the region
+  // list as a parameter, which made this function's interface wider than the work it does.
 }

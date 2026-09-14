@@ -345,7 +345,11 @@ async function httpJson(url, attempts = 60) {
 // ── the server under test ──────────────────────────────────────────────────
 
 function startServer(store, home) {
-  const child = spawn(UI_BIN, ["--port", String(PORT), "--store", store], {
+  // `--no-picker` because this run is unattended: the folder chooser is a real dialog on the
+  // machine's own screen, and nothing here could close it. A host without a chooser is the one
+  // whose way in is the path field, which is what the workspace checks drive — and the assertion
+  // further down that the chooser is absent is then about the flag rather than about the host.
+  const child = spawn(UI_BIN, ["--port", String(PORT), "--store", store, "--no-picker"], {
     stdio: ["ignore", "pipe", "pipe"],
     // The scratch home keeps the settings panel's file, and the skills it lists, out of the
     // real `$HOME`.
@@ -500,20 +504,24 @@ async function main() {
     );
     check(/\$\d/.test(footer), "the turn's footer reports a cost", footer);
     check(/model call/.test(footer), "the footer reports the model calls", footer);
-    // The information bar reports what the session has used, from the log.
-    const bar = await cdp.eval("document.getElementById('bar').textContent");
-    check(/tokens/.test(bar) && /cost/.test(bar) && /context/.test(bar), "the bar reports usage, cost and context", bar);
+    // The figures under the composer report what the session has used, from the log.
+    const figures = await cdp.eval("document.getElementById('usage').textContent");
     check(
-      !/\b0 in \/ 0 out\b/.test(bar),
+      /tokens/.test(figures) && /cost/.test(figures) && /context/.test(figures),
+      "the figures under the composer report usage, cost and context",
+      figures,
+    );
+    check(
+      !/\b0 in \/ 0 out\b/.test(figures),
       "a session that has run a turn reports figures that are not all zero",
-      bar,
+      figures,
     );
     const costText = await cdp.eval(
-      "[...document.querySelectorAll('#bar .chip')].find(c => c.textContent.startsWith('cost')).textContent",
+      "[...document.querySelectorAll('#usage .chip')].find(c => c.textContent.startsWith('cost')).textContent",
     );
     check(/\$\d+\.\d{4,}/.test(costText), "the cost has enough digits to be non-zero", costText);
     const costDetail = await cdp.eval(
-      "[...document.querySelectorAll('#bar .chip')].find(c => c.textContent.startsWith('cost')).title",
+      "[...document.querySelectorAll('#usage .chip')].find(c => c.textContent.startsWith('cost')).title",
     );
     check(
       /input \$/.test(costDetail) && /output \$/.test(costDetail),
@@ -525,7 +533,7 @@ async function main() {
     // proportion is big enough to see. A fresh session against a large window is nowhere near it,
     // and an empty rectangle still draws the eye — which is the state this used to be in.
     const ctx = await cdp.eval(`(() => {
-      const chip = [...document.querySelectorAll('#bar .chip')].find(c => c.textContent.startsWith('context'));
+      const chip = [...document.querySelectorAll('#usage .chip')].find(c => c.textContent.startsWith('context'));
       const scale = (n, s) => Number(n) * (s === 'k' ? 1e3 : s === 'M' ? 1e6 : 1);
       const m = chip.textContent.match(/([\\d.]+)([kM]?) \\/ ([\\d.]+)([kM]?)/);
       return {
@@ -789,16 +797,16 @@ async function main() {
       "and it shows the call, not a summary of it",
       JSON.stringify(liveTool),
     );
-    // The bar has already moved, twenty seconds before this turn ends. Each call's tokens, cache
-    // reads and context are in the log as soon as it comes back, and the figures of a turn are read
-    // while it runs — a turn whose tool round lasts minutes is the case that needs them, and it is
-    // the case a bar updated only at the end says nothing about.
+    // The figures have already moved, twenty seconds before this turn ends. Each call's tokens,
+    // cache reads and context are in the log as soon as it comes back, and the figures of a turn are
+    // read while it runs — a turn whose tool round lasts minutes is the case that needs them, and it
+    // is the case figures updated only at the end say nothing about.
     const usageDuring = await cdp.eval(
       "document.getElementById('usage').textContent",
     );
     check(
       usageDuring !== usageBefore,
-      "the bar reports the running turn's spend, not the last turn's",
+      "the figures report the running turn's spend, not the last turn's",
       `${usageBefore} -> ${usageDuring}`,
     );
     check(
@@ -1669,11 +1677,11 @@ async function main() {
       })()`,
     );
     await cdp.waitFor(
-      `document.getElementById('bar').textContent.includes('the browser check session')`,
-      "the bar to show the name",
+      `document.getElementById('title').textContent.includes('the browser check session')`,
+      "the title to show the name",
       15000,
     );
-    check(true, "the bar names the session");
+    check(true, "the title names the session");
     // A bare /name reports rather than clearing.
     await cdp.eval(
       `(() => {
@@ -1701,7 +1709,7 @@ async function main() {
     await cdp.waitFor("document.readyState === 'complete'", "page reload", 20000);
     await sleep(1500);
     await cdp.waitFor(
-      `document.getElementById('bar').textContent.includes('the browser check session')`,
+      `document.getElementById('title').textContent.includes('the browser check session')`,
       "the name to survive a reload",
       20000,
     );
@@ -1826,18 +1834,17 @@ async function main() {
       (await cdp.eval("document.querySelectorAll('#add-workspace').length")) === 1,
       "the sidebar offers a way to add a workspace",
     );
-    // The folder chooser, when this host can open one. Not clicked: the dialog is a real OS window
-    // on the machine running the server, and an unattended run cannot close it. What is checked is
-    // the structure that makes it safe to click — outside the path form, so it can never submit a
-    // half-typed path.
+    // This run is `--no-picker`, so the row is the path field and only the path field. A host with
+    // a dialog is covered by the unit tests; the dialog itself cannot be driven from here, because
+    // it is a real OS window on the machine running the server.
     const pick = await cdp.eval(`(() => {
       const button = document.getElementById('workspace-pick');
-      if (!button) return 'absent';
-      return button.type === 'button' && !button.closest('form') ? 'outside-form' : 'submitter';
+      if (button) return 'offered';
+      return document.getElementById('workspace-path') ? 'absent' : 'neither';
     })()`);
     check(
-      pick === 'absent' || pick === 'outside-form',
-      "the folder chooser, when offered, is not a form submitter",
+      pick === 'absent',
+      "with no chooser the row is the path field, and not both at once",
       pick,
     );
     // A path that is not a directory is refused by name, not silently ignored.
@@ -1878,14 +1885,13 @@ async function main() {
       )) === true,
       "and opens it, so there is somewhere to type",
     );
-    // Adding means working there: the agent's tools have to move too, which the bar shows.
-    const addedBar = await cdp.eval(
-      "[...document.querySelectorAll('#bar .chip')].find(c => c.textContent.startsWith('model')).title",
-    );
+    // Adding means working there: the agent's tools have to move too, which the title's tooltip
+    // shows — the workspace a session works in is part of what names it.
+    const addedTitle = await cdp.eval("document.querySelector('#title .name').title");
     check(
-      addedBar.includes(freshCanonical),
-      "the agent moved into the added workspace",
-      addedBar,
+      addedTitle.includes(freshCanonical),
+      "the display moved into the added workspace",
+      addedTitle,
     );
 
     // Adding a second one proves the first add left the row working: the sidebar is replaced
@@ -1984,8 +1990,16 @@ async function main() {
     const layout = await cdp.eval(
       `JSON.stringify((() => {
         const body = document.getElementById('settings-body').getBoundingClientRect();
-        const bar = document.getElementById('bar').getBoundingClientRect();
-        return { left: body.left, right: body.right, width: window.innerWidth, barHeight: bar.height };
+        const title = document.getElementById('title').getBoundingClientRect();
+        return {
+          left: body.left,
+          right: body.right,
+          top: body.top,
+          bottom: body.bottom,
+          height: window.innerHeight,
+          width: window.innerWidth,
+          titleTop: title.top,
+        };
       })())`,
     );
     const geometry = JSON.parse(layout);
@@ -1994,9 +2008,16 @@ async function main() {
       "the panel stays inside the viewport",
       layout,
     );
+    // Pinned to the bottom left corner, opening upward: the anchor is the bottom edge, so a panel
+    // that grew downward from a top anchor would be most of the way off the screen.
     check(
-      geometry.barHeight < 80,
-      "opening the panel does not push the bar down",
+      geometry.bottom <= geometry.height + 1 && geometry.top >= 0,
+      "the panel opens upward from the corner it is anchored to",
+      layout,
+    );
+    check(
+      geometry.titleTop <= 4,
+      "opening the panel does not push the title down",
       layout,
     );
 
@@ -2031,6 +2052,15 @@ async function main() {
       15000,
     );
     check(true, "toggling a skill posts and is acknowledged");
+    await sleep(3000);
+    console.log("  [debug] " + (await cdp.eval(`JSON.stringify({
+      bodies: document.querySelectorAll('#settings-body').length,
+      forms: document.querySelectorAll('#skills-form').length,
+      boxes: [...document.querySelectorAll('#settings-body input[type=checkbox]')].map(i => ({ v: i.value, c: i.checked })),
+      status: document.getElementById('status').textContent,
+      open: document.getElementById('settings').open,
+      inSidebar: !!document.querySelector('.sidebar #settings-body'),
+    })`)));
     await cdp.waitFor(
       `document.querySelector('#settings-body input[value="browser-demo"]')?.checked === false`,
       "the panel to come back with the skill off",
@@ -2415,10 +2445,10 @@ async function main() {
       15000,
     );
     check(
-      (await cdp.eval("document.getElementById('bar').textContent")).includes(
-        "deepseek-v4-pro",
-      ),
-      "the bar names the model the session is now on",
+      (await cdp.eval(
+        "document.getElementById('model-picker').selectedOptions[0].textContent",
+      )).includes("V4 Pro"),
+      "the picker names the model the session is now on",
     );
     // A turn made on the new model, so the switch is not just a field: the reply is real and the
     // cost is billed at the new model's rates.

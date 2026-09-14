@@ -273,7 +273,7 @@ test "the status line says what is happening somewhere else" {
 
 ///|
 test "a fresh session says so, an opened one says how much" {
-  // The working directory is deliberately absent: it is on the workspace row and in the bar chip's
+  // The working directory is deliberately absent from this line: it is on the workspace row's
   // tooltip, and repeating it here buried the number that was worth reading.
   let fresh = runner_at("/store/a.jsonl", 0)
   assert_eq(fresh.status, "new session")
@@ -325,6 +325,10 @@ test "the turn panel lists work in flight, and nothing when idle" {
     msg="an idle session must not be listed as running",
   )
   assert_true(html.contains("data-stop=\"/store/a.jsonl\""), msg=html)
+  // The label is the way to the session it names, not just a name for it: the panel exists to say
+  // that something is happening somewhere else, and the reader's next move is usually to go and
+  // look. Same `data-session` the sidebar's rows carry, so one client handler covers both.
+  assert_true(html.contains("data-session=\"/store/a.jsonl\""), msg=html)
   // With nothing running the region is empty, so the panel takes no space at all.
   running.busy = false
   assert_eq(render_tasks(app, idle), "<div id=\"tasks\"></div>")
@@ -346,6 +350,8 @@ test "the background panel lists what is still running and drops what is not" {
   assert_true(html.contains("5s"), msg="the elapsed time is shown: \{html}")
   assert_true(html.contains("data-kill=\"\{live}\""), msg=html)
   assert_true(html.contains("pid 42"), msg=html)
+  // The command names the session that started it, and the label is how the reader gets there.
+  assert_true(html.contains("data-session=\"/store/a.jsonl\""), msg=html)
   // A finished job is gone from the panel, not kept as a card with nothing to do on it. The record
   // is still there, which is what the reader cannot see and does not need to: a stopped thing has
   // no action left, and the panel is above the list they came to click.
@@ -374,7 +380,7 @@ test "the background panel lists what is still running and drops what is not" {
   assert_eq(render_jobs(app, 9000L), "<div id=\"jobs\"></div>")
 }
 
-// ── what the bar reports ───────────────────────────────────────────────────
+// ── what the figures report ────────────────────────────────────────────────
 
 ///|
 /// What the real app passes as overhead: a system prompt of a few hundred tokens plus seven tool
@@ -383,7 +389,7 @@ test "the background panel lists what is still running and drops what is not" {
 const TEST_OVERHEAD : Int = 1300
 
 ///|
-test "the bar reports the session's totals and its remaining context" {
+test "the figures report the session's totals and its remaining context" {
   // Three replies at 100 in / 20 out each: the totals come from the log, so they are the same
   // after a restart as before one.
   let runner = runner_at("/store/a.jsonl", 3)
@@ -391,25 +397,22 @@ test "the bar reports the session's totals and its remaining context" {
   let text = render_chips_text(chips)
   assert_true(text.contains("300 in / 60 out"), msg=text)
   assert_true(text.contains("cache"), msg=text)
-  // Three replies at $0.0003 each: the bar shows the session's total.
+  // Three replies at $0.0003 each: the figures show the session's total.
   assert_true(text.contains("$0.000900"), msg=text)
   assert_true(text.contains("context"), msg=text)
-  // The context chip is a proportion of the window, and the window is the model's — but the bar is
+  // The context chip is a proportion of the window, and the window is the model's — but the meter is
   // only drawn when the proportion is worth drawing. Against a 1M window these few messages are a
-  // tenth of a percent, where a bar is an empty rectangle that still draws the eye. The figure is
-  // still there; only the bar is not.
+  // tenth of a percent, where a meter is an empty rectangle that still draws the eye. The figure is
+  // still there; only the meter is not.
   assert_true(text.contains(" / 1M"), msg=text)
   assert_eq(
-    count_of(@html.render_bar([], right=chips).render(), "class=\"meter\""),
+    count_of(@html.render_usage(chips).render(), "class=\"meter\""),
     0,
-    msg="a bar at a tenth of a percent is a lie, not a figure",
+    msg="a meter at a tenth of a percent is a lie, not a figure",
   )
-  // A window this conversation actually fills most of does get its bar.
+  // A window this conversation actually fills most of does get its meter.
   let tight = usage_chips(4_000, TEST_OVERHEAD, runner)
-  assert_eq(
-    count_of(@html.render_bar([], right=tight).render(), "class=\"meter\""),
-    1,
-  )
+  assert_eq(count_of(@html.render_usage(tight).render(), "class=\"meter\""), 1)
 }
 
 ///|
@@ -423,7 +426,7 @@ test "a session with no turn behind it shows no usage figures" {
 }
 
 ///|
-/// The bar moves while a turn runs, not when it ends.
+/// The figures move while a turn runs, not when it ends.
 ///
 /// Each model call's tokens, cache reads and context size are known the moment its response comes
 /// back, and the calls of a twenty-round turn are exactly when the reader is watching them: waiting
@@ -451,16 +454,13 @@ test "the chips report the running turn's log, not the committed one" {
 ///|
 /// The figures a turn moves get a region of their own.
 ///
-/// They are refreshed several times per turn, and the bar they sit in also holds the settings
-/// panel — so replacing the bar would take down whatever the reader had opened in it.
-test "the usage chips are their own region, inside the bar" {
-  let html = @html.render_bar([], right=[@html.chip("cost", "$0.01")]).render()
+/// They are refreshed several times per turn, and the composer they sit under holds whatever the
+/// reader is typing — so a turn updating a number replaces this element and nothing else.
+test "the usage chips are their own region" {
+  let html = @html.render_usage([@html.chip("cost", "$0.01")]).render()
   assert_true(html.contains("id=\"usage\""), msg=html)
-  let bar = html.find("id=\"bar\"").unwrap()
-  let usage = html.find("id=\"usage\"").unwrap()
-  assert_true(bar < usage, msg=html)
   assert_true(html.contains("$0.01"), msg=html)
-  // A bar with nothing to its right is still a region, so a refresh is always a valid replace.
+  // Rendered even with nothing in it, so a refresh is always a valid replace.
   assert_true(html.contains("<span class=\"usage\" id=\"usage\">"), msg=html)
 }
 
@@ -469,27 +469,26 @@ test "the context chip warns when the next turn would compact" {
   let runner = runner_at("/store/a.jsonl", 3)
   // The window is the argument that decides this, so the two cases differ only in it: the model
   // and the conversation are identical, and a small window is what crosses the threshold.
-  let warned = @html.render_bar(
-    [],
-    right=usage_chips(2000, TEST_OVERHEAD, runner),
-  ).render()
-  let calm = @html.render_bar(
-    [],
-    right=usage_chips(1_000_000, TEST_OVERHEAD, runner),
-  ).render()
-  // The warning is the whole reason the figure is on the bar: it is the one number that changes
+  let warned = @html.render_usage(usage_chips(2000, TEST_OVERHEAD, runner)).render()
+  let calm = @html.render_usage(usage_chips(1_000_000, TEST_OVERHEAD, runner)).render()
+  // The warning is the whole reason the figure is on the page: it is the one number that changes
   // what happens next.
   assert_true(warned.contains("chip warn"), msg=warned)
   assert_false(calm.contains("chip warn"), msg=calm)
 }
 
 ///|
-async test "the bar names the session by id and keeps the path one hover away" {
+/// The title is the one fact from the old bar that stays at the top, and it is the session's name.
+///
+/// The model moved to the picker under the composer and the figures moved with it, so what is left
+/// to answer "which conversation is this?" while a long answer scrolls is this line.
+async test "the title names the session and keeps the path one hover away" {
   let app = test_app()
   let runner = runner_at(
     "/store/--a--/2026-09-12T13-29-09.716Z_16ce48e4.jsonl", 1,
   )
-  let html = bar_node(app, runner).render()
+  let html = title_node(app, runner).render()
+  assert_true(html.contains("id=\"title\""), msg=html)
   assert_true(html.contains("16ce48e4"), msg=html)
   assert_true(
     html.contains(
@@ -497,7 +496,13 @@ async test "the bar names the session by id and keeps the path one hover away" {
     ),
     msg=html,
   )
-  assert_true(html.contains("deepseek-v4-flash"), msg=html)
+  // A name the reader gave wins over the id, exactly as it does in the sidebar.
+  runner.session = runner.session.add_entries([
+    @core.session_name_entry(Some("refactor auth"), None, 0L),
+  ])
+  let named = title_node(app, runner).render()
+  assert_true(named.contains("refactor auth"), msg=named)
+  assert_false(named.contains(">16ce48e4<"), msg=named)
 }
 
 // ── the label cache ────────────────────────────────────────────────────────
@@ -564,7 +569,7 @@ fn count_of(text : String, needle : String) -> Int {
 ///|
 /// The visible text of a chip list, so a test can talk about what a reader sees.
 fn render_chips_text(chips : Array[@html.Node]) -> String {
-  let html = @html.render_bar([], right=chips).render()
+  let html = @html.render_usage(chips).render()
   let out = StringBuilder()
   let mut in_tag = false
   for c in html {
@@ -609,7 +614,7 @@ test "only a real /name is a command" {
   }
 }
 
-// ── the name in the list and in the bar ────────────────────────────────────
+// ── the name in the list and at the top of the page ────────────────────────
 
 ///|
 async test "a named session is listed by its name, an unnamed one by its first question" {
@@ -620,14 +625,12 @@ async test "a named session is listed by its name, an unnamed one by its first q
   let unnamed = runner_at("/store/b.jsonl", 1)
   app.registry.push(named)
   app.registry.push(unnamed)
-  let html = render_tasks(app, named)
-  ignore(html)
-  // The bar names the session by what the reader called it.
-  let bar = bar_node(app, named).render()
-  assert_true(bar.contains("refactor auth"), msg=bar)
-  assert_true(bar.contains("title=\"/store/a.jsonl\""), msg=bar)
+  // The title names the session by what the reader called it.
+  let title = title_node(app, named).render()
+  assert_true(title.contains("refactor auth"), msg=title)
+  assert_true(title.contains("title=\"/store/a.jsonl\""), msg=title)
   // Without a name it falls back to the id, which matches the file on disk.
-  let plain = bar_node(app, unnamed).render()
+  let plain = title_node(app, unnamed).render()
   assert_true(plain.contains("b"), msg=plain)
   assert_false(plain.contains("refactor auth"), msg=plain)
   assert_eq(named.name_or_id(), "refactor auth")
@@ -1078,6 +1081,7 @@ test "the status line says when the cost limit stopped a turn" {
     cost_limit_hit: true,
     time_limit_hit: false,
     truncated: false,
+    request_drift: [],
   }
   let text = status_text(result, false)
   assert_true(text.contains("at the $1.2500 cost limit"), msg=text)
@@ -1118,6 +1122,7 @@ test "the status line says when the time limit stopped a turn" {
     cost_limit_hit: false,
     time_limit_hit: true,
     truncated: false,
+    request_drift: [],
   }
   let text = status_text(result, false)
   assert_true(text.contains("at the time limit"), msg=text)
@@ -1159,6 +1164,7 @@ test "a finished turn says nothing on the status line; its figures are on the fo
     cost_limit_hit: false,
     time_limit_hit: false,
     truncated: true,
+    request_drift: [],
   }
   let text = status_text(result, false)
   assert_eq(
