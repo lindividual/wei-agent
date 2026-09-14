@@ -331,9 +331,9 @@ test "the turn panel lists work in flight, and nothing when idle" {
 }
 
 ///|
-test "the background panel separates live jobs from finished ones" {
+test "the background panel lists what is still running and drops what is not" {
   let app = test_app()
-  let id = app.jobs.start(
+  let live = app.jobs.start(
     kind="bash",
     label="npm run dev",
     session="/store/a.jsonl",
@@ -344,21 +344,33 @@ test "the background panel separates live jobs from finished ones" {
   assert_true(html.contains("npm run dev"), msg=html)
   assert_true(html.contains("running"), msg=html)
   assert_true(html.contains("5s"), msg="the elapsed time is shown: \{html}")
-  assert_true(html.contains("data-kill=\"\{id}\""), msg=html)
+  assert_true(html.contains("data-kill=\"\{live}\""), msg=html)
   assert_true(html.contains("pid 42"), msg=html)
-  // A finished job keeps its record — the reader wants to see how it ended — but offers no Kill.
+  // A finished job is gone from the panel, not kept as a card with nothing to do on it. The record
+  // is still there, which is what the reader cannot see and does not need to: a stopped thing has
+  // no action left, and the panel is above the list they came to click.
+  let finished = app.jobs.start(
+    kind="bash",
+    label="npm test",
+    session="/store/a.jsonl",
+    started_at=2000L,
+    pids=[43],
+  )
   app.jobs.finish(
-    id,
+    finished,
     @core.JobStatus::Completed,
     detail="exit code: 0",
     finished_at=4000L,
   )
-  let done = render_jobs(app, 9000L)
-  assert_false(done.contains("data-kill"), msg=done)
-  assert_true(done.contains("completed · exit code: 0"), msg=done)
-  assert_true(done.contains("class=\"task done\""), msg=done)
-  // Nothing at all when there is nothing to say.
-  app.jobs.forget(id)
+  let after = render_jobs(app, 9000L)
+  assert_false(after.contains("npm test"), msg=after)
+  assert_false(after.contains("completed"), msg=after)
+  assert_eq(count_of(after, "data-kill="), 1, msg=after)
+  // The record is kept even though nothing draws it: that is how a later kill still reaches the
+  // process, and how `jobs.json` can account for it after a restart.
+  assert_eq(app.jobs.get(finished).unwrap().status, @core.JobStatus::Completed)
+  // Nothing running at all: an empty container, no heading.
+  app.jobs.forget(live)
   assert_eq(render_jobs(app, 9000L), "<div id=\"jobs\"></div>")
 }
 
@@ -408,6 +420,32 @@ test "a session with no turn behind it shows no usage figures" {
   assert_eq(usage_chips(1_000_000, TEST_OVERHEAD, fresh).length(), 0)
   let used = runner_at("/store/used.jsonl", 2)
   assert_true(usage_chips(1_000_000, TEST_OVERHEAD, used).length() > 0)
+}
+
+///|
+/// The bar moves while a turn runs, not when it ends.
+///
+/// Each model call's tokens, cache reads and context size are known the moment its response comes
+/// back, and the calls of a twenty-round turn are exactly when the reader is watching them: waiting
+/// for the outcome would leave the figures of the *previous* turn on screen for the whole of the
+/// current one. Both copies exist on purpose — `session` is the transcript's, which must not contain
+/// the half-written turn, and `in_flight_session` is the log as it now stands.
+test "the chips report the running turn's log, not the committed one" {
+  let runner = runner_at("/store/a.jsonl", 1)
+  let before = render_chips_text(usage_chips(1_000_000, TEST_OVERHEAD, runner))
+  assert_true(before.contains("100 in / 20 out"), msg=before)
+  // A second call has come back and is in the log; the turn is still running.
+  runner.in_flight_session = Some(session_with(2))
+  let during = render_chips_text(usage_chips(1_000_000, TEST_OVERHEAD, runner))
+  assert_true(during.contains("200 in / 40 out"), msg=during)
+  assert_true(during.contains("$0.000600"), msg=during)
+  assert_eq(runner.latest_log().usage().replies, 2)
+  // Dropped when the turn ends: what it held is in `session` by then, and a copy left here would
+  // answer for a state the session no longer has.
+  runner.in_flight_session = None
+  let after = render_chips_text(usage_chips(1_000_000, TEST_OVERHEAD, runner))
+  assert_true(after.contains("100 in / 20 out"), msg=after)
+  assert_eq(runner.latest_log().usage().replies, 1)
 }
 
 ///|

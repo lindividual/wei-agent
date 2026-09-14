@@ -40,7 +40,15 @@ import { createServer } from "node:net";
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 // Set once the page is attached, so the crash handler below can report what the page threw.
 let cdp = null;
-const UI_BIN = "_build/native/debug/build/ui/ui.exe";
+const UI_BIN_SOURCE = "_build/native/debug/build/ui/ui.exe";
+// The copy actually run, taken once at startup.
+//
+// The reconnect check restarts the server, which means spawning this path a second time — and it used
+// to be spawned straight out of the build directory. That is fine until something else is building:
+// a rebuild landing mid-run then swaps the server under the second half of the checks, so the run
+// measures two different programs and reports the difference as a failure of the page. Copying first
+// makes the run measure one artifact, whichever one was there when it started.
+let UI_BIN = UI_BIN_SOURCE;
 const KEEP = process.argv.includes("--keep");
 const PORT = await freePort();
 const DEBUG_PORT = await freePort();
@@ -90,6 +98,18 @@ function storeDirName(cwd) {
     .slice(start)
     .replace(/[/\\:]/g, "-");
   return `--${body}--`;
+}
+
+/// The tag the transcript advertises for the session it is showing.
+///
+/// This is what the client compares scoped frames against, and it is the only stable way to say
+/// *which* session is on screen. Asserting on the conversation's text does not work any more: a long
+/// session is rendered as a window over its newest turns, so its first question — the thing these
+/// checks used to look for — is deliberately not in the page.
+function tagOf(path) {
+  const name = path.split("/").pop();
+  const stem = name.endsWith(".jsonl") ? name.slice(0, -".jsonl".length) : name;
+  return stem.split("_").pop();
 }
 
 /// The settings panel writes a file under `$HOME`, and a check must not edit the real one: run
@@ -358,10 +378,12 @@ async function waitForServer() {
 // ── the checks ─────────────────────────────────────────────────────────────
 
 async function main() {
-  if (!existsSync(UI_BIN)) {
-    console.error(`missing ${UI_BIN} — run: moon build --target native`);
+  if (!existsSync(UI_BIN_SOURCE)) {
+    console.error(`missing ${UI_BIN_SOURCE} — run: moon build --target native`);
     process.exit(2);
   }
+  UI_BIN = join(mkdtempSync(join(tmpdir(), "pws-bin-")), "ui.exe");
+  copyFileSync(UI_BIN_SOURCE, UI_BIN);
   const store = mkdtempSync(join(tmpdir(), "pws-browser-"));
   const home = scratchHome();
   const profile = mkdtempSync(join(tmpdir(), "pws-chrome-"));
@@ -693,6 +715,13 @@ async function main() {
     // reader is asking whether anything is happening.
     //
     // Long enough to survive the reload below, which is the part of this that used to be broken.
+    //
+    // The figures are read before the prompt goes in, because what this turn does to them is the
+    // other half of the wait: a model call is paid for the moment it answers, and the tool it asked
+    // for then runs for 20 seconds with the bar still showing the *previous* turn's totals.
+    const usageBefore = await cdp.eval(
+      "document.getElementById('usage').textContent",
+    );
     await cdp.eval(
       `(() => {
         const input = document.getElementById('prompt');
@@ -759,6 +788,23 @@ async function main() {
       /sleep 20/.test(liveTool.args || ''),
       "and it shows the call, not a summary of it",
       JSON.stringify(liveTool),
+    );
+    // The bar has already moved, twenty seconds before this turn ends. Each call's tokens, cache
+    // reads and context are in the log as soon as it comes back, and the figures of a turn are read
+    // while it runs — a turn whose tool round lasts minutes is the case that needs them, and it is
+    // the case a bar updated only at the end says nothing about.
+    const usageDuring = await cdp.eval(
+      "document.getElementById('usage').textContent",
+    );
+    check(
+      usageDuring !== usageBefore,
+      "the bar reports the running turn's spend, not the last turn's",
+      `${usageBefore} -> ${usageDuring}`,
+    );
+    check(
+      /in \/ .* out/.test(usageDuring),
+      "with the totals still readable",
+      usageDuring,
     );
     check(
       liveTool.shape.length === 3 &&
@@ -1268,10 +1314,12 @@ async function main() {
     check(!!switched, "the seeded session is listed under its own workspace", switched ?? "not found");
     // The status line no longer repeats the working directory — it is the first thing on the
     // workspace row, and a temp path with a hash in it was most of the line. What says the agent
-    // moved is the transcript becoming that session's conversation, which is what the reader
-    // actually sees.
+    // moved is the transcript becoming that session, and the transcript says which session it is
+    // showing in its own tag. Asserting on the conversation's *text* stopped working when long
+    // sessions became a window over their newest turns: the seeded session's first question is
+    // deliberately no longer rendered.
     await cdp.waitFor(
-      `document.getElementById('transcript').textContent.includes('seeded question from the other project')`,
+      `document.getElementById('transcript').dataset.shownSession === ${JSON.stringify(tagOf(switched))}`,
       "the agent to move into the other workspace",
       30000,
     );
@@ -1309,7 +1357,7 @@ async function main() {
     await cdp.waitFor("document.readyState === 'complete'", "page reload", 20000);
     await sleep(1500);
     await cdp.waitFor(
-      `document.getElementById('transcript').textContent.includes('seeded question from the other project')`,
+      `document.getElementById('transcript').dataset.shownSession === ${JSON.stringify(tagOf(switched))}`,
       "the long session to be on screen after the reload",
       20000,
     );

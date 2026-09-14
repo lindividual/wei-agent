@@ -70,10 +70,18 @@ fn App::still_running(self : App, pid : Int) -> Bool {
 }
 
 ///|
-/// The background panel, as HTML: every job, live ones first.
+/// The background panel, as HTML: the jobs that are still running.
+///
+/// A finished job is not passed on at all. The record stays in the store — it is how a restart
+/// accounts for a process it did not start, and how a kill still reaches every pid — but the panel
+/// answers "what is still running", and a card for work that is over would push the session list
+/// down to say nothing. How it ended is on its own line in the log and in the tool result.
 fn render_jobs(app : App, now : Int64) -> String {
   let items : Array[@html.JobItem] = []
   for job in app.jobs.list() {
+    if !job.is_live() {
+      continue
+    }
     // Every pid ever seen, minus the ones that are gone: a command is recorded with its own shell
     // and with the `ps` helper that reported it, and neither is what the reader is looking for.
     let pids : Array[Int] = []
@@ -89,8 +97,6 @@ fn render_jobs(app : App, now : Int64) -> String {
       status: job.status.to_string(),
       age_ms: job.age_ms(now),
       pids,
-      live: job.is_live(),
-      detail: job.detail,
     })
   }
   @html.render_jobs(items, now).render()
@@ -216,8 +222,13 @@ async fn usage_node(app : App, shown : Runner) -> @html.Node {
 /// What the session has used and spent, and how full its context is.
 ///
 /// The totals come from the log (`Session::usage`), so they are the same after a restart as
-/// before one. The context figure is the one that changes what happens next: it is compared
-/// against the point where compaction would kick in, and marked when that is close.
+/// before one. They are read from the newest copy of it (`Runner::latest_log`), which during a turn
+/// means the calls that have already come back: each one's tokens, cache reads and context are
+/// known the moment the response ends, and a twenty-round turn that reported them only at the end
+/// would spend the whole turn showing the figures of the previous one. The context figure is the
+/// one that changes what happens next: it is compared against the point where compaction would kick
+/// in, and marked when that is close.
+///
 /// The window is passed in rather than looked up here, because it belongs to the session's model
 /// and this function should not have to decide which model that is: the caller already did, and
 /// passing it keeps the arithmetic testable with a window small enough to cross the threshold.
@@ -229,7 +240,8 @@ fn usage_chips(
   overhead : Int,
   shown : Runner,
 ) -> Array[@html.Node] {
-  let usage = shown.session.usage()
+  let session = shown.latest_log()
+  let usage = session.usage()
   // Nothing to report yet: no turn has run here. Four chips reading `0` are noise on the one line
   // a reader looks at to see what is open, and they were most of what an empty session showed.
   //
@@ -237,7 +249,7 @@ fn usage_chips(
   // full without a turn having run in *this* process — a resumed conversation is exactly that case,
   // and it is the case where the number changes what happens next.
   let has_spend = usage.replies > 0
-  let has_conversation = !shown.session.context().messages.is_empty()
+  let has_conversation = !session.context().messages.is_empty()
   if !has_spend && !has_conversation {
     return []
   }
@@ -245,7 +257,7 @@ fn usage_chips(
   // last request, and only what has been appended since has to be guessed. Measured over real
   // sessions, the heuristic alone is 17% low on average and 63% at worst; anchored, it is 0.2%.
   let pressure = @core.context_pressure(
-    shown.session.prepared_context().messages,
+    session.prepared_context().messages,
     overhead,
   )
   let context = pressure.tokens

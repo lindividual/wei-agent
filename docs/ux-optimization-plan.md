@@ -321,7 +321,7 @@
 | **P1-4 Stop 不撒谎** | `stop_button(running)` + 新区域 `stop_patch`，随 turn 开始/结束刷新；客户端改成**委托**监听（节点会被替换） | 真实 turn 走一遍：`disabled → 可点 → disabled`。★ 发现并修了一个真 bug：turn 开始/结束走的是自己的 refresher，**不经过 `regions()`**，只加一个区域不会生效 |
 | **P1-6 状态行** | `session.mbt` 不再把 cwd 拼进状态行 | `opened 2 messages in /var/folders/…` → `opened 2 messages` |
 | **P1-3 数字重复** ★ | 两处改动，见下 | turn 结束后的状态行不再和 footer 说同一句话 |
-| **P2-6 侧栏背景面板** ★ | `html/tasks.mbt`∶已完成 job 最多 3 个，其余计数；`live` 的永远不丢 | 夹具的 8 张 `completed` 卡片 → 3 张 + `… 5 older`；会话列表回到首屏 |
+| **P2-6 侧栏背景面板** ★ | `html/tasks.mbt`∶已完成 job 最多 3 个，其余计数；`live` 的永远不丢（**后改**：跑完的直接不画，见 README「面板只画还在跑的 job」） | 夹具的 8 张 `completed` 卡片 → 3 张 + `… 5 older`；会话列表回到首屏 |
 
 ### 关于 P1-3：一处结构不一致
 
@@ -744,6 +744,36 @@ README 的「已知限制」里）。
   currentAge 5.02 / label 17.05 / age 5.05 / chevron 5.05`，深色 `currentLabel 11.0 /
   currentAge 6.60` —— 全部 ≥ 4.5。
 - `moon info` 无 `.mbti` 变化（对外接口只动了 `platform` 与 `server` 的签名，都是内部包）。
+
+---
+
+## 十四、用量数字在轮次中途就更新（已做）
+
+**起因**：读者问的——token 消耗、缓存命中率、上下文占用现在要等整个 turn 结束才变，其实每次
+模型调用结束就已经知道了。
+
+**为什么这是一条真的优化**：这不是「快一点」的问题。一次提问跑 19 次模型调用并不罕见，而
+那一整段时间里 bar 上显示的是**上一轮**的数字——正是读者最想知道「这轮花了多少、窗口还剩
+多少」的时候。上下文占用更赔：它和压缩阈值比较，接近时 chip 变红，而「下一轮会压缩」这句话
+在轮次结束时才出现，读者已经没有决定可做了。
+
+**改法**：driver 每写一次日志就回调一次（`on_commit`：prompt 写进去、每次模型调用返回、每个
+工具轮、以及压缩），把**日志当时的样子**交出去；`ui` 把它存进 `Runner::in_flight_session`
+并重发 `usage` 区域。
+
+| 决定 | 理由 |
+|---|---|
+| 单开一个 `in_flight_session`，不动 `Runner::session` | transcript 从 `session` 渲染，而正在跑的那一轮**同时**在日志和浏览器的流式块里，从 `session` 渲染会画两遍 |
+| 锚点自动跟着走，没有新增状态 | `context_pressure` 的锚就是「最后一条带 usage 的 assistant 消息」，所以 provider 的实测值本来就按每次调用推进 |
+| 只发给 `displayed == runner.path` 的标签页 | bar 上的数字是 displayed 那份的；别的会话在跑不该让每个标签页每轮多收十几帧 |
+| 失败路径改用 `latest_log()` ★ | 顺手修掉一个真 bug：driver 是边跑边 commit 的，失败时 `session` 还停在**本轮开始前**，于是「跑到第 5 次调用才失败」的轮次渲染出来的是第 4 次之前的对话 |
+| 成本 | 每次提交重算 chips（`Session::usage` 走一遍 path）+ 因为要算固定开销而重读一次 `AGENTS.md`。都是毫秒级，且只在 displayed 的会话上发生 |
+
+**验证**：`moon test` 553 全过（`agent` 1 条：快照按顺序到达，第一条在 prompt 写进去时
+（0 花费）、第二条带第一次调用的 token；`ui` 1 条：chips 跟 `latest_log()` 走，清掉后回到
+committed）。真浏览器验收里那段「工具运行中」现在多两条断言：记下 prompt 发出前的 `#usage`
+文本，等 20 秒的 `sleep` 跑起来时再读一次，**必须已经变了**——实测 `2k in / 146 out ·
+cache 8.2k · 80% hit · $0.000349 · context 3.5k`，即轮次结束前 20 秒数字已到位。
 
 ---
 

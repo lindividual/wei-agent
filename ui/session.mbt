@@ -57,7 +57,20 @@ fn Job::label(self : Job) -> String {
 struct Runner {
   /// The session as it stands. Replaced after each turn with the driver's copy, which
   /// is the one that has the new entries in it.
+  ///
+  /// During a turn this is deliberately the copy from *before* it: the transcript is rendered from
+  /// here, and a transcript that already contained the running turn would draw it twice — once from
+  /// the log and once from the live blocks the browser is still writing into. `in_flight_session`
+  /// is the other copy, for the readers that want the log as it now stands.
   mut session : @core.Session
+  /// The log including the turn that is running, as the last commit left it.
+  ///
+  /// Set by the driver as the turn writes, and cleared when it ends. The figures on the bar are
+  /// read from here, because each model call's tokens and cache reads are known the moment it
+  /// returns and waiting for the turn to end would hide the whole of a twenty-round turn. It is
+  /// also the newest copy of the log, which is what a failed turn has to be rendered from — the
+  /// driver commits as it goes, so `session` is behind the file by however far the turn got.
+  mut in_flight_session : @core.Session?
   /// How many of the newest turns this session's transcript renders.
   ///
   /// Per session, not global: asking to see the start of one long conversation is not asking for
@@ -177,6 +190,7 @@ fn Runner::new(
   {
     depth: transcript_window(),
     session,
+    in_flight_session: None,
     path,
     cwd,
     model_id: recorded.unwrap_or(fallback_model_id),
@@ -192,6 +206,20 @@ fn Runner::new(
     live: [],
     prompt: "",
     status,
+  }
+}
+
+///|
+/// The newest copy of the log this process holds: the running turn's commits when there are any,
+/// the committed session otherwise.
+///
+/// One function because "which copy" is the thing that is easy to get wrong, and every reader that
+/// wants the log as it now stands has to give the same answer: the bar's figures while a turn runs,
+/// and the rendering of a turn that failed half way through.
+fn Runner::latest_log(self : Runner) -> @core.Session {
+  match self.in_flight_session {
+    Some(in_flight) => in_flight
+    None => self.session
   }
 }
 
@@ -278,9 +306,13 @@ async fn App::load_skills(self : App, cwd : String) -> Unit {
 /// describing a prompt that is not the one being sent — and a catalog that changed between the
 /// two would make the pressure figure wrong by exactly the change.
 ///
-/// Async because the workspace's `AGENTS.md` is read per turn rather than cached: a reader editing
-/// it while the agent works expects the next turn to be the one that picks the edit up. The two
-/// callers await the same function, so they still cannot disagree.
+/// Async because the workspace's `AGENTS.md` is read rather than cached: a reader editing it while
+/// the agent works expects the next turn to be the one that picks the edit up. The two callers
+/// await the same function, so they still cannot disagree.
+///
+/// It is read more often than once per turn now that the bar's context figure is refreshed on every
+/// commit of a running turn, which is a handful of stats and one small read — the price of the
+/// figure meaning what it says at the moment it is read.
 ///
 /// The instructions come before the catalog, which is the order of specificity: how this workspace
 /// wants to work, then what can be asked of it.

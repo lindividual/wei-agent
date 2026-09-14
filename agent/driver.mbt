@@ -843,6 +843,16 @@ pub async fn run_turn(
   on_tool_process? : async (ToolHandle?) -> Unit,
   /// Called after each round with (model calls, tool calls) so far.
   on_progress? : async (Int, Int) -> Unit,
+  /// Called after every commit that changes what the next request would carry: the prompt going
+  /// in, each model call's response, each tool round. The log as it now stands is passed, which is
+  /// what a caller showing the figures *while* the turn runs needs — a turn of twenty rounds would
+  /// otherwise hand over twenty calls' worth at the end, when the reader has stopped needing them.
+  ///
+  /// Bookkeeping commits (the turn opening, a model or thinking-level change) are not reported:
+  /// they change neither the spend nor what the conversation weighs.
+  ///
+  /// Async for the same reason the other callbacks are: the caller usually has to tell someone.
+  on_commit? : async (@core.Session) -> Unit,
 ) -> TurnResult {
   // Streaming is optional: a caller that only wants the finished turn passes
   // nothing, and a caller rendering live passes the same callback this loop uses.
@@ -863,6 +873,10 @@ pub async fn run_turn(
   let progress : async (Int, Int) -> Unit = match on_progress {
     Some(callback) => callback
     None => fn(_calls, _tools) { () }
+  }
+  let committed : async (@core.Session) -> Unit = match on_commit {
+    Some(callback) => callback
+    None => fn(_session) { () }
   }
   let publish : async (ToolHandle?) -> Unit = match on_tool_process {
     Some(callback) => callback
@@ -906,6 +920,9 @@ pub async fn run_turn(
       ),
       timestamp,
     )
+    // The prompt is already part of what the next request carries, so the window has moved
+    // before a single token has been spent.
+    committed(session)
   }
   // The turn is opened in the log before any of its work happens. Between this entry and the
   // outcome written at the end, the turn is durably in flight — which is the only way to tell
@@ -987,11 +1004,15 @@ pub async fn run_turn(
     let (compacted, spent, happened) = compact_if_needed(
       ctx, session, timestamp,
     )
-    if happened {
-      compactions += 1
-    }
     session = compacted
     usage = add_usage(usage, spent)
+    if happened {
+      compactions += 1
+      // A compaction is the largest single move the context figure makes, and it happens just
+      // before a request that can take a minute: the reader who was told compaction was coming
+      // should see it land then, not one round later.
+      committed(session)
+    }
     rounds += 1
     let (updated, message) = call_model(
       ctx, session, level, timestamp, report, stopping,
@@ -999,6 +1020,9 @@ pub async fn run_turn(
     session = updated
     model_calls += 1
     usage = add_usage(usage, usage_of(message))
+    // As soon as the call is in the log, so the reader watching a long turn sees what it has spent
+    // so far rather than finding out what each of its calls cost once it is over.
+    committed(session)
     let text = assistant_text(message)
     truncated = cut_off_at_limit(message)
     if text != "" {
@@ -1012,6 +1036,8 @@ pub async fn run_turn(
     )
     session = after_tools
     tool_calls += executed
+    // The tool output is part of the next request, so how full the window is moved too.
+    committed(session)
     // After the round, not before: the counts are what the reader watches to tell
     // "still working on something" from "stuck".
     progress(model_calls, tool_calls)

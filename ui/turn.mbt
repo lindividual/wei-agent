@@ -171,7 +171,8 @@ async fn run_prompt(
   }
   // The bar's figures are per session and come from the log, so they are recomputed when a
   // turn changes them rather than on every frame — and only the figures are replaced, so a reader
-  // typing a key into the settings panel does not lose it because a turn ended.
+  // typing a key into the settings panel does not lose it because a turn ended or a model call
+  // came back.
   let refresh_bar = async fn() {
     app.hub.broadcast(
       @html.Patch::Replace(
@@ -179,6 +180,15 @@ async fn run_prompt(
         html=usage_node(app, app.shown()).render(),
       ).to_sse(),
     )
+  }
+  // The same refresh, only when the committing turn belongs to the session on screen. The bar's
+  // figures are the *displayed* session's, so a turn running somewhere else would send the same
+  // bytes to every tab on every one of its model calls, and several sessions running at once is
+  // exactly when that adds up.
+  let refresh_bar_if_shown = async fn() {
+    if app.displayed == runner.path {
+      refresh_bar()
+    }
   }
   // The model picker locks while a turn runs, and that is a change to the *displayed* session's
   // state, so it is refreshed with the other panels rather than only when the model changes. The
@@ -447,6 +457,13 @@ async fn run_prompt(
         should_stop=() => runner.aborting.value,
         on_tool~,
         on_progress~,
+        // Every commit, not just the end of the turn. This is what makes the tokens, the cache
+        // reads and the context figure move while the turn runs: each model call's numbers are in
+        // the log the moment the response ends.
+        on_commit=async fn(in_flight) {
+          runner.in_flight_session = Some(in_flight)
+          refresh_bar_if_shown()
+        },
         on_tool_process=handle => {
           runner.phase = match handle {
             Some(running) => {
@@ -544,6 +561,7 @@ async fn run_prompt(
       finished
     })
     runner.session = result.session
+    runner.in_flight_session = None
     app.hub.broadcast(
       @html.replace_node(
         @html.exchange_id(index),
@@ -578,12 +596,16 @@ async fn run_prompt(
           @html.exchange_id(index),
           // A failed turn is still a turn that was paid for, and the reader deciding whether to
           // retry is the one who needs to know what it cost — which is why the figures are here
-          // rather than only on the path that succeeded.
+          // rather than only on the path that succeeded. Rendered from the newest copy of the log:
+          // the driver commits every step as it goes, so `session` is behind the file by however
+          // far the turn got, and the call that failed the turn is not in it at all.
           @html.render_exchange(
             index,
             Some(text),
-            @html.reply_pieces(runner.session.context().messages),
-            stats=Some(@html.turn_stats_of(runner.session.context().messages)),
+            @html.reply_pieces(runner.latest_log().context().messages),
+            stats=Some(
+              @html.turn_stats_of(runner.latest_log().context().messages),
+            ),
           ),
         ).to_scoped_sse(session),
       )
@@ -597,6 +619,10 @@ async fn run_prompt(
   runner.phase = ""
   runner.tool = None
   runner.busy = false
+  // Dropped with the turn: what it held is now in `session`. Left behind it would answer for a
+  // state the session no longer has — after a stop, the driver's last commit is the turn being
+  // abandoned, which the panel would then keep reporting as if it were still running.
+  runner.in_flight_session = None
   refresh_sidebar()
   refresh_tasks()
   refresh_bar()

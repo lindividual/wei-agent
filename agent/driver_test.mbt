@@ -564,6 +564,59 @@ async test "entries are timestamped when they happen" {
 }
 
 ///|
+/// The figures a turn reports arrive as it runs, not when it ends.
+///
+/// A turn of twenty rounds would otherwise hand the whole of its spend over at the moment the reader
+/// stops needing it, and the tokens, the cache reads and how full the window is are what they watch
+/// *while* a long turn runs. So every write to the log is reported with the log as it stands, and a
+/// call's own numbers are there before the next one is made.
+async test "the log is reported at every commit, not only at the end" {
+  let dir = scratch("usage-live")
+  @platform.write_text("\{dir}/note.txt", "live-output\n")
+  let seen : Array[String] = []
+  // Replies, billed input, messages on the path — what the bar reads off each snapshot.
+  let snapshots : Array[(Int, Int, Int)] = []
+  with_fake_model([read_tool_call_sse("note.txt"), text_sse("done")], seen, async fn(
+    base_url,
+  ) {
+    let ctx = context_for(dir, base_url, [])
+    let result = @agent.run_turn(
+      ctx,
+      "read a file",
+      FIXED_TIME,
+      thinking_level="high",
+      on_commit=session => {
+        let usage = session.usage()
+        snapshots.push(
+          (
+            usage.replies,
+            usage.billed_input(),
+            session.context().messages.length(),
+          ),
+        )
+      },
+    )
+    assert_eq(result.model_calls, 2)
+    // The prompt, the two responses and the tool round. The turn opening and the model change are
+    // bookkeeping: they move neither the spend nor the conversation.
+    assert_eq(snapshots.length(), 4)
+    // Nothing spent yet when the prompt goes in, and the window has already moved — the figure a
+    // reader watches when a turn spends a long time before its first token.
+    let (spent, _, _) = snapshots[0]
+    assert_eq(spent, 0)
+    // The first call's own tokens are reported while the turn is still working on the second.
+    let (first, input, _) = snapshots[1]
+    assert_eq(first, 1)
+    assert_eq(input, 10, msg="the first scripted call bills 10 prompt tokens")
+    // The last snapshot before the turn ended has the whole of it, tool round included — that is
+    // what the bar is left showing.
+    let (all, _, messages) = snapshots[snapshots.length() - 1]
+    assert_eq(all, result.model_calls)
+    assert_eq(messages, result.session.context().messages.length())
+  })
+}
+
+///|
 /// A turn reports each tool as it finishes, and its counts as they grow.
 ///
 /// This is what a page renders to look alive during a long turn, so the events and the

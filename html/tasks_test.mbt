@@ -1,46 +1,39 @@
 ///|
-/// The background panel keeps live jobs and counts the finished ones rather than listing a card
-/// for every command ever run. The panel sits above the session list, so an unbounded history is
-/// paid for by the thing the reader came to the sidebar to click.
-test "the background panel caps finished jobs but never drops a live one" {
+/// Every card the background panel draws is a job that can be stopped.
+///
+/// Which jobs reach here is the `ui` package's decision — only the live ones do. What this package
+/// owns is the shape: a Kill button on every card, and no finished-job bookkeeping left behind. A
+/// card without a Kill would be a row the reader can neither act on nor dismiss, which is exactly
+/// what the panel is above the session list for.
+test "each job card offers a Kill and none is marked finished" {
   let items : Array[JobItem] = []
-  for i in 0..<6 {
-    items.push(job_item("done-\{i}", false, 1000L * (i + 1).to_int64()))
-  }
   for i in 0..<2 {
-    items.push(job_item("live-\{i}", true, 1000L))
+    items.push(job_item("live-\{i}", 1000L))
   }
   let html = render_jobs(items, 1_700_000_000_000L).render()
-  // Both live ones, with the only way to stop them.
   assert_eq(count_of(html, "data-kill="), 2, msg=html)
-  // Three finished ones, and a count of the rest rather than silence.
-  assert_eq(count_of(html, "task done"), 3, msg=html)
-  assert_true(html.contains("3 older"), msg=html)
+  assert_eq(count_of(html, "class=\"task\""), 2, msg=html)
+  assert_false(html.contains("task done"), msg=html)
+  assert_false(html.contains("older"), msg=html)
+}
+
+///|
+/// Nothing running is an empty container rather than an empty heading: a section that is usually
+/// empty should not take up space or attention.
+test "the background panel takes no space when no job is live" {
+  let items : Array[JobItem] = []
+  assert_eq(render_jobs(items, 1L).render(), "<div id=\"jobs\"></div>")
 }
 
 ///|
 /// One job, as the tests build them.
-fn job_item(id : String, live : Bool, age_ms : Int64) -> JobItem {
+fn job_item(id : String, age_ms : Int64) -> JobItem {
   {
     id,
     label: "sleep 300",
     kind: "bash",
-    status: if live {
-      "running"
-    } else {
-      "completed"
-    },
+    status: "running",
     age_ms,
-    pids: if live {
-      [42]
-    } else {
-      []
-    },
-    live,
-    detail: if live {
-      ""
-    } else {
-      "exited on its own"
-    },
+    pids: [42],
   }
 }
