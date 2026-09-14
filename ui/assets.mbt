@@ -26,7 +26,10 @@ pub fn client_script() -> String {
     "// asks for a session: a long conversation is read from the newest end, and landing at the top",
     "// means scrolling past everything first. Streaming appends are different — they follow only",
     "// when the reader is already at the bottom, so scrolling up to read is not yanked away.",
-    "let land = true;", "", "function atBottom() {", "  return window.innerHeight + window.scrollY >= document.body.offsetHeight - 160;",
+    "let land = true;",
+    // Set when the reader asks for more of the conversation, so the transcript replacement that
+    // answers it can correct the scroll offset instead of just keeping it. See `apply`.
+     "let grow = false;", "", "function atBottom() {", "  return window.innerHeight + window.scrollY >= document.body.offsetHeight - 160;",
     "}", "", "function toBottom() { window.scrollTo(0, document.body.scrollHeight); }",
     // Code blocks are the one thing a reader routinely wants to take away with them, and they
     // arrive as opaque HTML from the markdown renderer — there is no node the server could have
@@ -35,7 +38,9 @@ pub fn client_script() -> String {
     //
     // The language comes from the `language-…` class cmark puts on the `<code>`, which nothing
     // else on the page was reading.
-     "", "function decorateCode() {", "  const scope = document.getElementById('transcript');",
+    // One measurement per distinct language, shared across every call — the note inside
+    // `decorateCode` is why the width is cached by language rather than taken per block.
+     "const controlWidths = new Map();", "", "function decorateCode() {", "  const scope = document.getElementById('transcript');",
     "  if (!scope) return;", "  for (const pre of scope.querySelectorAll('pre:not([data-copyable])')) {",
     "    pre.setAttribute('data-copyable', '1');", "    const code = pre.querySelector('code');",
     "    const lang = code && code.className.indexOf('language-') === 0 ? code.className.slice(9) : '';",
@@ -64,8 +69,17 @@ pub fn client_script() -> String {
     // badge is as wide as the language's name, and a reserve a few pixels short leaves the end of a
     // scrolled line underneath the Copy button, where no amount of scrolling recovers it. The
     // stylesheet's own value is what shows in the moment before this runs.
-     "    wrap.style.setProperty('--code-controls', (tools.offsetWidth + 12) + 'px');",
-    "  }", "}", "",
+    //
+    // Measured once per *language*, not once per block. Reading `offsetWidth` after changing the DOM
+    // forces a synchronous layout, and doing that for every block turned decorating a long
+    // transcript into seconds of layout thrashing — 1,919 blocks cost 3.4 seconds, which was more
+    // than parsing and inserting the whole transcript put together. The width only depends on the
+    // badge text and the button, so one measurement per distinct language is both correct and
+    // roughly two orders of magnitude cheaper.
+     "    let reserved = controlWidths.get(lang);", "    if (reserved === undefined) {",
+    "      reserved = tools.offsetWidth + 12;", "      controlWidths.set(lang, reserved);",
+    "    }", "    wrap.style.setProperty('--code-controls', reserved + 'px');", "  }",
+    "}", "",
     // The command list is shown only while the composer holds something trying to be a command: a
     // slash with no space after it yet. A slash anywhere else is a path or a division, and the page
     // should not open a menu over someone typing `/usr/local/bin` into the middle of a sentence.
@@ -119,21 +133,76 @@ pub fn client_script() -> String {
     // Removed first, so a block that is replaced again before the timer fires cannot be scheduled
     // to fold twice — and so a reader who opened it in the meantime keeps it open.
      "    block.removeAttribute('data-settle');", "    setTimeout(() => { block.open = false; }, ms);",
-    "  }", "}", "", "function apply(patch) {", "  if (patch.op === 'status') { status.textContent = patch.text; return; }",
+    "  }", "}",
+    // A tool block that has reported, and the fold it belongs in.
+    //
+    // The newest finished tool is left outside for a moment — long enough to read the result — and
+    // then file() puts it away when the next tool starts. It is folded on the way in rather than
+    // arriving folded: the two halves say different things ("here is what came back" and "that is
+    // done with now"), and doing both at once would read as the result being whisked away.
+    //
+    // Folding and filing are separate attributes on separate frames, not a delay decided here: the
+    // server says when each happens, because the server is the one that knows whether a turn has
+    // more work to do.
+     "", "function file(scope) {", "  if (!scope) return;", "  const movers = scope.matches('[data-file]') ? [scope] : [...scope.querySelectorAll('[data-file]')];",
+    "  for (const mover of movers) {", "    const block = document.getElementById(mover.dataset.file);",
+    "    const fold = document.getElementById(mover.dataset.fileInto);",
+    // Cleared first for the same reason as the fold above: one instruction, acted on once.
+     "    mover.removeAttribute('data-file');", "    mover.removeAttribute('data-file-into');",
+    "    if (!block || !fold) continue;", "    setTimeout(() => {",
+    // Folded by hand, because this block is not being replaced by the server again — it is moving,
+    // and the fold is what says it is over. Without this the last tool in a turn would stay open.
+     "      block.open = false;",
+    // Moved, not re-rendered: the server has no patch that says "put this there", and re-sending the
+    // markup would lose anything the reader had opened inside it.
+     "      fold.appendChild(block);", "    }, 200);", "  }", "}", "", "function apply(patch) {",
+    "  if (patch.op === 'status') { status.textContent = patch.text; return; }",
     "  const node = document.getElementById(patch.target);", "  if (!node) return;",
     "  const follow = atBottom();", "  if (patch.op === 'append') node.insertAdjacentHTML('beforeend', patch.html);",
     "  else if (patch.op === 'appendtext') node.insertAdjacentText('beforeend', patch.text);",
     "  else if (patch.op === 'replace') {", "    // Replacing the transcript is a session arriving. Landing at its end is what the reader",
     "    // came for; a reconnect replaces the same content, so there the reader keeps their place.",
-    "    const keep = window.scrollY;", "    node.outerHTML = patch.html;", "    decorateCode();",
-    "    settle(document.getElementById(patch.target));", "    if (patch.target === 'transcript' && land) { land = false; toBottom(); }",
-    "    else window.scrollTo(0, keep);", "    return;", "  }", "  if (patch.op === 'append') { decorateCode(); settle(node); }",
+    "    const keep = window.scrollY;",
+    // Growing upward needs a different correction from every other replace, and the browser will not
+    // do it for us: the whole transcript is one element, so swapping it is not "content inserted
+    // above the viewport" as far as scroll anchoring is concerned — it is a new subtree, and the
+    // scroll offset is simply kept. Keeping the offset while the page grows above the reader moves
+    // what they were reading down by exactly the height that was added: measured at 4,202px for
+    // three turns. So the offset is corrected by the height difference instead.
+     "    const growFrom = grow ? document.body.scrollHeight : 0;", "    node.outerHTML = patch.html;",
+    "    decorateCode();", "    settle(document.getElementById(patch.target));",
+    "    file(document.getElementById(patch.target));", "    if (patch.target === 'transcript' && land) { land = false; toBottom(); }",
+    "    else if (grow && patch.target === 'transcript') {", "      grow = false;",
+    "      window.scrollTo(0, keep + (document.body.scrollHeight - growFrom));",
+    "    }", "    else window.scrollTo(0, keep);", "    return;", "  }", "  if (patch.op === 'append') { decorateCode(); settle(node); file(node); }",
     "  if (follow) toBottom();", "}", "", "// Before the first frame arrives, so the page opens where the conversation ended.",
     "toBottom();", "decorateCode();", "", "// Which session this page is showing. Sessions run in parallel, so a patch produced",
     "// for another one has to be dropped: applying it would append a hidden session's",
     "// output to the visible transcript.", "let shown = document.getElementById('transcript').dataset.shownSession;",
-    "", "new EventSource('/events').addEventListener('patch', event => {", "  const frame = JSON.parse(event.data);",
-    "  if (frame.session) {", "    if (frame.session === shown) apply(frame.patch);",
+    "",
+    // The stream, and whether it is still alive.
+    //
+    // `EventSource` reconnects on its own once it *notices* a broken connection, and the frames it
+    // missed while disconnected are re-fetched as a whole snapshot on reconnect. The gap is the
+    // noticing: a half-open socket — the browser swapped networks, the machine slept, a proxy
+    // dropped the flow — produces no error for minutes, or ever. The page sits frozen on whatever
+    // it was last told, and a manual reload fixes it, which is exactly what makes it hard to report.
+    //
+    // So this does not trust the connection to notice. Every frame carries a liveness signal for
+    // free: if *anything* arrives, the pipe works. The server also sends a named `ping` when it has
+    // nothing else to say, so an idle connection is still observably alive. When neither has
+    // happened for longer than that ping period allows, the page rebuilds the stream itself.
+     "let lastSeen = Date.now();", "let stream = null;", "const LIVENESS_MS = 40000;",
+    "function connect() {", "  if (stream) stream.close();",
+    // Connecting counts as having heard something. Without this the watchdog's own reconnects feed
+    // it: a rebuild that is answered with nothing (the server is busy rendering, not dead) leaves
+    // the old timestamp in place, so the next check fires five seconds later and rebuilds again —
+    // and every rebuild asks the server for a whole snapshot, which is the most expensive thing it
+    // does. A slow server would be pushed further behind by the page trying to help. Treating the
+    // reconnect as a liveness event bounds the retry to one per staleness window.
+     "  lastSeen = Date.now();", "  stream = new EventSource('/events');", "  stream.addEventListener('ping', () => { lastSeen = Date.now(); });",
+    "  stream.addEventListener('patch', event => {", "  lastSeen = Date.now();",
+    "  const frame = JSON.parse(event.data);", "  if (frame.session) {", "    if (frame.session === shown) apply(frame.patch);",
     "    return;", "  }",
     // Which session this page is showing is re-read in a `finally`, and that word is doing real
     // work. An unscoped transcript replacement is the only thing that tells the page it has moved
@@ -144,7 +213,8 @@ pub fn client_script() -> String {
     // right, and the client is quietly listening for the wrong session.
      "  try {", "    apply(frame);", "  } finally {", "    if (frame.op === 'replace' && frame.target === 'transcript') {",
     "      const node = document.getElementById('transcript');", "      shown = node ? node.dataset.shownSession : '';",
-    "    }", "  }", "});", "", "// One listener for the whole sidebar: rows come and go as the regions refresh, and",
+    "    }", "  }", "  });", "}", "connect();", "setInterval(() => { if (Date.now() - lastSeen > LIVENESS_MS) connect(); }, 5000);",
+    "", "// One listener for the whole sidebar: rows come and go as the regions refresh, and",
     "// listeners attached per row would not survive that.", "document.addEventListener('click', event => {",
     // The navigation fold. A class on the sidebar rather than the `open` attribute of a
     // `<details>`, because the element has to survive a region refresh and a rebuilt `<details>`
@@ -182,6 +252,13 @@ pub fn client_script() -> String {
     // and the notice it produces offers the way back, which is the other answer to the same worry.
      "  const remove = event.target.closest('[data-delete]');", "  if (remove) {",
     "    fetch('/session/delete', { method: 'POST', body: remove.dataset.delete }).catch(() => {});",
+    "    return;", "  }",
+    // More of the conversation. The reply is a whole new transcript, so what keeps the reader's place
+    // is the browser's own scroll anchoring — it exists for exactly this, content inserted above the
+    // viewport. The button is disabled while its request is in flight, because pressing it twice
+    // moves the window twice and re-renders twice for one intention.
+     "  const earlier = event.target.closest('[data-earlier]');", "  if (earlier) {",
+    "    earlier.disabled = true;", "    grow = true;", "    fetch('/earlier', { method: 'POST', body: '' }).catch(() => {});",
     "    return;", "  }", "  const undo = event.target.closest('[data-undo]');",
     "  if (undo) {", "    fetch('/session/undo', { method: 'POST', body: undo.dataset.undo }).catch(() => {});",
     "    return;", "  }",

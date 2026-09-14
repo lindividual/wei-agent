@@ -38,6 +38,8 @@ import { join } from "node:path";
 import { createServer } from "node:net";
 
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+// Set once the page is attached, so the crash handler below can report what the page threw.
+let cdp = null;
 const UI_BIN = "_build/native/debug/build/ui/ui.exe";
 const KEEP = process.argv.includes("--keep");
 const PORT = await freePort();
@@ -398,7 +400,7 @@ async function main() {
     ws.addEventListener("open", resolve);
     ws.addEventListener("error", reject);
   });
-  const cdp = new Session(ws);
+  cdp = new Session(ws);
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");
 
@@ -694,7 +696,10 @@ async function main() {
     await cdp.eval(
       `(() => {
         const input = document.getElementById('prompt');
-        input.value = "Use the bash tool to run exactly this command, and wait for it to finish: /bin/sleep 20";
+        // Two tools, not one, and both halves matter: the slow one is what makes the running state
+        // observable (and survives the reload below), and the second one is what puts the first away
+        // — a tool is filed when the *next* one starts, so a turn with one tool never shows a fold.
+        input.value = "Use the bash tool to run exactly: /bin/sleep 20. Then use the bash tool again to run exactly: /bin/echo done. Then answer in one sentence.";
         document.getElementById('composer').requestSubmit();
         return true;
       })()`,
@@ -899,6 +904,10 @@ async function main() {
         settleAttrsLeft: document.querySelectorAll('#transcript [data-settle]').length,
         blocksWithResult: withResult.length,
         anyOpenWithResult: withResult.some((b) => b.hasAttribute('open')),
+        // The last one to have reported is the one allowed to be open; anything earlier is a block
+        // that should have folded and did not.
+        openIsNewest:
+          withResult.filter((b) => b.hasAttribute('open')).pop() === withResult[withResult.length - 1],
       };
     })()`);
     check(
@@ -921,9 +930,11 @@ async function main() {
       JSON.stringify(settled),
     );
     check(settled.blocksWithResult >= 1, "the tool's output is in the conversation", JSON.stringify(settled));
+    // A finished tool may legitimately be open for the moment its result just landed. What must not
+    // happen is an *older* one still hanging open — that is a block nobody folded.
     check(
-      settled.anyOpenWithResult === false,
-      "and no finished tool is left hanging open",
+      settled.anyOpenWithResult === false || settled.openIsNewest === true,
+      "and no finished tool is left hanging open behind the newest one",
       JSON.stringify(settled),
     );
     check(
@@ -931,6 +942,62 @@ async function main() {
       "nothing is left claiming to still be running or waiting to fold",
       JSON.stringify(settled),
     );
+
+    console.log("\nthe fold (finished tools go in, the running one stays out)");
+    // The second tool starting is what puts the first away. Waited for rather than read at once: the
+    // browser does the moving a moment after the frame that asks for it, so a check that ran
+    // immediately would sometimes catch the block still outside and call a working feature broken.
+    await cdp.waitFor(
+      `(() => {
+        const fold = document.querySelector('#transcript [id^=live-work]');
+        const block = document.getElementById(${JSON.stringify(liveTool.id)});
+        return !!(fold && block && fold.contains(block));
+      })()`,
+      "the finished tool to be put away in the fold",
+      120000,
+    );
+    const filed = await cdp.eval(`(() => {
+      const fold = document.querySelector('#transcript [id^=live-work]');
+      const root = document.querySelector('#transcript [id^=streams-]');
+      return {
+        label: fold.querySelector('summary').textContent,
+        foldOpen: fold.hasAttribute('open'),
+        inside: [...fold.querySelectorAll('details.tool')].map((b) => b.id),
+        // What is left at the top level of the stream: the fold, and whatever has not been put in it.
+        outside: [...root.children].map((c) => c.id + (c.classList.contains('running') ? ':running' : '')),
+        outsideTools: root.querySelectorAll(':scope > details.tool').length,
+        runningOutside: root.querySelectorAll(':scope > details.tool.running').length,
+        // Everything the model said, inside the fold. Should be empty: the fold holds tool blocks.
+        awayInside: fold.querySelectorAll('div.thinking, div.text').length,
+        thinkingOutside: root.querySelectorAll(':scope > div.thinking').length,
+      };
+    })()`);
+    check(
+      filed.inside.includes(liveTool.id),
+      "the tool that finished first is inside the fold",
+      JSON.stringify(filed),
+    );
+    check(
+      filed.label.includes("worked through 1 tool call"),
+      "and the fold says how many tools are in it",
+      JSON.stringify(filed.label),
+    );
+    check(
+      filed.outsideTools <= 1,
+      "no more than one tool block is left outside the fold",
+      JSON.stringify(filed),
+    );
+    // What the fold must never swallow: the model explaining itself. A result is something the
+    // reader asked for once and is done with; reasoning and the prose between tool calls have no
+    // other home, so putting them away would leave a page showing nothing but a clock.
+    check(
+      filed.awayInside === 0,
+      "and nothing the model said is put away with the tools",
+      JSON.stringify(filed),
+    );
+    // Nothing the reader has to keep open: the fold is a summary, and a summary that is already
+    // unfolded is just the page being tall again.
+    check(filed.foldOpen === false, "the fold itself is closed", JSON.stringify(filed));
     await cdp.waitFor(
       `!/working…/.test(document.getElementById('status').textContent)`,
       "the tool turn to finish before the next section",
@@ -2388,5 +2455,16 @@ async function main() {
 
 main().catch((err) => {
   console.error(`browser check crashed: ${err.message}`);
+  // Anything the page threw on the way, which is the usual reason a wait never becomes true. Without
+  // this the crash says only *what* did not happen, and the exception — the thing that explains it —
+  // is thrown away with the run.
+  if (cdp && cdp.exceptions.length > 0) {
+    console.error(`\nthe page threw ${cdp.exceptions.length} time(s):`);
+    for (const e of cdp.exceptions.slice(0, 5)) console.error(`  - ${e}`);
+  }
+  if (cdp && cdp.consoleErrors.length > 0) {
+    console.error(`\nthe page logged ${cdp.consoleErrors.length} error(s):`);
+    for (const e of cdp.consoleErrors.slice(0, 5)) console.error(`  - ${e.slice(0, 400)}`);
+  }
   process.exit(1);
 });

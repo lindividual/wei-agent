@@ -106,7 +106,15 @@ async fn LabelCache::label(
   let facts : SessionFacts = {
     // The first user message is near the top of the file, so the label only needs the beginning.
     label: @core.session_label(prefix_of(text, 16 * 1024)),
-    name: session_name_of(text),
+    // The name, on the other hand, only exists if the log holds a rename — and finding out by
+    // parsing the whole file was, measured, most of what building the sidebar cost. A log with no
+    // rename has no name to find, so the parse is skipped; one that has any pays for it as before.
+    // `false` is a definite answer, and `true` only means "look properly".
+    name: if @core.log_has_name_entry(text) {
+      session_name_of(text)
+    } else {
+      None
+    },
   }
   self.store(path, modified, facts)
   facts

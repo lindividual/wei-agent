@@ -1,15 +1,11 @@
 import {
   "lindividual/pi-web-shell/html",
+  "moonbitlang/async",
   "moonbitlang/async/aqueue",
   "moonbitlang/async/http",
   "moonbitlang/async/io",
   "moonbitlang/async/socket",
   "moonbitlang/core/encoding/utf8",
 }
-
-// The tests start the server and stop it again, which needs the runtime itself.
-import {
-  "moonbitlang/async",
-} for "test"
 
 supported_targets = "+native"

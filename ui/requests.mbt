@@ -552,6 +552,7 @@ fn Requests::routes(self : Requests) -> @server.Routes {
     // took and lands in the log identically.
     rename: name => self.rename(name),
     delete_session: path => self.delete(path),
+    earlier: () => self.earlier(),
     undo_delete: path => self.undo_delete(path),
     more: cwd => self.more(cwd),
     settings: body => self.apply_settings(body),
@@ -657,6 +658,25 @@ async fn next_session_after(app : App, path : String) -> Runner {
   }
   let (session, created) = create_session(app.root, cwd)
   Runner::new(session, created, app.default_model_id)
+}
+
+///|
+/// Show more of the conversation: raise the displayed session's render window one step.
+///
+/// A request the reader makes, not something scrolling does. Scroll-driven loading needs a notion of
+/// "what has already been loaded" that has to stay true across refreshes, reconnects and switches
+/// between sessions, and that state is where the bugs live — the transcript is a function of the
+/// session plus this one number, and the number only changes here.
+///
+/// The whole transcript is replaced rather than prepended to. Prepending would be cheaper, but it
+/// means two ways to produce the same region — the snapshot and the incremental path — and they
+/// drift. The reader's place is kept by the browser's own scroll anchoring, which is exactly the
+/// case it exists for.
+async fn Requests::earlier(self : Requests) -> Unit {
+  let app = self.app
+  let shown = app.shown()
+  shown.depth += transcript_window_step()
+  self.refresh()
 }
 
 ///|

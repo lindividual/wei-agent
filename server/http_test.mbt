@@ -25,13 +25,23 @@ async fn free_port() -> Int {
 
 ///|
 /// Run `body` with a server listening on a free port.
-async fn with_server(routes : Routes, body : async (Int) -> Unit) -> Unit {
+async fn with_server(
+  routes : Routes,
+  body : async (Int) -> Unit,
+  /// Overridden by the heartbeat test, which cannot wait fifteen seconds to see one.
+  heartbeat_ms? : Int = 15000,
+) -> Unit {
   let port = free_port()
   @async.with_task_group(group => {
     // `no_wait`: the server only ever stops when it is cancelled, so a group that
     // waits for it would wait for the test binary to be killed instead of
     // finishing the test.
-    ignore(group.spawn(() => serve(port, Hub::new(), routes), no_wait=true))
+    ignore(
+      group.spawn(
+        () => serve(port, Hub::new(), routes, heartbeat_ms~),
+        no_wait=true,
+      ),
+    )
     // The listener is up before the first connection, so a connect that succeeds
     // means the server is ready to serve it.
     @async.sleep(50)
@@ -123,6 +133,7 @@ fn routes_with(regions : Array[@html.Patch], seen : Array[String]) -> Routes {
     choose_workspace: fn() { seen.push("pick") },
     rename: name => seen.push("name:\{name}"),
     delete_session: path => seen.push("delete:\{path}"),
+    earlier: () => seen.push("earlier"),
     undo_delete: path => seen.push("undo:\{path}"),
     more: cwd => seen.push("more:\{cwd}"),
     kill_job: id => seen.push("kill:\{id}"),
@@ -300,5 +311,47 @@ async test "unknown routes are refused" {
       port, "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n", 3000,
     )
     assert_true(text.contains("404"), msg=text)
+  })
+}
+
+///|
+/// An idle stream is not silent forever.
+///
+/// This is the difference between a page that recovers and a page that has to be reloaded by hand.
+/// With nothing changing, neither end can tell a working connection from a dead one: `EventSource`
+/// only reconnects after an error, and a half-open socket does not produce one. The heartbeat gives
+/// the browser something to observe, and the client — which reads it and rebuilds the stream when it
+/// stops arriving — is what turns that into a recovery.
+///
+/// The frame has to be a *named event*, not an SSE comment: a comment is discarded by `EventSource`
+/// without firing anything, so the one party that needs to see it would not.
+async test "an idle stream sends a heartbeat the client can observe" {
+  let routes = routes_with([], [])
+  with_server(routes, heartbeat_ms=100, async fn(port) {
+    let tcp = @socket.Tcp::connect(@socket.Addr::parse("127.0.0.1:\{port}"))
+    defer tcp.close()
+    tcp.write("GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    let mut text = ""
+    try
+      @async.with_timeout(5000, async fn() {
+        while !text.contains("event: ping") {
+          match tcp.read_until("\n\n") {
+            Some(frame) => text = text + frame + "\n\n"
+            None => break
+          }
+        }
+      })
+    catch {
+      _ => ()
+    } noraise {
+      _ => ()
+    }
+    assert_true(
+      text.contains("event: ping"),
+      msg="an idle stream sent nothing, so a dead one looks the same: \{text}",
+    )
+    // The payload matters as much as the name: a frame with no `data:` line is not dispatched by
+    // every EventSource implementation.
+    assert_true(text.contains("data: {}"), msg=text)
   })
 }

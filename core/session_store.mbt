@@ -164,3 +164,30 @@ pub fn parent_of(path : String) -> String {
   }
   "."
 }
+
+///|
+/// The JSON token a rename writes, and nothing else does.
+///
+/// A name lives in a `session_info` entry, which means finding it means reading to the end of the
+/// log — the name is not near the label at the top, and there is no index. Parsing every entry of
+/// every session to discover that *none of them has a name* was, measured, about 80% of the cost of
+/// building the sidebar: 27MB of logs took 367ms, and 59ms of that was the reads.
+///
+/// So this is the cheap test that runs first. It is deliberately the *encoded* token rather than the
+/// bare word: `session_info` appears in the conversations themselves — the agent has written about
+/// this very field — and matching prose would send the slow path back to work for nothing. A file
+/// that does contain a real rename still pays for the parse, and a file this misses would be a bug
+/// in the encoder rather than a wrong answer here, which is what the test below pins.
+pub fn name_entry_token() -> String {
+  "\"type\":\"session_info\""
+}
+
+///|
+/// Whether this log contains a rename at all.
+///
+/// `false` means the session has no name and the expensive parse can be skipped: the name only ever
+/// comes from a `session_info` entry, so a log without one has nothing to find. `true` means "look
+/// properly", not "there is a name" — an entry that clears a name has the same shape.
+pub fn log_has_name_entry(text : String) -> Bool {
+  text.contains(name_entry_token())
+}

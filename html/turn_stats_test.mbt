@@ -142,7 +142,7 @@ test "a reloaded transcript recovers each turn's figures from the log" {
     2,
     msg="one footer per exchange",
   )
-  assert_true(html.contains("1 model call, 1 tool calls"), msg=html)
+  assert_true(html.contains("1 model call, 1 tool call"), msg=html)
   assert_true(html.contains("95% cached"), msg=html)
 }
 

@@ -300,6 +300,15 @@ async fn run_prompt(
   // the process finished *before* it reports the result — clearing it there would leave every
   // result with nothing to replace and no running block either.
   let mut open_tool : String? = None
+  // The fold the finished tools go into, and the finished block still outside it waiting to be filed.
+  // Both are ids rather than nodes: the server never holds the block, it only names it, and the
+  // browser is the one that moves it.
+  //
+  // `file_next` is the newest finished tool — left outside while the reader looks at it, and put away
+  // when the next tool starts, which is the moment it stops being the newest thing that happened.
+  let mut work : String? = None
+  let mut file_next : String? = None
+  let mut filed = 0
   let on_tool = (event : @agent.ToolEvent) => {
     let call : @core.Content = @core.ToolCall(
       id=event.call_id,
@@ -332,6 +341,9 @@ async fn run_prompt(
             @html.render_tool(id, call, Some(result), settling=true),
           ).to_scoped_sse(session),
         )
+        // Outside for now, so the reader can see what came back. The next tool to start is what puts
+        // it away — see `on_tool_process`.
+        file_next = Some(id)
         runner.trace(@html.Tool(id~, call~, result~))
       }
       // A report that was never announced — a driver that reports a tool without publishing one as
@@ -347,6 +359,9 @@ async fn run_prompt(
             @html.render_tool(id, call, Some(result)),
           ).to_scoped_sse(session),
         )
+        // Filed on the next tool's start like any other, so this path keeps one rule rather than
+        // two: the newest finished tool is outside, the rest are in the fold.
+        file_next = Some(id)
         runner.trace(@html.Tool(id~, call~, result~))
       }
     }
@@ -442,6 +457,33 @@ async fn run_prompt(
               let id = tool_block_id(index, tool_seq)
               let since = @env.now().reinterpret_as_int64()
               open_tool = Some(id)
+              // A tool starting is what tells the reader the previous one is over and done with, so
+              // it is also what puts the previous one away. The instruction travels on this frame
+              // rather than in a patch of its own: one frame, one row of the conversation moving.
+              let file = file_next
+              file_next = None
+              match file {
+                Some(_) =>
+                  // The first finished tool creates the fold, because a fold with nothing in it is a
+                  // lie about what the turn has done — it appears when there is a first thing to
+                  // put in it, and not a moment before.
+                  if work is None {
+                    let work_id = @html.live_work_id(index)
+                    work = Some(work_id)
+                    app.hub.broadcast(
+                      @html.append_node(
+                        stream_root,
+                        @html.render_work(
+                          work_id,
+                          @html.live_work_label_id(index),
+                          @html.live_work_label(filed),
+                          [],
+                        ),
+                      ).to_scoped_sse(session),
+                    )
+                  }
+                None => ()
+              }
               app.hub.broadcast(
                 @html.append_node(
                   stream_root,
@@ -450,9 +492,31 @@ async fn run_prompt(
                     running.name,
                     running.arguments,
                     since,
+                    file~,
+                    file_into=match work {
+                      Some(work_id) => work_id
+                      None => ""
+                    },
                   ),
                 ).to_scoped_sse(session),
               )
+              // The label counts what is inside the fold, and it is replaced on its own: replacing
+              // the fold would take with it the blocks the browser has been moving in.
+              match file {
+                Some(_) => {
+                  filed += 1
+                  app.hub.broadcast(
+                    @html.replace_node(
+                      @html.live_work_label_id(index),
+                      @html.render_work_label(
+                        @html.live_work_label_id(index),
+                        @html.live_work_label(filed),
+                      ),
+                    ).to_scoped_sse(session),
+                  )
+                }
+                None => ()
+              }
               // Recorded as soon as it is sent, so a browser that connects or switches back while
               // the tool is still running is given the same block — same id, same start time, so
               // its clock agrees with the one the browser at the other end is already showing.

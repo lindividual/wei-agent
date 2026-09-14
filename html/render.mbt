@@ -192,8 +192,23 @@ pub fn render_running_tool(
   name : String,
   arguments : Json,
   since : Int64,
+  /// The finished block to put away as this one starts.
+  ///
+  /// An instruction for the browser rather than something the browser works out: the server knows
+  /// which block is the newest finished one and where the fold is, and a client that had to derive
+  /// that would be re-implementing the rule `render_running_exchange` already holds.
+  file? : String? = None,
+  file_into? : String = "",
 ) -> Node {
-  el(Details, attrs=[cls("tool running"), attr("id", id), attr("open", "")], children=[
+  let attrs = [cls("tool running"), attr("id", id), attr("open", "")]
+  match file {
+    Some(previous) => {
+      attrs.push(attr("data-file", previous))
+      attrs.push(attr("data-file-into", file_into))
+    }
+    None => ()
+  }
+  el(Details, attrs~, children=[
     // Just the name: the clock is on the `running…` line below, with the rest of what is happening.
     el(Summary, children=[txt(name)]),
     frag(tool_body(arguments, None, since=Some(since))),
@@ -247,7 +262,7 @@ fn call_counts_text(stats : TurnStats) -> String {
   let out = StringBuilder()
   let plural = if stats.model_calls == 1 { "" } else { "s" }
   out.write_string(
-    "\{stats.model_calls} model call\{plural}, \{stats.tool_calls} tool calls",
+    "\{stats.model_calls} model call\{plural}, \{tool_calls_phrase(stats.tool_calls)}",
   )
   if stats.compactions > 0 {
     out.write_string(", \{stats.compactions} compacted")
@@ -425,11 +440,61 @@ pub fn turn_stats_of(messages : Array[@core.ContextMessage]) -> TurnStats {
 /// The label carries the call counts rather than just naming the fold, which is what makes the fold
 /// worth looking at: the same answer arrived at in three calls and in thirty is the same text read
 /// from two very different turns.
-pub fn render_work(id : String, label : String, blocks : Array[Node]) -> Node {
+
+///|
+/// A fold's label, as a node of its own so it can be replaced without the fold.
+///
+/// The live fold's label changes as tools are put away, and replacing the fold to change it would
+/// throw away the blocks inside — which are there because the browser moved them there, not because
+/// the server sent them.
+pub fn render_work_label(id : String, label : String) -> Node {
+  el(Summary, attrs=[attr("id", id)], children=[txt(label)])
+}
+
+///|
+/// A turn's working, folded away.
+pub fn render_work(
+  id : String,
+  label_id : String,
+  label : String,
+  blocks : Array[Node],
+) -> Node {
   el(Details, attrs=[cls("work"), attr("id", id)], children=[
-    el(Summary, children=[txt(label)]),
+    render_work_label(label_id, label),
     frag(blocks),
   ])
+}
+
+///|
+/// The fold a running turn puts its finished tools into.
+///
+/// One per turn, like the stream root. `render_running_exchange` builds the same fold from the same
+/// pieces, which is what lets a browser that joins mid-turn keep receiving into it.
+pub fn live_work_id(index : Int) -> String {
+  "live-work-\{index}"
+}
+
+///|
+/// That fold's label, which is replaced each time a tool goes in.
+pub fn live_work_label_id(index : Int) -> String {
+  "live-work-\{index}-label"
+}
+
+///|
+/// "3 tool calls", with the plural in one place.
+fn tool_calls_phrase(count : Int) -> String {
+  "\{count} tool call\{if count == 1 { "" } else { "s" }}"
+}
+
+///|
+/// What the live fold says on its summary line.
+///
+/// It names what is inside it rather than what the turn has cost: the figures are the status line's
+/// job while a turn runs, and this line is a door — "there are three tools behind here" is what
+/// makes it worth opening. The finished turn's fold says the same kind of thing with the whole
+/// turn's counts (`call_counts_text`), which is a superset of this.
+pub fn live_work_label(count : Int) -> String {
+  "worked through \{tool_calls_phrase(count)}"
 }
 
 ///|
@@ -485,7 +550,14 @@ pub fn render_exchange(
       Some(s) => "worked through \{call_counts_text(s)}"
       None => "what it did"
     }
-    blocks.push(render_work("exchange-\{index}-work", label, work))
+    blocks.push(
+      render_work(
+        "exchange-\{index}-work",
+        "exchange-\{index}-work-label",
+        label,
+        work,
+      ),
+    )
   }
   for node in answer {
     blocks.push(node)
@@ -579,6 +651,18 @@ pub fn render_transcript(
   /// Sections to append after the conversation — a turn that is still running, which the
   /// committed messages do not describe yet.
   extra? : Array[Node] = [],
+  /// How many of the *newest* exchanges to render, or 0 for all of them.
+  ///
+  /// The cost of a transcript is dominated by its size — the HTML, the JSON frame it arrives in, and
+  /// every node the browser builds from it — and a reader almost always wants the end of a
+  /// conversation, not its beginning. Measured on a real 14-turn session, the newest six exchanges
+  /// are a third of the bytes and a third of the nodes, which is most of what a switch costs.
+  ///
+  /// What is dropped is not lost: the count of what is missing is rendered as a control at the top,
+  /// and raising the limit is a request, not a scroll. Deliberately not scroll-driven — scroll-based
+  /// loading needs a notion of "already loaded" that has to survive refreshes, reconnects and
+  /// session switches, and that state is where the bugs are.
+  limit? : Int = 0,
 ) -> Node {
   let sections : Array[Node] = []
   let mut user : String? = None
@@ -593,12 +677,21 @@ pub fn render_transcript(
   let mut compactions = 0
   let mut usage = @core.Usage::zero()
   let mut truncated = false
+  // Every exchange is *collected* as it is walked, and only the last few are rendered. Collecting is
+  // cheap — it holds the pieces the session already has, not new strings — and it removes the need to
+  // predict how many exchanges there are, which is the kind of arithmetic that was wrong twice while
+  // this was being written: the last exchange is flushed after the loop rather than inside it, so
+  // counting user messages and counting rendered exchanges do not agree.
+  let exchanges : Array[(Int, String?, Array[Piece], TurnStats)] = []
   let mut index = 0
   for message in messages {
     match message {
       @core.User(m) => {
         drain(pieces, blocks, results)
-        push_exchange(sections, index, user, pieces, {
+        // The index is carried, not renumbered, so a rendered exchange keeps the id it had while it
+        // was streaming: a patch that targets `exchange-13-blocks` has to find it under that name
+        // whether or not the turns before it were rendered.
+        collect(exchanges, index, user, pieces, {
           model_calls,
           tool_calls,
           compactions,
@@ -635,13 +728,28 @@ pub fn render_transcript(
     }
   }
   drain(pieces, blocks, results)
-  push_exchange(sections, index, user, pieces, {
+  collect(exchanges, index, user, pieces, {
     model_calls,
     tool_calls,
     compactions,
     usage,
     truncated,
   })
+  // The last `limit` of them, or all of them. No arithmetic beyond a subtraction, and the count the
+  // control reports is the count that was withheld.
+  let from = if limit > 0 && exchanges.length() > limit {
+    exchanges.length() - limit
+  } else {
+    0
+  }
+  for node in render_exchanges(exchanges, from) {
+    sections.push(node)
+  }
+  // The way back to what was left out, at the top, where the missing turns would have been. Its
+  // presence is also the honest signal that this is not the whole conversation.
+  if from > 0 {
+    sections.insert(0, render_earlier(from))
+  }
   for node in extra {
     sections.push(node)
   }
@@ -711,6 +819,33 @@ pub fn render_welcome() -> Node {
 }
 
 ///|
+/// The control that brings back the turns that were not rendered.
+///
+/// It says how many are missing rather than just "more", because a reader deciding whether to spend
+/// the load wants to know how much conversation is above them.
+pub fn render_earlier(count : Int) -> Node {
+  el(Div, attrs=[cls("earlier")], children=[
+    el(
+      Button,
+      attrs=[
+        cls("earlier-button"),
+        attr("type", "button"),
+        attr("data-earlier", ""),
+      ],
+      children=[
+        txt(
+          if count == 1 {
+            "1 earlier turn"
+          } else {
+            "\{count} earlier turns"
+          },
+        ),
+      ],
+    ),
+  ])
+}
+
+///|
 /// A piece of a turn that is still arriving.
 ///
 /// The ids are the ones the live patches use as their targets, which is what lets a
@@ -751,7 +886,49 @@ pub fn render_running_exchange(
   user : String,
   pieces : Array[LivePiece],
 ) -> Node {
+  // Which finished tools are put away, and which is left out.
+  //
+  // The newest finished tool stays outside, and every older one is in the fold. That is the rule
+  // whether or not a tool is running, and it has to be, because it has to match what the streaming
+  // path did a moment ago: the newest finished tool is the one whose result the reader is looking at,
+  // and it is put away only when the *next* tool starts — at which point it stops being the newest.
+  //
+  // Making the rule depend on whether a tool is running would put a block in the fold for the second
+  // between one tool finishing and the next starting, so a reader who reloaded inside that second
+  // would see folded what everyone else is still looking at.
+  let finished : Array[String] = []
+  for piece in pieces {
+    match piece {
+      Tool(id~, ..) => finished.push(id)
+      _ => ()
+    }
+  }
+  let filed = if finished.length() > 0 { finished.length() - 1 } else { 0 }
+  // The folded blocks, collected in the same pass that counts them, so "which are inside" and "what
+  // is inside" cannot come apart.
+  let filed_nodes : Array[Node] = []
+  for piece in pieces {
+    match piece {
+      Tool(id~, call~, result~) =>
+        if filed_nodes.length() < filed {
+          filed_nodes.push(render_tool(id, call, Some(result)))
+        }
+      _ => ()
+    }
+  }
+  let fold = if filed_nodes.is_empty() {
+    Node::Empty
+  } else {
+    render_work(
+      live_work_id(index),
+      live_work_label_id(index),
+      live_work_label(filed_nodes.length()),
+      filed_nodes,
+    )
+  }
   let children : Array[Node] = []
+  let mut placed = false
+  let mut seen_tools = 0
   for piece in pieces {
     match piece {
       Text(id~, text~) =>
@@ -762,8 +939,19 @@ pub fn render_running_exchange(
         )
       Thinking(id~, text~) =>
         children.push(render_thinking_stream(id, "\{id}-body", text~))
-      Tool(id~, call~, result~) =>
-        children.push(render_tool(id, call, Some(result)))
+      // The fold takes the place of the first tool that went into it, so everything that came before
+      // the tools stays before them and everything after stays after.
+      Tool(id~, call~, result~) => {
+        if seen_tools < filed {
+          if !placed {
+            children.push(fold)
+            placed = true
+          }
+        } else {
+          children.push(render_tool(id, call, Some(result)))
+        }
+        seen_tools += 1
+      }
       RunningTool(id~, name~, arguments~, since~) =>
         children.push(render_running_tool(id, name, arguments, since))
     }
@@ -822,8 +1010,8 @@ fn drain(
 }
 
 ///|
-fn push_exchange(
-  sections : Array[Node],
+fn collect(
+  exchanges : Array[(Int, String?, Array[Piece], TurnStats)],
   index : Int,
   user : String?,
   pieces : Array[Piece],
@@ -832,7 +1020,24 @@ fn push_exchange(
   if user is None && pieces.is_empty() {
     return
   }
-  sections.push(render_exchange(index, user, pieces, stats=Some(stats)))
+  exchanges.push((index, user, pieces, stats))
+}
+
+///|
+/// The exchanges from `from` onward, rendered.
+///
+/// Split out so the walk above never has to know how many there are: it collects, and this decides
+/// what is shown.
+fn render_exchanges(
+  exchanges : Array[(Int, String?, Array[Piece], TurnStats)],
+  from : Int,
+) -> Array[Node] {
+  let out : Array[Node] = []
+  for i in from..<exchanges.length() {
+    let (index, user, pieces, stats) = exchanges[i]
+    out.push(render_exchange(index, user, pieces, stats=Some(stats)))
+  }
+  out
 }
 
 ///|

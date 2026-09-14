@@ -58,6 +58,12 @@ struct Runner {
   /// The session as it stands. Replaced after each turn with the driver's copy, which
   /// is the one that has the new entries in it.
   mut session : @core.Session
+  /// How many of the newest turns this session's transcript renders.
+  ///
+  /// Per session, not global: asking to see the start of one long conversation is not asking for
+  /// every other one to be re-rendered from its beginning. It also means the window survives
+  /// switching away and back, which is what a reader who opened it expects.
+  mut depth : Int
   path : String
   /// Which directory this session's tools run in. A property of the session, not of the
   /// process: opening a session moved the agent to where that session lived.
@@ -169,6 +175,7 @@ fn Runner::new(
   // the reader's flag, the catalog default is the build's) and answering them here keeps the
   // precedence in one place.
   {
+    depth: transcript_window(),
     session,
     path,
     cwd,
@@ -529,4 +536,31 @@ fn queue_try_put(jobs : @aqueue.Queue[Job], job : Job) -> Bool {
   } noraise {
     queued => queued
   }
+}
+
+///|
+/// How many of the newest turns a transcript renders by default.
+///
+/// Chosen so that an ordinary conversation is not affected at all: the control only appears once a
+/// session is longer than this. Measured on a real 14-turn session, the newest six are about a third
+/// of the bytes and a third of the nodes — and those two are most of what switching to a session
+/// costs. Large enough that a reader working in a session rarely has to press it.
+fn transcript_window() -> Int {
+  6
+}
+
+///|
+/// How much one press of "earlier turns" adds.
+///
+/// Equal to the window, so the sequence is predictable: 6, 12, 18 — each press doubling what was
+/// there rather than adding an amount the reader has to add up.
+fn transcript_window_step() -> Int {
+  6
+}
+
+///|
+/// The window this session's transcript should render inside.
+fn App::depth_of(self : App, runner : Runner) -> Int {
+  let _ = self
+  runner.depth
 }

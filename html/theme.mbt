@@ -167,6 +167,11 @@ pub fn stylesheet() -> String {
      ".exchange { margin-bottom: var(--space-5); }", ".user { background: var(--surface); border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-3); white-space: pre-wrap; }",
     ".user > :first-child, .text > :first-child { margin-top: 0; }", ".user > :last-child, .text > :last-child { margin-bottom: 0; }",
     ".blocks > * { margin-bottom: var(--space-3); }", ".text { white-space: normal; }",
+    // ── the turns that were not rendered ────────────────────────────────────
+    // At the top of the transcript, which is where they would have been, and quiet: it is a way
+    // back for the reader who wants it, not a decision to make on the way in.
+     ".earlier { margin-bottom: var(--space-4); text-align: center; }", ".earlier button { font-size: var(--text-sm); color: var(--muted); border-color: var(--line); border-radius: var(--radius); padding: var(--space-1) var(--space-4); }",
+    ".earlier button:hover { color: var(--fg); border-color: var(--line-strong); }",
     ".blocks details { border-left: 2px solid var(--line); padding-left: var(--space-3); }",
     ".blocks details.tool > summary { font-family: var(--mono); }", ".blocks details.compaction { border-left-style: dashed; }",
     // A running tool is the same block as a finished one — same arguments, same body, same colours —

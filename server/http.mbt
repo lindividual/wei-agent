@@ -86,6 +86,9 @@ pub(all) struct Routes {
   more : async (String) -> Unit
   /// Puts the last deleted session back. The body is the path it had.
   undo_delete : async (String) -> Unit
+  /// Shows more of the displayed session's conversation. No body: the session is the one on screen,
+  /// and the window is a property of it.
+  earlier : async () -> Unit
   /// Switches the displayed session to the model named in the body, which is one id.
   ///
   /// Its own route rather than a settings form: the model is a property of a session, not of the
@@ -131,6 +134,32 @@ async fn ok(conn : @http.ServerConnection) -> Unit {
 }
 
 ///|
+/// How often an idle patch stream says something anyway.
+///
+/// A live stream is silent for as long as nothing changes, and a long tool call changes nothing for
+/// minutes. Silence is indistinguishable from a dead connection at *both* ends: the browser has no
+/// reason to reconnect, because `EventSource` only retries after an error, and a half-open socket
+/// produces no error until a write finally fails — which on a quiet connection can be many minutes,
+/// or never.
+///
+/// The reader's symptom is a page frozen on "running" that a manual reload fixes, because
+/// reconnecting fetches the whole snapshot. That is the failure this bounds.
+pub fn heartbeat_interval_ms() -> Int {
+  15000
+}
+
+///|
+/// The frame that says "still here" when there is nothing else to say.
+///
+/// A named event rather than an SSE comment (`: ping`). A comment is legal and cheaper, but
+/// `EventSource` discards comments without firing anything — so the client, the one party that needs
+/// to observe the heartbeat, would never see it. The name is what makes liveness checkable from the
+/// page.
+pub fn heartbeat_frame() -> String {
+  "event: ping\ndata: {}\n\n"
+}
+
+///|
 /// Serve one SSE subscriber until it goes away.
 ///
 /// The first frames are the whole mutable page, so a client that connects
@@ -140,6 +169,7 @@ async fn stream_events(
   conn : @http.ServerConnection,
   hub : Hub,
   routes : Routes,
+  heartbeat_ms : Int,
 ) -> Unit {
   conn.send_response(200, "OK", extra_headers={
     "Content-Type": "text/event-stream",
@@ -156,20 +186,38 @@ async fn stream_events(
   conn.flush()
   // A failure here means the browser went away; there is nothing to report, only
   // a subscriber to remove.
-  let alive = try {
-    while true {
-      let frame = queue.get()
-      conn.write_string(frame)
-      conn.flush()
+  @async.with_task_group(group => {
+    // The heartbeat is put into the subscriber's own queue rather than written to the socket from
+    // here, and the reason is the second one: there is exactly one writer, so a ping cannot land in
+    // the middle of a frame's bytes; and the read stays a plain blocking read. Wrapping `queue.get()`
+    // in a timeout would *cancel* it, and a frame arriving in that same instant would be lost —
+    // trading a rare hang for a rare silently dropped patch.
+    group.spawn_bg(no_wait=true, () => {
+      while true {
+        @async.sleep(heartbeat_ms)
+        // A closed queue means the writer loop has ended and the group is being cancelled.
+        try queue.put(heartbeat_frame()) catch {
+          _ => ()
+        } noraise {
+          _ => ()
+        }
+      }
+    })
+    let alive = try {
+      while true {
+        let frame = queue.get()
+        conn.write_string(frame)
+        conn.flush()
+      }
+      true
+    } catch {
+      _ => false
+    } noraise {
+      _ => true
     }
-    true
-  } catch {
-    _ => false
-  } noraise {
-    _ => true
-  }
-  hub.unsubscribe(id)
-  ignore(alive)
+    hub.unsubscribe(id)
+    ignore(alive)
+  })
   conn.end_response()
 }
 
@@ -182,7 +230,14 @@ async fn read_body(body : &@io.Reader) -> String {
 
 ///|
 /// Run the server until cancelled.
-pub async fn serve(port : Int, hub : Hub, routes : Routes) -> Unit {
+pub async fn serve(
+  port : Int,
+  hub : Hub,
+  routes : Routes,
+  /// How often an idle stream is told the connection is still there. A production default, and a
+  /// parameter so a test can ask for a heartbeat it does not have to wait fifteen seconds for.
+  heartbeat_ms? : Int = 15000,
+) -> Unit {
   // `reuse_addr` so a restart does not fail on a socket still in TIME_WAIT. Without
   // it, stopping and starting within a minute is enough to hit
   // "Address already in use" with nothing actually listening.
@@ -199,7 +254,7 @@ pub async fn serve(port : Int, hub : Hub, routes : Routes) -> Unit {
         conn.write_string((routes.page)())
         conn.end_response()
       }
-      (Get, "/events") => stream_events(conn, hub, routes)
+      (Get, "/events") => stream_events(conn, hub, routes, heartbeat_ms)
       (Post, "/abort") => {
         // The body names the session to stop; empty means the one on screen.
         let target = read_body(body)
@@ -220,6 +275,10 @@ pub async fn serve(port : Int, hub : Hub, routes : Routes) -> Unit {
         let name = read_body(body)
         ok(conn)
         (routes.rename)(name)
+      }
+      (Post, "/earlier") => {
+        ok(conn)
+        (routes.earlier)()
       }
       (Post, "/session/delete") => {
         let path = read_body(body)

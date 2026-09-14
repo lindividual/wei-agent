@@ -99,3 +99,44 @@ test "header survives a text round trip" {
   )
   assert_eq(reloaded, original)
 }
+
+///|
+/// The token the fast path looks for must be exactly what the encoder writes.
+///
+/// The sidebar skips parsing when a log has no rename in it, and that skip is only sound while
+/// `name_entry_token()` matches the bytes `session_info` actually produces. If the encoder ever
+/// changes shape — key order, spacing, a nested wrapper — this test fails, which is the point: the
+/// alternative is a session that has a name and shows its id forever, with nothing to notice it by.
+test "the rename token matches what the encoder writes" {
+  let entry = session_name_entry(Some("deploy triage"), None, 1700000000000L)
+  let line = entry.to_line()
+  assert_true(
+    line.contains(name_entry_token()),
+    msg="the encoder wrote \{line}, which does not contain \{name_entry_token()}",
+  )
+  assert_true(log_has_name_entry(line), msg=line)
+  // And a log with no rename does not look like it has one.
+  let other = user_entry("u1", None, "a question").to_line()
+  assert_false(
+    log_has_name_entry(other),
+    msg="a plain message must not send the sidebar down the slow path",
+  )
+}
+
+///|
+/// Prose about the field is not a rename.
+///
+/// The conversations themselves mention `session_info` — the agent has written about this very
+/// field, in this repository — so a bare-word search would put every such session back on the slow
+/// path for nothing. The token is the encoded form precisely so this does not match.
+test "prose mentioning the field is not mistaken for a rename" {
+  let chatter = user_entry(
+    "u1",
+    None,
+    "the name is written as a `session_info` entry, so it follows the log",
+  ).to_line()
+  assert_false(
+    log_has_name_entry(chatter),
+    msg="a conversation about the field must not look like a rename",
+  )
+}

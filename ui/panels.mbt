@@ -365,7 +365,6 @@ fn short_id(path : String) -> String {
 ///|
 /// The whole conversation as it stands, including a turn that is still running.
 fn transcript_node(app : App, shown : Runner) -> @html.Node {
-  ignore(app)
   let extra : Array[@html.Node] = []
   if shown.busy {
     // A reader who switches back to a running turn should see its work rather than an
@@ -396,5 +395,6 @@ fn transcript_node(app : App, shown : Runner) -> @html.Node {
     // The same tag the scoped frames carry: the browser compares them, so they have to agree.
     session=session_tag(shown.path),
     extra~,
+    limit=app.depth_of(shown),
   )
 }
