@@ -117,6 +117,16 @@ pub async fn post_json(
 /// `idle_timeout_ms` bounds both waits that can hang — for the response to start, and
 /// for each subsequent read. It is per wait rather than for the whole request, so a
 /// long answer is never cut off for taking a long time; only silence is.
+
+///|
+/// How much of an endpoint's explanation to show.
+///
+/// A few hundred characters carries `error.message`; the rest of a JSON error body is the envelope
+/// and a request id. Bounded because this goes in front of a reader, and because an endpoint that
+/// answers with a page of HTML should not become the whole message.
+let error_detail_limit : Int = 600
+
+///|
 pub async fn post_sse(
   url : String,
   headers : Map[String, String],
@@ -175,7 +185,14 @@ pub async fn post_sse(
       )
   }
   if response.code != 200 {
-    let message = "the model endpoint returned HTTP \{response.code}"
+    // The endpoint's own words, not only its status line. A 400 is the endpoint saying what is wrong
+    // with the request, and none of that is inferable from `400` alone — see `read_error_body`.
+    let detail = read_error_body(client)
+    let message = if detail == "" {
+      "the model endpoint returned HTTP \{response.code}"
+    } else {
+      "the model endpoint returned HTTP \{response.code}: \{detail}"
+    }
     if status_is_transient(response.code) {
       raise Transient(message)
     }
@@ -237,5 +254,89 @@ pub async fn post_sse(
   }
   if carry.length() > 0 {
     on_chunk(@utf8.decode_lossy(carry))
+  }
+}
+
+///|
+/// What an endpoint said when it answered with something other than 200.
+///
+/// A status line on its own is not a diagnosis. A 400 is the endpoint explaining what is wrong with
+/// the request — an unanswered tool call, a field it will not take, a context that is too long — and
+/// none of that is inferable from `400`. Measured: a session failed every turn with
+/// "the model endpoint returned HTTP 400", and finding out why took a rebuilt request log; the answer
+/// had been in the response body the whole time, thrown away one line after it arrived.
+///
+/// Bounded, because this goes in front of a reader, and an endpoint that answers with a page of HTML
+/// should not become the whole message. Clipped at the end rather than the beginning: the reason is
+/// in the first sentence of `error.message`, and it is the first thing an over-long body carries.
+///
+/// Failure to read is not itself an error: this runs on the path that is already reporting a failure,
+/// and a second one raised from here would replace the endpoint's answer with a socket error.
+async fn read_error_body(client : @http.Client) -> String {
+  let buffer = FixedArray::make(4096, b'\x00')
+  let collected = StringBuilder()
+  let mut total = 0
+  while total < error_detail_limit * 4 {
+    let count = try
+      client.read(buffer, offset=0, max_len=buffer.length())
+    catch {
+      _ => 0
+    } noraise {
+      count => count
+    }
+    if count <= 0 {
+      break
+    }
+    let piece = FixedArray::make(count, b'\x00')
+    for i in 0..<count {
+      piece[i] = buffer[i]
+    }
+    collected.write_string(@utf8.decode_lossy(Bytes::from_array(piece)))
+    total += count
+  }
+  clip_error_detail(collected.to_string())
+}
+
+///|
+/// The endpoint's explanation, with the envelope taken off when it is the JSON envelope we expect.
+///
+/// `{"error":{"message":"..."}}` is what an OpenAI-compatible endpoint sends, and what a reader needs
+/// from it is the sentence. Everything else — the type, the code, the request id — is for whoever is
+/// reading the endpoint's docs, not for whoever is trying to get a turn to run.
+fn clip_error_detail(raw : String) -> String {
+  let text = raw.trim().to_owned()
+  if text == "" {
+    return ""
+  }
+  // Not JSON — an HTML error page, or a proxy's plain text — is shown as it came, because a reader
+  // comparing it with the endpoint's docs is the person this message is for. `None` rather than a
+  // return, so that everything below still applies: a page of HTML is exactly what the clip is for.
+  let parsed = try @json.parse(text) catch {
+    _ => None
+  } noraise {
+    json => Some(json)
+  }
+  let unwrapped = match parsed {
+    None => text
+    Some(Object(fields)) =>
+      match fields.get("error") {
+        Some(Object(error)) =>
+          match error.get("message") {
+            Some(String(message)) => message
+            _ => text
+          }
+        Some(String(message)) => message
+        _ =>
+          match fields.get("message") {
+            Some(String(message)) => message
+            _ => text
+          }
+      }
+    _ => text
+  }
+  if unwrapped.length() <= error_detail_limit {
+    unwrapped
+  } else {
+    unwrapped[:error_detail_limit].to_owned() + "…"
   }
 }

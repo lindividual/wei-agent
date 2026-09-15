@@ -197,6 +197,225 @@ fn tool_calls_of(message : @core.Message) -> Array[@core.Content] {
 }
 
 ///|
+/// The tool calls on the active path that no result answers, each with the entry that answers the
+/// last message before it.
+///
+/// The position is the point, and getting it wrong is worse than not repairing at all. A `tool`
+/// message answers the assistant message that requested it, and a provider checks that adjacency — so
+/// an answer appended at the leaf is only in the right place when the call *is* the leaf. Measured: a
+/// reader pressed Stop during a model call, then typed a new prompt, and the repair landed after that
+/// prompt:
+///
+/// ```
+/// assistant(tool_calls: exec "")     ← asks for a tool
+/// user("继续吧")                       ← the reader's next prompt
+/// tool("The tool call was interrupted…")   ← the answer, three messages too late
+/// ```
+///
+/// Every request after that came back `HTTP 400`, on every turn, for every reader of that session.
+///
+/// So the answer is written *after the assistant message it answers*, which means an entry that is not
+/// the leaf has to be undone and redone: the calls append, and a log is a chain, so putting an entry
+/// in the middle is "drop the tail from memory and write it back". Nothing on disk is lost — the file
+/// keeps every line it had, and the lines after the insertion point are written again under the new
+/// parent.
+///
+/// An open turn is closed first, so the rewrite is: close the turn, answer the calls, replay what came
+/// after. The replay is the same bytes it was, which is what makes this cheap to be sure about.
+
+///|
+/// One step of the repair, in the order it has to be written.
+///
+/// A log is a chain, so the repair is expressed as "the conversation as it should be" rather than as a
+/// list of insertions: the writer walks this, leaves the entries that are already where they belong
+/// alone, and writes the rest under the entry before them.
+priv enum RepairStep {
+  /// An entry that is already in the file. Kept verbatim — the same id, because a session is referred
+  /// to by its entries' ids, and a repair must not rename anything.
+  Keep(@core.Entry)
+  /// A result for a call that has none.
+  Answer(call_id~ : String, tool_name~ : String)
+  /// A turn that was left open, closed as abandoned.
+  Abandon
+}
+
+///|
+/// The conversation as it has to be for a provider to accept it: every tool call answered by the
+/// message immediately after it.
+///
+/// ## The rule, and what happens without it
+///
+/// A `tool` message answers the assistant message that asked for it, and a provider checks that
+/// **adjacency** — not that an answer exists somewhere. Two ways to get it wrong, and both were
+/// measured in one real session:
+///
+/// ```
+/// assistant(tool_calls: exec "")            ← asks
+/// user("继续吧")                              ← the reader typed again
+/// tool("The tool call was interrupted…")    ← the answer, three messages too late
+/// ```
+///
+/// Every request built from that log came back `HTTP 400`, on every turn, and the session could not be
+/// continued at all. Note the shape: the answer *is* there, so asking "which calls have no result"
+/// finds nothing to fix. The question is where the results are, not whether they exist.
+///
+/// ## What it produces
+///
+/// The path in order, with the answers moved to where they belong:
+///
+/// - an answer that is on the path but not next to its call is *moved* — kept under its own id, written
+///   again after the call, and skipped where it used to be;
+/// - a call with no answer anywhere gets a synthetic one, which says the truth about what happened:
+///   the result was never recorded, so a write may or may not have landed.
+///
+/// Entries the repair does not touch are `Keep`ed and left exactly as they are, so a session that is
+/// already well-formed comes back unchanged — which is what makes it safe to run this on every turn.
+///
+/// Pure over the log, so the arithmetic that a mistake here costs — a request refused on every turn,
+/// with the reason in a byte offset — is testable without a disk.
+fn plan_repair(session : @core.Session) -> Array[RepairStep] {
+  let path = session.path()
+  // Where each call is answered, if anywhere on the path.
+  let answer_at : Map[String, Int] = Map([])
+  for i in 0..<path.length() {
+    match path[i].kind {
+      @core.Message(message~) =>
+        match message {
+          @core.ToolResult(result) => answer_at.set(result.tool_call_id, i)
+          _ => ()
+        }
+      _ => ()
+    }
+  }
+  let steps : Array[RepairStep] = []
+  // Answers that have already been moved next to their call, so they are not kept where they were.
+  let moved : Map[Int, Unit] = Map([])
+  for i in 0..<path.length() {
+    if moved.get(i) is Some(_) {
+      continue
+    }
+    let entry = path[i]
+    match entry.kind {
+      @core.Message(message~) =>
+        match message {
+          @core.Assistant(assistant) => {
+            steps.push(Keep(entry))
+            for block in assistant.content {
+              match block {
+                @core.ToolCall(id~, name~, ..) =>
+                  match answer_at.get(id) {
+                    // The answer exists: put it here, under its own id, and leave no copy behind.
+                    Some(j) if j > i && moved.get(j) is None => {
+                      moved.set(j, ())
+                      steps.push(Keep(path[j]))
+                    }
+                    // Either there is no answer, or the only one is behind us — neither can be put
+                    // next to this call, so one is written.
+                    _ => steps.push(Answer(call_id=id, tool_name=name))
+                  }
+                _ => ()
+              }
+            }
+          }
+          _ => steps.push(Keep(entry))
+        }
+      _ => steps.push(Keep(entry))
+    }
+  }
+  // The turn a stop left open, closed as abandoned. Read from the log rather than inferred from what
+  // the caller holds, because the caller's copy is exactly what is out of date here.
+  if session.turn_in_flight() {
+    steps.push(Abandon)
+  }
+  steps
+}
+
+///|
+/// Write `steps` into `path`, in order, each entry the parent of the next.
+///
+/// The entries that are already where they belong are left alone, and the writing starts at the first
+/// one that is not: a repair that rewrote the whole file would be a second copy of a long conversation
+/// for a change that touches the last few entries.
+///
+/// Returns how many entries were written. Callers re-read the file when it is more than zero, because
+/// the rewrite moves entries the caller's copy still holds under their old parents — and a session
+/// whose parents disagree with the file is one whose next request is built from a log nobody wrote.
+async fn apply_repair(
+  steps : Array[RepairStep],
+  original : Array[@core.Entry],
+  session : @core.Session,
+  path : String,
+  timestamp : Int64,
+) -> Int {
+  if steps.is_empty() {
+    return 0
+  }
+  @platform.ensure_session(path, session.header)
+  let mut written = 0
+  // How far the steps still agree with the file. Before this point nothing is written, and the parent
+  // of the next entry is simply the entry before it.
+  let mut at = 0
+  let mut writing = false
+  let mut parent = session.leaf_id
+  for step in steps {
+    match step {
+      Keep(entry) =>
+        if !writing && at < original.length() && original[at].id == entry.id {
+          at += 1
+          parent = Some(entry.id)
+        } else {
+          // The same entry, under a new parent: same id, same timestamp, same kind. What the file
+          // gains is a second copy; what it loses is nothing, because the first copy is now on a
+          // branch the path does not go down.
+          writing = true
+          let rewritten : @core.Entry = {
+            id: entry.id,
+            parent_id: parent,
+            timestamp: entry.timestamp,
+            kind: entry.kind,
+          }
+          @platform.append_entry(path, rewritten)
+          parent = Some(rewritten.id)
+          written += 1
+        }
+      Answer(call_id~, tool_name~) => {
+        writing = true
+        let entry : @core.Entry = {
+          id: @core.new_entry_id(),
+          parent_id: parent,
+          timestamp: @core.format_iso_utc(timestamp),
+          kind: @core.Message(
+            message=@core.aborted_tool_result(call_id~, tool_name~, timestamp~),
+          ),
+        }
+        @platform.append_entry(path, entry)
+        parent = Some(entry.id)
+        written += 1
+      }
+      Abandon => {
+        writing = true
+        let entry : @core.Entry = {
+          id: @core.new_entry_id(),
+          parent_id: parent,
+          timestamp: @core.format_iso_utc(timestamp),
+          kind: @core.turn_outcome_entry(
+            @core.Abandoned,
+            0,
+            0.0,
+            parent,
+            timestamp,
+          ).kind,
+        }
+        @platform.append_entry(path, entry)
+        parent = Some(entry.id)
+        written += 1
+      }
+    }
+  }
+  written
+}
+
+///|
 /// The wall clock, as the log records it.
 fn now_ms() -> Int64 {
   @env.now().reinterpret_as_int64()
@@ -978,18 +1197,29 @@ pub async fn run_turn(
   //
   // The gap is made by a stop, and it is a gap in the *transcript* rather than in our bookkeeping:
   // an assistant message that asks for tools must be followed by the answers to them, and a provider
-  // rejects the whole request — measured, in the app: two prompts in a row came back as an endpoint
-  // error and left the session looking like it would not run anything again. The reader had pressed
-  // Stop during a model call, the assistant message with its `tool_calls` was already committed, and
-  // nothing was left to write the results.
+  // rejects the whole request. The reader had pressed Stop during a model call, the assistant message
+  // with its `tool_calls` was already committed, and nothing was left to write the results.
   //
-  // Repaired here rather than in a front end, because the rule being violated belongs to the
-  // protocol and not to a window: the web UI offers the reader a choice when it notices an
-  // interrupted turn, the app does not, and a third front end should not have to remember either.
-  // The synthetic result says what actually happened, so a model that sees it checks the state
-  // before repeating a write.
-  for entry in session.repair_entries(timestamp) {
-    session = commit(session, ctx.session_path, entry.kind, timestamp)
+  // Repaired here rather than in a front end, because the rule being violated belongs to the protocol
+  // and not to a window: the web UI offers the reader a choice when it notices an interrupted turn,
+  // the app does not, and a third front end should not have to remember either. The synthetic result
+  // says what actually happened, so a model that sees it checks the state before repeating a write.
+  //
+  // Where the answers go is the whole of `plan_repair`, and getting it wrong is worse than not
+  // repairing at all: an answer that is not adjacent to its call is a request every provider refuses,
+  // on every turn, forever.
+  let written = apply_repair(
+    plan_repair(session),
+    session.path(),
+    session,
+    ctx.session_path,
+    timestamp,
+  )
+  if written > 0 {
+    // Re-read from the file, because the rewrite moved entries the caller's copy still has under
+    // their old parents. A session whose parents disagree with the file is a session whose next
+    // request is built from a log nobody wrote.
+    session = @platform.load_session(ctx.session_path)
   }
   // A continued turn appends nothing here: the prompt it is carrying is already the last user
   // message in the log, and appending it again would put the question to the model twice.

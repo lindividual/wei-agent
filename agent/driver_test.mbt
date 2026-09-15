@@ -1975,3 +1975,338 @@ async test "a prompt after a failure leaves one open turn, not two" {
     assert_false(log.needs_repair())
   })
 }
+
+///|
+/// The answers to an interrupted call land next to the call, not at the end of the file.
+///
+/// This is the shape a real session had, and it is the one that made a session unrecoverable: the
+/// reader pressed Stop during a model call, the assistant message with its `tool_calls` was committed,
+/// and then they typed again — so the gap was no longer at the leaf when the repair ran. An answer
+/// appended at the end landed *after* the new prompt:
+///
+///     assistant(tool_calls: exec "")     ← asks for a tool
+///     user("继续吧")                       ← the reader's next prompt
+///     tool("The tool call was interrupted…")   ← the answer, three messages too late
+///
+/// A provider checks that a `tool` message directly follows the assistant message that asked for it,
+/// so every request built from that log was refused — `HTTP 400`, every turn, forever. The repair now
+/// writes the answer where it belongs and re-parents what came after it.
+async test "an interrupted call is answered where it was asked" {
+  let dir = scratch("gap-not-at-leaf")
+  let path = "\{dir}/session.jsonl"
+  let header : @core.SessionHeader = {
+    id: "test",
+    timestamp: @core.format_iso_utc(FIXED_TIME),
+    cwd: dir,
+    parent_session: None,
+    version: Some(3),
+  }
+  @platform.create_session(path, header)
+  // The log as the Stop left it: a call, the turn closed, then the reader typing again and a second
+  // turn opened. Nothing answers `call_gap`.
+  let entries : Array[@core.Entry] = [
+    {
+      id: "u1",
+      parent_id: None,
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Message(
+        message=@core.User({
+          content: [@core.Text("run something")],
+          timestamp: FIXED_TIME,
+        }),
+      ),
+    },
+    {
+      id: "a1",
+      parent_id: Some("u1"),
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Message(
+        message=@core.Assistant({
+          content: [
+            @core.ToolCall(
+              id="call_gap",
+              name="exec",
+              arguments=Json::object(Map([("bash", Json::string(""))])),
+            ),
+          ],
+          api: "openai-completions",
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          usage: @core.Usage::zero(),
+          stop_reason: @core.ToolUse,
+          timestamp: FIXED_TIME,
+          response_id: None,
+          response_model: None,
+          raw_stop_reason: Some("tool_calls"),
+          error_message: None,
+        }),
+      ),
+    },
+    {
+      id: "o1",
+      parent_id: Some("a1"),
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.turn_outcome_entry(
+        @core.Stopped,
+        1,
+        0.0,
+        Some("a1"),
+        FIXED_TIME,
+      ).kind,
+    },
+    {
+      id: "u2",
+      parent_id: Some("o1"),
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Message(
+        message=@core.User({
+          content: [@core.Text("carry on")],
+          timestamp: FIXED_TIME + 1L,
+        }),
+      ),
+    },
+    {
+      id: "t2",
+      parent_id: Some("u2"),
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Custom(
+        custom_type=@core.turn_start_type(),
+        data=Some(Json::object(Map([("prompt", Json::string("carry on"))]))),
+      ),
+    },
+  ]
+  @platform.append_entries(path, entries)
+
+  let seen : Array[String] = []
+  with_fake_model([text_sse("answered")], seen, async fn(base_url) {
+    let ctx = context_for(dir, base_url, entries)
+    let result = @agent.run_turn(
+      ctx,
+      "carry on",
+      FIXED_TIME,
+      thinking_level="high",
+    )
+    assert_eq(result.replies, ["answered"])
+
+    // The message the provider checks: the answer is adjacent to the call that asked for it, and it
+    // comes before the prompt the reader typed afterwards. A position in the request is enough —
+    // what is being checked is the order of two strings, not the JSON around them.
+    let sent = seen[0]
+    let at = (needle : String) => {
+      match sent.find(needle) {
+        Some(index) => index
+        None => -1
+      }
+    }
+    let gap_at = at("call_gap")
+    let answer_at = at("interrupted before its result")
+    let prompt_at = at("carry on")
+    assert_true(gap_at >= 0, msg="the call is not in the request")
+    assert_true(answer_at >= 0, msg="the answer is not in the request")
+    assert_true(
+      answer_at > gap_at && (prompt_at < 0 || answer_at < prompt_at),
+      msg="the answer is not next to the call (call=\{gap_at} answer=\{answer_at} prompt=\{prompt_at})",
+    )
+
+    // And nothing was lost: every message the reader and the model had is still on the path.
+    let log = logged(path)
+    let texts : Array[String] = []
+    for entry in log.context_entries() {
+      match entry.kind {
+        @core.Message(message~) =>
+          match message {
+            @core.User(user) =>
+              for block in user.content {
+                match block {
+                  @core.Text(text) => texts.push(text)
+                  _ => ()
+                }
+              }
+            _ => ()
+          }
+        _ => ()
+      }
+    }
+    assert_true(
+      texts.contains("run something"),
+      msg="the reader's messages are not all on the path",
+    )
+    assert_true(
+      texts.contains("carry on"),
+      msg="the reader's messages are not all on the path",
+    )
+    assert_false(log.needs_repair())
+    assert_false(log.turn_in_flight())
+  })
+}
+
+///|
+/// An answer that is on the path but not next to its call is moved next to it.
+///
+/// This is the case that made a real session unusable, and it is the one a repair that only looks for
+/// *missing* results cannot see: the answer was there, three messages too late —
+///
+///     assistant(tool_calls: exec "…")           ← asks
+///     turn-outcome(stopped)                     ← the turn closed
+///     user("继续吧")                              ← the reader typed again
+///     turn-start("继续吧")
+///     tool("The tool call was interrupted…")    ← the answer, at the end of the file
+///
+/// — because the turn that stopped had already been closed and the reader's next prompt written before
+/// anything answered the call. A provider checks that a `tool` message directly follows the assistant
+/// message that asked for it, so every request built from that log was refused.
+///
+/// The repair moves the answer rather than adding a second one: a duplicate `tool_call_id` would be
+/// refused too, and the entry's own id is kept so the log still refers to the same things.
+async test "an answer in the wrong place is moved to its call" {
+  let dir = scratch("answer-misplaced")
+  let path = "\{dir}/session.jsonl"
+  let header : @core.SessionHeader = {
+    id: "test",
+    timestamp: @core.format_iso_utc(FIXED_TIME),
+    cwd: dir,
+    parent_session: None,
+    version: Some(3),
+  }
+  @platform.create_session(path, header)
+  let call : @core.Message = @core.Assistant({
+    content: [
+      @core.ToolCall(
+        id="call_late",
+        name="exec",
+        arguments=Json::object(Map([("bash", Json::string("echo hi"))])),
+      ),
+    ],
+    api: "openai-completions",
+    provider: "deepseek",
+    model: "deepseek-v4-flash",
+    usage: @core.Usage::zero(),
+    stop_reason: @core.ToolUse,
+    timestamp: FIXED_TIME,
+    response_id: None,
+    response_model: None,
+    raw_stop_reason: Some("tool_calls"),
+    error_message: None,
+  })
+  let entries : Array[@core.Entry] = [
+    {
+      id: "u1",
+      parent_id: None,
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Message(
+        message=@core.User({
+          content: [@core.Text("do it")],
+          timestamp: FIXED_TIME,
+        }),
+      ),
+    },
+    {
+      id: "a1",
+      parent_id: Some("u1"),
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Message(message=call),
+    },
+    {
+      id: "o1",
+      parent_id: Some("a1"),
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.turn_outcome_entry(
+        @core.Stopped,
+        1,
+        0.0,
+        Some("a1"),
+        FIXED_TIME,
+      ).kind,
+    },
+    {
+      id: "u2",
+      parent_id: Some("o1"),
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Message(
+        message=@core.User({
+          content: [@core.Text("try again")],
+          timestamp: FIXED_TIME + 1L,
+        }),
+      ),
+    },
+    {
+      id: "t2",
+      parent_id: Some("u2"),
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Custom(
+        custom_type=@core.turn_start_type(),
+        data=Some(Json::object(Map([("prompt", Json::string("try again"))]))),
+      ),
+    },
+    // The answer: written, and written in the wrong place.
+    {
+      id: "late",
+      parent_id: Some("t2"),
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Message(
+        message=@core.aborted_tool_result(
+          call_id="call_late",
+          tool_name="exec",
+          timestamp=FIXED_TIME,
+        ),
+      ),
+    },
+  ]
+  @platform.append_entries(path, entries)
+
+  // A repair that only asked "which calls have no result" would leave this session alone, which is
+  // exactly what happened in the app.
+  assert_false(logged(path).needs_repair())
+
+  let seen : Array[String] = []
+  with_fake_model([text_sse("done")], seen, async fn(base_url) {
+    let ctx = context_for(dir, base_url, entries)
+    let result = @agent.run_turn(
+      ctx,
+      "try again",
+      FIXED_TIME,
+      thinking_level="high",
+    )
+    assert_eq(result.replies, ["done"])
+
+    let sent = seen[0]
+    let at = (needle : String) => {
+      match sent.find(needle) {
+        Some(index) => index
+        None => -1
+      }
+    }
+    let call_at = at("call_late")
+    let answer_at = at("interrupted before its result")
+    let prompt_at = at("try again")
+    assert_true(call_at >= 0, msg="the call is not in the request")
+    assert_true(answer_at >= 0, msg="the answer is not in the request")
+    assert_true(
+      answer_at > call_at && (prompt_at < 0 || answer_at < prompt_at),
+      msg="the answer did not move next to its call (call=\\{call_at} answer=\\{answer_at} prompt=\\{prompt_at})",
+    )
+
+    // Moved, not copied: the log has one answer to that call, and everything else is still there.
+    let log = logged(path)
+    let mut answers = 0
+    let ids : Array[String] = []
+    for entry in log.path() {
+      ids.push(entry.id)
+      match entry.kind {
+        @core.Message(message~) =>
+          match message {
+            @core.ToolResult(r) =>
+              if r.tool_call_id == "call_late" {
+                answers += 1
+              }
+            _ => ()
+          }
+        _ => ()
+      }
+    }
+    assert_eq(answers, 1, msg="the answer was copied instead of moved")
+    assert_true(ids.contains("u2"), msg="the reader's prompt was lost")
+    assert_true(ids.contains("o1"), msg="the closed turn was lost")
+    assert_false(log.turn_in_flight())
+  })
+}
