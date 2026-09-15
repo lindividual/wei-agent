@@ -25,20 +25,41 @@ struct SettingsView: View {
                 toolsSection(settings)
                 factsSection(settings)
             } else {
-                // No guess at what is in force: the fields below all describe the shell's answer, and
-                // one made up here would be a panel that disagrees with the next turn.
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("asking the shell…").foregroundStyle(.secondary)
-                }
+                waiting
             }
         }
         .formStyle(.grouped)
         .frame(width: 460)
-        // Asked for on appear rather than only at startup: the settings file is hand-editable, and a
-        // panel that reported whatever was true when the app launched would be wrong exactly when
-        // someone had just been in the file.
+        // Asked for again on appear, even though the shell pushes the settings at startup: the file is
+        // hand-editable, and a panel that reported whatever was true when the app launched would be
+        // wrong exactly when someone had just been in the file. The push is what keeps the first
+        // render from depending on this — which is what it did, and the panel sat here asking.
         .onAppear { client.refreshSettings() }
+    }
+
+    /// What to show when there is nothing to show yet.
+    ///
+    /// Not an eternal spinner: the shell says what it is doing, and this says the same thing in the
+    /// same words, with a way to ask again. A dead end is worse than a delay.
+    @ViewBuilder
+    private var waiting: some View {
+        switch client.state {
+        case .starting:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("starting the shell…").foregroundStyle(.secondary)
+            }
+        case let .failed(reason):
+            Text(reason).foregroundStyle(.red)
+            retry
+        default:
+            Text("The shell has not said what is in force.").foregroundStyle(.secondary)
+            retry
+        }
+    }
+
+    private var retry: some View {
+        Button("Ask Again") { client.refreshSettings() }
     }
 
     private func keySection(_ settings: ShellSettings) -> some View {

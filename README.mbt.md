@@ -36,8 +36,8 @@ moon run pi -- "prompt"              # 命令行跑一次完整 turn
 moon run verify                      # 全量会话往返验证
 moon run scriptcheck                 # 编译并运行内置 script
 
-macos/build-moonbit.sh               # 原生 macOS 壳
-cd macos/PiShell && swift run PiShell
+macos/make-app.sh && open macos/dist/pi.app   # 原生 macOS 壳：打包成 .app
+# 开发循环（不打包）和终端形态见 macos/README.md
 ```
 
 API key 的取法有优先级：`DEEPSEEK_API_KEY` > 设置面板存的 key > pi 的凭据库
@@ -472,7 +472,8 @@ DSL 在包外不可用**（`server_side_render` 在 `internal/` 里），**SSE �
 ## 原生的第二个前端
 
 `macos/` 是一个原生 macOS 壳（SwiftUI + AppKit），驱动同一套 `core` / `platform` / `agent`：
-左边是会话列表（切换 / 新建 / 删除），右边是对话。看 `macos/README.md`。
+左边是会话列表（切换 / 新建 / 删除），右边是对话，`⌘,` 是设置（key、工具模式）。
+`macos/make-app.sh` 把它打成 `macos/dist/pi.app`。看 `macos/README.md`。
 
 它的意义不只是一个新界面，而是把上面那句「服务器是文档唯一的写者」的边界**再切一刀**：
 
@@ -481,9 +482,9 @@ ui/        服务器拥有文档 → 线上跑 HTML 补丁（浏览器不知道�
 macos/appffi/  host 拥有视图 → 线上跑事实（这段文本来了、这个工具开始了、这一轮结束了）
 ```
 
-`ffi.mbt` 导出的是一份不长的事件表：`ready` / `sessions` / `session` / `history` / `user` /
-`reply` / `thinking` / `tool` / `status` / `end` / `error`。它们是事实而不是绘制指令 —— 说发生了
-什么，不说该怎么画。
+`ffi.mbt` 导出的是一份不长的事件表：`ready` / `sessions` / `session` / `history` / `settings` /
+`user` / `reply` / `thinking` / `tool` / `status` / `end` / `error`。它们是事实而不是绘制指令 ——
+说发生了什么，不说该怎么画。
 
 后三个是侧边栏带来的：`sessions` 是整份会话列表，`session` 说换到了哪一份，`history` 把一份宿主
 **没看过**的会话整段发过去（行，不是 delta —— 见 `macos/README.md`）。自己开的会话仍然是靠

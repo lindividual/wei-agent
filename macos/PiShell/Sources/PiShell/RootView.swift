@@ -155,6 +155,8 @@ private struct Header: View {
     let state: ShellState
     let revision: Int
 
+    @Environment(\.openSettings) private var openSettings
+
     var body: some View {
         HStack(spacing: 8) {
             switch state {
@@ -168,7 +170,13 @@ private struct Header: View {
             case .unkeyed:
                 Image(systemName: "key.slash").foregroundStyle(.orange)
                 Text("no API key").foregroundStyle(.orange)
-                Text("export DEEPSEEK_API_KEY").foregroundStyle(.secondary)
+                // The one case where the header can do something about what it is reporting. An app
+                // launched from the Finder inherits no shell environment, so this is not an edge
+                // case — it is the first thing that happens on a machine that just installed it, and
+                // the answer is two keystrokes away if the reader is told.
+                Button("Add Key…") { openSettings() }
+                    .buttonStyle(.link)
+                Text("or set DEEPSEEK_API_KEY").foregroundStyle(.secondary)
             case let .failed(text):
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
                 Text(text).foregroundStyle(.red).lineLimit(2)
@@ -201,7 +209,11 @@ private struct TranscriptView: View {
             // Follows the newest line. The web UI is fussier than this — it follows only when the
             // reader is already at the bottom, so scrolling up to read is not yanked away — and
             // that is a refinement this needs before it is pleasant to use on a long turn.
-            .onChange(of: revision) { _ in
+            //
+            // The two-parameter form is the one macOS 14 introduced: the old signature is deprecated
+            // and warns on every build. Neither argument is used — the revision is what changed, and
+            // the view body already knows that.
+            .onChange(of: revision) { _, _ in
                 guard let last = conversation.rows.last else { return }
                 proxy.scrollTo(last.id, anchor: .bottom)
             }

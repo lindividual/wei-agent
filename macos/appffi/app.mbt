@@ -567,6 +567,11 @@ async fn Shell::serve(self : Shell) -> Unit {
   // drawn before this line arrives, and a sidebar that fills in a moment later is a sidebar the
   // reader watches arrive.
   self.say_sessions()
+  // And the settings, for the same reason: the panel is drawn from facts, and a panel that has to
+  // ask for them shows a spinner whenever the ask is lost — which is exactly what it did, because the
+  // settings window builds its content before it is ever shown. Every one of these is a snapshot of
+  // what is true now, so none of them should depend on somebody asking.
+  self.say_settings()
   if choice is None {
     say_error("no API key: set DEEPSEEK_API_KEY and reopen")
   }

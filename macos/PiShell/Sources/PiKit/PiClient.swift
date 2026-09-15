@@ -76,6 +76,7 @@ public final class PiClient: ObservableObject {
     }
 
     private func receive(_ line: String) {
+        WireLog.line("<-", line.trimmingCharacters(in: .whitespacesAndNewlines))
         guard let event = PiEvent.decode(line: line) else { return }
         switch event {
         case let .ready(session, model, cwd, key):
@@ -125,22 +126,31 @@ public final class PiClient: ObservableObject {
         currentSession?.label ?? ""
     }
 
+    /// Everything the host says to the shell, through one door.
+    ///
+    /// One door because the wire log has to see all of it and the redaction has to be impossible to
+    /// forget: a second `pi_shell_send` somewhere else is a secret that gets written to disk.
+    private func tell(_ command: String) {
+        WireLog.line("->", WireLog.redacted(command))
+        pi_shell_send(command)
+    }
+
     /// Send a prompt.
     public func send(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        pi_shell_send(trimmed)
+        tell(trimmed)
     }
 
     /// Ask the running turn to stop. The turn notices between steps, so this is a request rather
     /// than an interruption — which is why the status line says "stopping…" and not "stopped".
     public func stop() {
-        pi_shell_send("abort")
+        tell("abort")
     }
 
     /// Ask which models this build has.
     public func reportModel() {
-        pi_shell_send("/model")
+        tell("/model")
     }
 
     // ── the sidebar ───────────────────────────────────────────────────────
@@ -151,19 +161,19 @@ public final class PiClient: ObservableObject {
     /// refusal is the answer the reader needs — the transcript on screen is still being written.
     public func open(_ path: String) {
         guard !path.isEmpty, path != currentPath else { return }
-        pi_shell_send("/open \(path)")
+        tell("/open \(path)")
     }
 
     /// Start a session in the same directory as the current one.
     public func newSession() {
-        pi_shell_send("/new")
+        tell("/new")
     }
 
     /// Take a session out of the store. The shell refuses the one on screen, and the file is renamed
     /// aside rather than removed, so a mis-click is recoverable by hand.
     public func delete(_ path: String) {
         guard path != currentPath else { return }
-        pi_shell_send("/delete \(path)")
+        tell("/delete \(path)")
     }
 
     // ── settings ──────────────────────────────────────────────────────────
@@ -171,7 +181,7 @@ public final class PiClient: ObservableObject {
     /// Ask what is in force. Sent when the panel opens as well as at startup, because the settings
     /// file can be edited by hand while this app is running.
     public func refreshSettings() {
-        pi_shell_send("/settings")
+        tell("/settings")
     }
 
     /// Save a key for the next turn.
@@ -181,18 +191,18 @@ public final class PiClient: ObservableObject {
     /// panel only sends one from its own Clear button.
     public func saveKey(_ key: String) {
         guard !key.isEmpty else { return }
-        pi_shell_send("/key \(key)")
+        tell("/key \(key)")
     }
 
     /// Forget the saved key. A key from the environment is not touched: this process cannot change
     /// another process's environment, and pretending otherwise would describe a state it cannot
     /// reach.
     public func clearSavedKey() {
-        pi_shell_send("/key-clear")
+        tell("/key-clear")
     }
 
     /// Switch which tools a turn gets. Honoured on the next turn, not the one running.
     public func setMode(_ mode: String) {
-        pi_shell_send("/mode \(mode)")
+        tell("/mode \(mode)")
     }
 }
