@@ -31,7 +31,11 @@ let linkPiWeb: [LinkerSetting] = [
 
 let package = Package(
   name: "PiShell",
-  platforms: [.macOS(.v13)],
+  // `.v14` rather than `.v13`: the sidebar is a `NavigationSplitView` with a `List(selection:)` in
+  // `sidebar` style, and the toolbar's placement around it is the macOS 14 behaviour — on 13 the same
+  // view compiles and puts the button somewhere else. The deployment target is the version the UI is
+  // written *for*, not the oldest one it would start on.
+  platforms: [.macOS(.v14)],
   targets: [
     // The boundary, in C.
     .target(name: "PiShellC"),

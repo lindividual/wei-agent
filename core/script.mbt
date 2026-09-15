@@ -357,7 +357,7 @@ fn test_script() -> String {
     #|      println(clip(raw, 400))
     #|    } else if raw.has_prefix("Total tests:") {
     #|      total = raw
-    #|    } else if raw.strip_prefix("-").is_some() ||
+    #|    } else if raw.strip_prefix("-") is Some(_) ||
     #|      raw.has_prefix("+") ||
     #|      raw == "diff:" {
     #|      // The diff repeats what the failure line already showed, clipped.

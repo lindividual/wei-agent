@@ -3,10 +3,129 @@ import SwiftUI
 import PiKit
 import PiModel
 
-/// The window: what the shell is, what it has said, and a box to answer it in.
+/// The window: the sessions there are, and the one that is open.
+///
+/// A `NavigationSplitView` rather than an `HSplitView`, because the sidebar is a sidebar: it collapses,
+/// it animates, it comes back on a keystroke, and the toolbar knows where it is. Every one of those is
+/// a behaviour the platform owns, and hand-rolling the split would mean writing them all again and
+/// getting the details wrong.
 struct RootView: View {
     @ObservedObject var client: PiClient
     @State private var draft = ""
+
+    var body: some View {
+        NavigationSplitView {
+            SidebarView(client: client)
+                // Wide enough for a label and a running mark, narrow enough to leave the transcript
+                // the room it is there for.
+                .navigationSplitViewColumnWidth(min: 210, ideal: 260, max: 380)
+        } detail: {
+            ConversationView(client: client, draft: $draft)
+                .navigationTitle(client.currentTitle)
+                .frame(minWidth: 420, minHeight: 320)
+        }
+    }
+}
+
+/// The session list.
+///
+/// Grouped by working directory, because that is the only thing sessions have in common: an agent's
+/// tools run somewhere, and two conversations in one repository belong together in the same way two
+/// documents in one folder do. The directories are not collapsible — the store is usually small, and a
+/// list the reader has to open before they can see anything is a list they have to open.
+///
+/// The selection is the shell's current session, not a copy of it. Clicking asks the shell to switch,
+/// and the row highlights when the shell says it has: a switch that was refused — because a turn is
+/// running — leaves the highlight where the reader actually is, instead of on a row that is not on
+/// screen.
+private struct SidebarView: View {
+    @ObservedObject var client: PiClient
+
+    private var selection: Binding<String?> {
+        Binding(
+            get: { client.currentPath.isEmpty ? nil : client.currentPath },
+            set: { path in
+                if let path { client.open(path) }
+            }
+        )
+    }
+
+    var body: some View {
+        List(selection: selection) {
+            ForEach(client.groups) { group in
+                Section {
+                    ForEach(group.sessions) { row in
+                        SessionRowView(row: row, onDelete: { client.delete(row.path) })
+                            .tag(row.path)
+                    }
+                } header: {
+                    Text(group.label)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(group.cwd)
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .toolbar {
+            ToolbarItem {
+                Button {
+                    client.newSession()
+                } label: {
+                    Label("New Session", systemImage: "square.and.pencil")
+                }
+                .help("Start a session in the same directory")
+            }
+        }
+    }
+}
+
+/// One session, in the list.
+///
+/// Two lines' worth of facts is all a row gets: the label it will be recognised by, and whether a turn
+/// is running in it. The age of a session is not shown — the list is already sorted by it, and the
+/// exact time a conversation was last used is a fact about the past that nothing on this screen acts
+/// on.
+private struct SessionRowView: View {
+    let row: SessionRow
+    let onDelete: () -> Void
+
+    @State private var confirmingDelete = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(row.label)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 6)
+            if row.running {
+                ProgressView().controlSize(.mini)
+            }
+        }
+        .help(row.path)
+        .contextMenu {
+            // The file is renamed aside rather than removed, but nothing on this screen can bring it
+            // back — so the confirmation is the last chance to change your mind, and it says what
+            // survives.
+            Button("Delete Session", role: .destructive) { confirmingDelete = true }
+        }
+        .confirmationDialog(
+            "Delete “\(row.label)”?",
+            isPresented: $confirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) { onDelete() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The conversation file is renamed .deleted, not erased.")
+        }
+    }
+}
+
+/// What the shell is, what it has said, and a box to answer it in.
+private struct ConversationView: View {
+    @ObservedObject var client: PiClient
+    @Binding var draft: String
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,10 +146,11 @@ struct RootView: View {
     }
 }
 
-/// One line above the conversation: which session, which model, and where its tools run.
+/// One line above the conversation: which model, and where its tools run.
 ///
-/// Small and secondary on purpose. It is not a control — the MVP has nothing to change here — and
-/// a row of grey text is the honest weight for three facts nobody acts on.
+/// Small and secondary on purpose. The session's own name is in the window's title bar, where the
+/// platform puts the name of the thing that is open; what is left here are the two facts a reader
+/// checks mid-turn — is it the model I thought, and is it working in the directory I thought.
 private struct Header: View {
     let state: ShellState
     let revision: Int

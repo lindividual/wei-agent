@@ -11,6 +11,17 @@ import Foundation
 public enum PiEvent: Decodable, Equatable {
     /// The shell is up. Sent once, before anything else, including the bad news.
     case ready(session: String, model: String, cwd: String, key: String)
+    /// A different session is now on screen. Sent on its own, before the history that belongs to it,
+    /// so that the host can let go of one transcript before the next arrives.
+    case session(path: String, cwd: String, model: String)
+    /// Everything in a session the host did not watch happen, as rows it can draw. Switching sessions
+    /// is the only way this is sent: there are no deltas in a conversation that is already over.
+    case history(rows: [Row])
+    /// The sidebar's list, in full, whenever it changes by more than a turn's worth.
+    case sessions(workspaces: [SessionGroup])
+    /// What the settings panel draws. Re-sent whenever one of these facts changes, so the panel never
+    /// has to guess about the key in use after saving one.
+    case settings(ShellSettings)
     /// The prompt, echoed back so the host does not have to keep its own copy of what it sent.
     case user(text: String)
     /// Streaming answer text, under the id of the block it belongs to.
@@ -29,6 +40,7 @@ public enum PiEvent: Decodable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case kind, session, model, cwd, key, text, id, delta
         case name, detail, done, output, calls, tools, cost
+        case path, rows, workspaces, env, saved, mode
         case isError = "error"
     }
 
@@ -45,6 +57,20 @@ public enum PiEvent: Decodable, Equatable {
             )
         case "user":
             self = .user(text: try fields.decode(String.self, forKey: .text))
+        case "session":
+            self = .session(
+                path: try fields.decode(String.self, forKey: .path),
+                cwd: try fields.decode(String.self, forKey: .cwd),
+                model: try fields.decode(String.self, forKey: .model)
+            )
+        case "history":
+            self = .history(rows: try fields.decode([Row].self, forKey: .rows))
+        case "sessions":
+            self = .sessions(
+                workspaces: try fields.decode([SessionGroup].self, forKey: .workspaces)
+            )
+        case "settings":
+            self = .settings(try ShellSettings(from: decoder))
         case "reply":
             self = .reply(
                 id: try fields.decode(String.self, forKey: .id),

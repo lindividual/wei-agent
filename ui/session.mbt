@@ -319,9 +319,17 @@ async fn App::system_prompt(
   runner : Runner,
   mode? : @core.ToolMode = self.settings.tool_mode,
 ) -> String {
-  @core.build_system_prompt(runner.cwd, @core.tools_for_mode(mode), mode~, sections=[
+  let tools = @core.tools_for_mode(mode)
+  @core.build_system_prompt(runner.cwd, tools, mode~, sections=[
     self.instructions(runner.cwd).text,
     @core.skill_catalog_prompt(self.skills_for(runner.cwd)),
+    // Empty unless the conversation has already used a tool this turn does not have, which is the
+    // case a mode change creates: the history is the other mode's tool calls. Last of the sections
+    // because it is the one thing that has just become true.
+    @core.tool_change_prompt(
+      @core.stale_tool_names(runner.session.context(), tools),
+      tools,
+    ),
   ])
 }
 

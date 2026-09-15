@@ -107,6 +107,15 @@ async fn main {
   let system_prompt = @core.build_system_prompt(cwd, tools, mode~, sections=[
     instructions.text,
     @core.skill_catalog_prompt(skills),
+    // Always empty here, because this entry point always starts a new session and a new session has
+    // no earlier calls to have used another mode's tools. It is built anyway so that the prompt this
+    // program sends and the one the server sends come from the same sections in the same order — the
+    // difference between the two would otherwise be invisible until someone taught this one to
+    // resume, and then it would be a turn that ignores a mode change.
+    @core.tool_change_prompt(
+      @core.stale_tool_names(@core.Session::new(header, []).context(), tools),
+      tools,
+    ),
   ])
   let ctx = @agent.AgentContext::new(
     session=@core.Session::new(header, []),

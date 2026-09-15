@@ -132,6 +132,151 @@ pub fn leaves_a_process(name : String, arguments : Json) -> Bool {
   }
 }
 
+// ── the tool set this turn was given ───────────────────────────────────────
+//
+// A mode decides what is *declared*, and declaring is not enforcing. Measured, not imagined: with
+// only `exec` and `wait` in the schema, a model resumed into code mode emitted `bash` 165 times in
+// one turn — its own history was full of `bash` from the turn before the mode changed — and every
+// one of them ran. The provider does not gate a name the schema never offered, so the check has to
+// be where the call is acted on, which is the driver.
+//
+// The two halves belong together: the refusal below is what a call to a tool this turn does not have
+// comes back with, and the notice further down is how a conversation that used one finds out before
+// it wastes a call. Both live here rather than in the driver so that the wording — which is prompt
+// text, and the only thing that teaches a model the mapping between modes — is testable without a
+// model.
+
+///|
+/// The declaration of a tool by name, out of the set this turn was given.
+pub fn tool_named(tools : Array[ToolDef], name : String) -> ToolDef? {
+  for tool in tools {
+    if tool.name == name {
+      return Some(tool)
+    }
+  }
+  None
+}
+
+///|
+/// Whether this turn was given a tool by that name.
+pub fn has_tool(tools : Array[ToolDef], name : String) -> Bool {
+  tool_named(tools, name) is Some(_)
+}
+
+///|
+/// The tool names, for a sentence about which tools there are.
+fn tool_names(tools : Array[ToolDef]) -> String {
+  let names : Array[String] = []
+  for tool in tools {
+    names.push("`\{tool.name}`")
+  }
+  names.join(", ")
+}
+
+///|
+/// What a call to a tool this turn does not have comes back with.
+///
+/// Written as an instruction rather than as an error message, because the model is the reader and
+/// the mistake is usually one of two shapes: it reached for the spelling it learned in another mode
+/// (the hints below), or it invented a name. Both are answered by saying what there is, and the call
+/// runs nothing — which is the part that matters, since the alternative is a tool running under a
+/// mode that was supposed to have removed it.
+pub fn undeclared_tool_message(name : String, tools : Array[ToolDef]) -> String {
+  let hint = undeclared_hint(name, tools)
+  "Refused: this turn has no tool named `\{name}`, so nothing ran. This turn's tools are \{tool_names(tools)}." +
+  hint
+}
+
+///|
+/// How to do, in this turn's tools, what the named tool would have done.
+///
+/// A table rather than a rule, because the mapping is not derivable: `read` has no single
+/// replacement in code mode — it is `cat` for a whole file, `sed -n 'a,bp'` for a range — and a
+/// model that has to guess one spends the call it was trying to save. The reverse direction is here
+/// for the same reason and the opposite case: a model that learned `wait` in code mode would
+/// otherwise be stuck in a tools-mode turn that never kept its output.
+fn undeclared_hint(name : String, tools : Array[ToolDef]) -> String {
+  if has_tool(tools, "exec") {
+    match name {
+      "bash" => " A shell command goes in `exec`'s `bash` field."
+      "script" => " A MoonBit program goes in `exec`'s `moonbit` field."
+      "read" | "glob" | "grep" =>
+        " There is no file tool in this mode: read with a command (`cat`, `sed -n '10,40p'` for a range), search with `grep -rn`, list with `ls`."
+      "write" | "edit" =>
+        " There is no file tool in this mode: write with a shell redirect, or with an `edit_text` call in a `moonbit` program."
+      "note" => " This mode has no way to record a note."
+      _ => ""
+    }
+  } else if has_tool(tools, "bash") {
+    match name {
+      "exec" =>
+        " A shell command is `bash` here, and a MoonBit program is `script`."
+      "wait" =>
+        " Nothing keeps a backgrounded command's output in this mode: redirect it to a file and read that."
+      _ => ""
+    }
+  } else {
+    ""
+  }
+}
+
+///|
+/// The tools the conversation has already used that this turn does not have.
+///
+/// Read from what the model can see of the conversation rather than from the whole log, so that a
+/// compaction — which erases the old calls along with the rest — also retires the warning.
+///
+/// This is the measured failure it exists for: the turn that ran with `bash` 165 times was a
+/// *resumed* session. A fresh one, in the same mode, reached for `exec` on the first call. Calling
+/// `list` in one mode and `ls` in the other is where the stale habit comes from, and the notice is
+/// cheaper than the call that discovers it.
+pub fn stale_tool_names(
+  context : SessionContext,
+  tools : Array[ToolDef],
+) -> Array[String] {
+  let stale : Array[String] = []
+  for message in context.messages {
+    match message {
+      Assistant(assistant) =>
+        for block in assistant.content {
+          match block {
+            ToolCall(name~, ..) =>
+              if name != "" && !has_tool(tools, name) && !stale.contains(name) {
+                stale.push(name)
+              }
+            _ => ()
+          }
+        }
+      _ => ()
+    }
+  }
+  stale
+}
+
+///|
+/// A prompt section saying the tool set has changed, or empty when it has not.
+///
+/// Empty for the ordinary case, and that is not only about noise: the section is part of the prompt,
+/// so a session that has never used another mode has to send exactly the bytes it sent before this
+/// existed — otherwise every cached prefix in every existing session is invalidated by an upgrade.
+pub fn tool_change_prompt(
+  stale : Array[String],
+  tools : Array[ToolDef],
+) -> String {
+  if stale.is_empty() {
+    return ""
+  }
+  let used : Array[String] = []
+  let hints = StringBuilder()
+  for name in stale {
+    used.push("`\{name}`")
+    hints.write_string(undeclared_hint(name, tools))
+  }
+  "## Tools changed\n\n" +
+  "Earlier calls in this conversation used \{used.join(", ")}, which this turn does not have: a call to one of them is refused and nothing runs. This turn's tools are \{tool_names(tools)}." +
+  hints.to_string()
+}
+
 ///|
 /// The one tool a code-mode turn does its work with.
 ///

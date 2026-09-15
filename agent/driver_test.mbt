@@ -189,6 +189,62 @@ fn bash_tool_call_sse(command : String) -> String {
 }
 
 ///|
+/// One chunk of SSE carrying an `exec` tool call, in the given dialect.
+///
+/// Two fields rather than one, because that is the tool: `bash` for a command and `moonbit` for a
+/// program. A test that wants the "both dialects" refusal can use `arguments_json_sse`.
+fn exec_tool_call_sse(field : String, value : String) -> String {
+  tool_call_sse("exec", "{\\\"\{field}\\\":\\\"\{value}\\\"}")
+}
+
+///|
+/// The SSE event list for one tool call: the delta carrying it, then the usage and stop.
+fn tool_call_sse(name : String, arguments : String) -> String {
+  "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"" +
+  name +
+  "\",\"arguments\":\"" +
+  arguments +
+  "\"}}]},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\ndata: [DONE]\n\n"
+}
+
+///|
+/// A context whose tools are code mode's, which is what `--mode code` builds.
+///
+/// The one difference from `context_for` — and the whole point of the test that uses it: a context
+/// that does not carry `bash` is a turn that was told, in both the prompt and the schema, that there
+/// is no `bash`. Whether the turn *enforces* that is what is under test.
+async fn code_mode_context_for(
+  dir : String,
+  base_url : String,
+  entries? : Array[@core.Entry] = [],
+) -> @agent.AgentContext {
+  let path = "\{dir}/session.jsonl"
+  let header : @core.SessionHeader = {
+    id: "test",
+    timestamp: @core.format_iso_utc(FIXED_TIME),
+    cwd: dir,
+    parent_session: None,
+    version: Some(3),
+  }
+  @platform.create_session(path, header)
+  @platform.append_entries(path, entries)
+  let tools = @core.tools_for_mode(@core.ToolMode::Code)
+  @agent.AgentContext::new(
+    session=@core.Session::new(header, entries),
+    session_path=path,
+    cwd=dir,
+    api_key="fixture-key",
+    system_prompt=@core.build_system_prompt(
+      dir,
+      tools,
+      mode=@core.ToolMode::Code,
+    ),
+    tools~,
+    base_url~,
+  )
+}
+
+///|
 /// One chunk of SSE carrying a text reply and a clean stop.
 fn text_sse(text : String) -> String {
   "data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" +
@@ -1511,4 +1567,120 @@ async test "a new turn abandons an interrupted one" {
     }
     assert_eq(users, ["never mind, do this instead"])
   })
+}
+
+///|
+/// A call to a tool this turn does not have runs nothing, and comes back as a refusal.
+///
+/// This is the failure the mode was supposed to prevent, measured: with `exec` and `wait` as the
+/// entire schema, a resumed session emitted `bash` 165 times in one turn and every one of them ran,
+/// because the mode only ever decided what was *declared*. The check is therefore here — at the one
+/// place that acts on a call — and the assertions are about the three things that follow from it:
+/// the command did not run, what the model got back says so and says what to use instead, and the
+/// refusal is a tool result like any other rather than a turn that died.
+async test "a tool this turn does not have is refused and nothing runs" {
+  let dir = scratch("undeclared-tool")
+  let seen : Array[String] = []
+  // The model asks for `bash`, then — after being told — for `exec`. The reply is what the second
+  // call produces, so a turn that failed to run the real tool could not reach it.
+  with_fake_model(
+    [
+      bash_tool_call_sse("/usr/bin/touch should-not-exist"),
+      exec_tool_call_sse("moonbit", "@builtin/nope"),
+      text_sse("both behind me"),
+    ],
+    seen,
+    async fn(base_url) {
+      // A context whose tools are code mode's, which is what `--mode code` builds.
+      let ctx = code_mode_context_for(dir, base_url)
+      let result = @agent.run_turn(
+        ctx,
+        "touch a file",
+        FIXED_TIME,
+        thinking_level="high",
+      )
+      // Three calls: the attempt at `bash`, the attempt at `exec`, and the answer.
+      assert_eq(result.model_calls, 3)
+      // One tool call, not two: the count is what *ran*, and a refused call ran nothing. That is
+      // also what keeps the figure in the footer honest — it says how many tools did something.
+      assert_eq(result.tool_calls, 1)
+      assert_false(
+        @platform.path_exists("\{dir}/should-not-exist"),
+        msg="a refused call ran the command anyway",
+      )
+
+      let session = logged(ctx.session_path)
+      let refusals : Array[String] = []
+      for entry in session.entries {
+        match entry.kind {
+          @core.Message(message~) =>
+            match message {
+              @core.ToolResult(result) =>
+                if result.is_error && result.tool_name == "bash" {
+                  for block in result.content {
+                    match block {
+                      @core.Text(text) => refusals.push(text)
+                      _ => ()
+                    }
+                  }
+                }
+              _ => ()
+            }
+          _ => ()
+        }
+      }
+      assert_eq(refusals.length(), 1, msg="expected exactly one refusal")
+      assert_true(
+        refusals[0].contains("no tool named `bash`, so nothing ran"),
+        msg=refusals[0],
+      )
+      assert_true(refusals[0].contains("`exec`, `wait`"), msg=refusals[0])
+      assert_true(
+        refusals[0].contains("`exec`'s `bash` field"),
+        msg=refusals[0],
+      )
+      // The refusal is in the request the next call was built from, so the model read it.
+      assert_true(
+        seen[1].contains("no tool named"),
+        msg="the refusal was not sent back",
+      )
+      // And the two tool names are in the prompt the turn opened with, because a fresh session has
+      // no history to be stale — this one was built by hand, so what is checked is that the prompt
+      // was built from the code-mode tool set at all.
+      assert_true(ctx.system_prompt.contains("- exec:"), msg=ctx.system_prompt)
+      assert_false(ctx.system_prompt.contains("- bash:"), msg=ctx.system_prompt)
+    },
+  )
+}
+
+///|
+/// A call that is refused never becomes a job, however it is spelled.
+///
+/// The order of the two checks in the driver is the point: the tool set is consulted before the
+/// background record is opened, so a refused `bash` in a code-mode turn cannot leave a job row
+/// pointing at a process that was never started — nor spend one of the session's ten slots.
+async test "a refused call does not open a job record" {
+  let dir = scratch("refused-job")
+  let seen : Array[String] = []
+  with_fake_model(
+    [bash_tool_call_sse("/bin/sleep 30 &"), text_sse("done")],
+    seen,
+    async fn(base_url) {
+      let ctx = code_mode_context_for(dir, base_url)
+      let result = @agent.run_turn(
+        ctx,
+        "background something",
+        FIXED_TIME,
+        thinking_level="high",
+      )
+      // Nothing ran, so nothing is counted as having run.
+      assert_eq(result.tool_calls, 0)
+      assert_eq(ctx.jobs.live_count(ctx.session_path), 0)
+      assert_eq(
+        ctx.jobs.list().length(),
+        0,
+        msg="a refused call left a job behind",
+      )
+    },
+  )
 }

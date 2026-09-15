@@ -23,13 +23,28 @@ const POLL_MS : Int = 50
 priv struct Shell {
   base_url : String
   jobs : @core.JobStore
-  settings : @core.AppSettings
+  /// The settings in force. Replaced when the panel saves one, so that the file, this value and the
+  /// next turn cannot disagree about which key is being sent.
+  mut settings : @core.AppSettings
+  /// Where the settings file lives. Kept for the same reason as `root`: what the panel writes and
+  /// what it reads back have to be one path, and a second lookup is a second answer.
+  home : String
+  /// Where sessions live. Kept on the shell rather than looked up per use, because the list, a new
+  /// session and the switch that reads one all have to agree about it.
+  root : String
   /// The session as it stands. Replaced after each turn with the driver's copy, which is the one
   /// that has the new entries in it.
   mut session : @core.Session
-  path : String
-  cwd : String
+  /// Which session is on screen. Not final: the reader can switch, which is what the sidebar is.
+  mut path : String
+  mut cwd : String
   mut model_id : String
+  /// Whether a turn is running. Written by the turn and read by the command loop, which are the same
+  /// thread — MoonBit's async is cooperative — so this needs no lock, only the discipline that the
+  /// turn sets it before its first `await` and clears it after its last.
+  mut busy : Bool
+  /// What the sidebar's labels cost, cached across refreshes.
+  labels : Labels
   /// One turn at a time, for the reason the web UI has the same lock: two turns sharing a session
   /// interleave their writes into one file and fork its history — a fork this project has already
   /// produced once, and it left entries naming a parent that no longer existed.
@@ -55,15 +70,31 @@ fn store_root(home : String) -> String {
 /// The precedence is `@core.choose_api_key` rather than the order of three `if`s, so a variable
 /// still overrules the saved key and the panel and the turn cannot disagree about which is in use.
 ///
-/// pi's credential store is deliberately not consulted: this shell has no settings panel yet, so
-/// the only thing a missing key can mean is that the host should say so. Adding the third source
-/// without the panel would be a fallback nobody could see the reason for.
+/// pi's credential store is deliberately not consulted. The panel saves a key where this shell can
+/// write it, and a third source that came from somewhere else — pi's own files, which this shell
+/// cannot read back to describe — would be a key the panel could not explain.
 fn resolve_key(settings : @core.AppSettings) -> @core.KeyChoice? {
-  let env_key = match @env.get_env_var("DEEPSEEK_API_KEY") {
-    Some(value) => value
-    None => ""
+  @core.choose_api_key(env_key(), settings.saved_api_key, None)
+}
+
+///|
+/// The directory the agent works in, when no session says otherwise.
+///
+/// A double-clicked `.app` is launched with `/` as its working directory — Finder passes no
+/// directory, and the kernel's default is the root — so taking that at face value would put every
+/// session started from the Finder in a store slice of its own, run its tools against the root of
+/// the volume, and describe a workspace called nothing at all. The home directory is the honest
+/// stand-in: it is where a person's own terminal opens, and it is at least a directory that means
+/// something.
+///
+/// Only `/` is treated this way. Anything else is a directory somebody chose — a shell's `cd`, a
+/// launcher, "Open With" — and second-guessing those would be worse than the problem.
+fn working_dir(cwd : String, home : String) -> String {
+  if cwd == "/" {
+    home
+  } else {
+    cwd
   }
-  @core.choose_api_key(env_key, settings.saved_api_key, None)
 }
 
 ///|
@@ -92,20 +123,28 @@ async fn open_session(
         (session, path)
       }
     }
-    _ => {
-      let now = @env.now().reinterpret_as_int64()
-      let id = @core.new_entry_id()
-      let path = @core.session_file_path(shell_root, cwd, now, id)
-      let header : @core.SessionHeader = {
-        id,
-        timestamp: @core.format_iso_utc(now),
-        cwd,
-        parent_session: None,
-        version: Some(3),
-      }
-      (@core.Session::new(header, []), path)
-    }
+    _ => fresh_session(shell_root, cwd)
   }
+}
+
+///|
+/// A session that has not been written yet: its header, and where it would go.
+///
+/// Not written here. A session is created empty and filled in by whoever appends the first entry,
+/// which keeps a store from filling up with header-only files for conversations nobody ever had —
+/// files a picker would have to show and a reader would have to scroll past.
+fn fresh_session(root : String, cwd : String) -> (@core.Session, String) {
+  let now = @env.now().reinterpret_as_int64()
+  let id = @core.new_entry_id()
+  let path = @core.session_file_path(root, cwd, now, id)
+  let header : @core.SessionHeader = {
+    id,
+    timestamp: @core.format_iso_utc(now),
+    cwd,
+    parent_session: None,
+    version: Some(3),
+  }
+  (@core.Session::new(header, []), path)
 }
 
 ///|
@@ -117,11 +156,16 @@ async fn Shell::open() -> Shell {
   let cwd = @platform.current_dir()
   let settings = @platform.load_settings(home)
   let root = store_root(home)
-  let (session, path) = open_session(root, cwd)
-  // The log has the first word: a resumed session was last run on whatever model it recorded, and
-  // starting it on the build's default instead would quietly answer its old questions on a
-  // different model.
-  let recorded = session.context().model.map(entry => entry.model_id)
+  let (session, path) = open_session(root, working_dir(cwd, home))
+  // A resumed session brings its own directory with it: `PI_SHELL_SESSION` can name a file written
+  // somewhere else, and running its tools in the directory this process happens to have been started
+  // in would be a different session's workspace. An empty one is a header nobody filled in, and the
+  // process's own directory is the better guess.
+  let working = if session.header.cwd == "" {
+    working_dir(cwd, home)
+  } else {
+    session.header.cwd
+  }
   let base_url = match @env.get_env_var("DEEPSEEK_BASE_URL") {
     Some(value) if value != "" => value
     _ => "https://api.deepseek.com"
@@ -130,10 +174,14 @@ async fn Shell::open() -> Shell {
     base_url,
     jobs: @core.JobStore::new(),
     settings,
+    home,
+    root,
     session,
     path,
-    cwd,
-    model_id: recorded.unwrap_or(@core.default_model_id()),
+    cwd: working,
+    model_id: session_model(session),
+    busy: false,
+    labels: Labels::new(),
     turns: @async.Mutex(),
     aborting: { val: false, },
   }
@@ -156,7 +204,9 @@ fn event(kind : String, fields : Array[(String, Json)]) -> Json {
 }
 
 ///|
-/// The session that is open, and what a reader needs to know about it. Sent once, first.
+/// The session that is open, and what a reader needs to know about it. Sent first, and again
+/// whenever one of those four facts changes — saving a key is what made it a snapshot rather than a
+/// greeting, because the window a key saves is a window that can send again.
 fn say_ready(shell : Shell, key_source : String) -> Unit {
   emit(
     event("ready", [
@@ -259,6 +309,12 @@ fn ending_text(result : @agent.TurnResult, aborted : Bool) -> String {
 }
 
 ///|
+/// The turn is over: the session can be left, replaced or deleted again.
+fn Shell::clear_busy(self : Shell) -> Unit {
+  self.busy = false
+}
+
+///|
 /// Run one prompt to completion, and say everything that happened.
 ///
 /// The shape is the web UI's `run_turn` with the document taken out. What is left is the part that
@@ -266,6 +322,13 @@ fn ending_text(result : @agent.TurnResult, aborted : Bool) -> String {
 /// stream, and report.
 async fn Shell::run_turn(self : Shell, prompt : String) -> Unit {
   self.aborting.val = false
+  // Before the first `await`, so that a command arriving during the turn sees it set. The sidebar
+  // reads this: a turn is the one thing a session cannot be switched out from under.
+  self.busy = true
+  // A function rather than an assignment because `defer` takes an expression and an assignment is
+  // not one — and the point is that this runs on the way out of every path, including the one that
+  // failed.
+  defer self.clear_busy()
   say_user(prompt)
   say_status("thinking…")
   let mode = self.settings.tool_mode
@@ -406,18 +469,35 @@ fn Shell::api_key(self : Shell) -> String {
 ///|
 /// What a command from the host means.
 ///
-/// Bare text is a prompt; the rest are the three words a host can say that are not one (`abort`,
-/// `quit`, `/model`). Words rather than a protocol because that is all the MVP has to say, and a
-/// protocol for three words is a second thing to keep in step with the host.
+/// Bare text is a prompt; the rest are the words a host can say that are not one — `abort`, `quit`,
+/// and the sidebar's four. Words rather than a protocol because the host is the only caller, and a
+/// protocol for seven words is a second thing to keep in step with it.
+///
+/// Paths are not quoted: a session path is a path, and one with a newline in it could not have
+/// arrived as one line of a line-oriented protocol anyway.
 fn command_of(line : String) -> Command {
   match line {
     "abort" => Abort
     "quit" => Quit
+    "/sessions" => ListSessions
+    "/new" => NewSession
+    "/settings" => ListSettings
+    "/key-clear" => ClearKey
     _ =>
       if line.has_prefix("/model ") {
         Model(line[7:].trim().to_owned())
       } else if line == "/model" {
         ReportModel
+      } else if line.has_prefix("/open ") {
+        Open(line[6:].trim().to_owned())
+      } else if line.has_prefix("/delete ") {
+        Delete(line[8:].trim().to_owned())
+      } else if line.has_prefix("/mode ") {
+        SetMode(line[6:].trim().to_owned())
+      } else if line.has_prefix("/key ") {
+        // Not trimmed: a key is a credential, and a space inside one is the credential's business.
+        // The trailing newline is already gone — commands arrive one line at a time.
+        SaveKey(line[5:].to_owned())
       } else {
         Prompt(line)
       }
@@ -431,6 +511,29 @@ priv enum Command {
   Quit
   Model(String)
   ReportModel
+  ListSessions
+  NewSession
+  Open(String)
+  Delete(String)
+  ListSettings
+  SaveKey(String)
+  ClearKey
+  SetMode(String)
+}
+
+///|
+/// Whether the session can be left, replaced or removed, having said so if it cannot.
+///
+/// One turn at a time, and the turn owns the session while it runs: it appends to the file and
+/// writes the session back at every commit, so switching away mid-turn would leave the reader
+/// looking at a transcript that is not the one still being written. Refused rather than queued,
+/// because the answer is one the reader can act on — stop the turn first.
+fn Shell::idle(self : Shell) -> Bool {
+  if self.busy {
+    say_error("a turn is running — stop it first")
+    return false
+  }
+  true
 }
 
 ///|
@@ -456,6 +559,14 @@ async fn Shell::serve(self : Shell) -> Unit {
     None => "missing"
   }
   say_ready(self, key_source)
+  // A session that was resumed — by `PI_SHELL_SESSION`, or by whatever ran last — has a transcript
+  // already, and the host has never seen any of it. The same replay a switch gets, because it is the
+  // same situation: a conversation the reader is looking at and the window is not.
+  say_history(self.session)
+  // The list goes out with the first breath rather than when the sidebar asks for it: the window is
+  // drawn before this line arrives, and a sidebar that fills in a moment later is a sidebar the
+  // reader watches arrive.
+  self.say_sessions()
   if choice is None {
     say_error("no API key: set DEEPSEEK_API_KEY and reopen")
   }
@@ -474,6 +585,9 @@ async fn Shell::serve(self : Shell) -> Unit {
                 self.turns.acquire()
                 defer self.turns.release()
                 self.run_turn(text)
+                // After the lock, not inside the turn: the label of a session nobody has asked
+                // anything in yet is written by its first entry, and the list is what says so.
+                self.say_sessions()
               },
               no_wait=true,
             )
@@ -481,6 +595,17 @@ async fn Shell::serve(self : Shell) -> Unit {
             self.aborting.val = true
             say_status("stopping…")
           }
+          ListSessions => self.say_sessions()
+          NewSession => if self.idle() { self.create() }
+          Open(path) => if self.idle() { self.show(path) }
+          Delete(path) => if self.idle() { self.discard(path) }
+          ListSettings => self.say_settings()
+          SaveKey(key) => self.save_key(key)
+          ClearKey => self.save_key("")
+          // Deliberately not gated on being idle: a mode is read when the next request is built, so
+          // changing it mid-turn is a decision about the turn after this one — which is allowed, and
+          // is exactly when a reader wants it.
+          SetMode(name) => self.set_mode(name)
           ReportModel => say_status(self.model_report())
           Model(id) => {
             let (_, known) = @core.model_spec_for(id)

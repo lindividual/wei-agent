@@ -30,6 +30,18 @@ public enum ShellState: Equatable {
 @MainActor
 public final class PiClient: ObservableObject {
     @Published public private(set) var state: ShellState = .starting
+    /// The store, as the sidebar draws it. Replaced whole by each `sessions` event rather than
+    /// merged: the shell is the one that read the disk, and a list this side patched up from its own
+    /// guesses would be a second opinion about what is on it.
+    @Published public private(set) var groups: [SessionGroup] = []
+    /// The session on screen, by path. What the sidebar's selection *is*, rather than something the
+    /// selection agrees with: a click asks the shell to switch, and the row highlights when the shell
+    /// says it did. A refused switch — a turn is running — therefore leaves the row the reader
+    /// actually has.
+    @Published public private(set) var currentPath = ""
+    /// The settings in force, as the shell last described them. `nil` until the first `settings`
+    /// event, which is why the panel shows a spinner rather than fields with guessed values.
+    @Published public private(set) var settings: ShellSettings?
     @Published public private(set) var conversation = Conversation() {
         didSet { revision += 1 }
     }
@@ -65,16 +77,52 @@ public final class PiClient: ObservableObject {
 
     private func receive(_ line: String) {
         guard let event = PiEvent.decode(line: line) else { return }
-        if case let .ready(session, model, cwd, key) = event {
+        switch event {
+        case let .ready(session, model, cwd, key):
             sawReady = true
+            currentPath = session
             state = key == "missing" ? .unkeyed : .ready(session: session, model: model, cwd: cwd, key: key)
-        }
-        // The shell says there is no key at startup, and again if a turn cannot be sent. Either way
-        // the window should say so rather than looking ready.
-        if case let .error(text) = event, !sawReady {
-            state = .failed(text)
+
+        case let .session(path, cwd, model):
+            currentPath = path
+            // A switch changes which session is open, where its tools run and which model it was last
+            // run on. The key does not change with it, so a shell that was ready stays ready.
+            if case let .ready(_, _, _, key) = state {
+                state = .ready(session: path, model: model, cwd: cwd, key: key)
+            }
+
+        case let .sessions(workspaces):
+            groups = workspaces
+
+        case let .settings(settings):
+            self.settings = settings
+
+        case let .error(text):
+            // The shell says there is no key at startup, and again if a turn cannot be sent. Either
+            // way the window should say so rather than looking ready. Later errors belong to the
+            // conversation, which is where they are shown.
+            if !sawReady {
+                state = .failed(text)
+            }
+
+        default:
+            break
         }
         conversation.apply(event)
+    }
+
+    /// The row the window is showing, from the list the shell sent.
+    public var currentSession: SessionRow? {
+        for group in groups {
+            if let row = group.sessions.first(where: { $0.current }) { return row }
+        }
+        return nil
+    }
+
+    /// What to call the session on screen, for the window's title. Empty when there is nothing to
+    /// call it yet, which leaves the app's own name in the title bar rather than a blank one.
+    public var currentTitle: String {
+        currentSession?.label ?? ""
     }
 
     /// Send a prompt.
@@ -93,5 +141,58 @@ public final class PiClient: ObservableObject {
     /// Ask which models this build has.
     public func reportModel() {
         pi_shell_send("/model")
+    }
+
+    // ── the sidebar ───────────────────────────────────────────────────────
+
+    /// Show another session.
+    ///
+    /// A request rather than a state change: the shell refuses while a turn is running, and the
+    /// refusal is the answer the reader needs — the transcript on screen is still being written.
+    public func open(_ path: String) {
+        guard !path.isEmpty, path != currentPath else { return }
+        pi_shell_send("/open \(path)")
+    }
+
+    /// Start a session in the same directory as the current one.
+    public func newSession() {
+        pi_shell_send("/new")
+    }
+
+    /// Take a session out of the store. The shell refuses the one on screen, and the file is renamed
+    /// aside rather than removed, so a mis-click is recoverable by hand.
+    public func delete(_ path: String) {
+        guard path != currentPath else { return }
+        pi_shell_send("/delete \(path)")
+    }
+
+    // ── settings ──────────────────────────────────────────────────────────
+
+    /// Ask what is in force. Sent when the panel opens as well as at startup, because the settings
+    /// file can be edited by hand while this app is running.
+    public func refreshSettings() {
+        pi_shell_send("/settings")
+    }
+
+    /// Save a key for the next turn.
+    ///
+    /// Not trimmed or validated here: the shell writes what it is given, and a key with a space in
+    /// it is the credential's business. An empty string is a request to clear, which is why the
+    /// panel only sends one from its own Clear button.
+    public func saveKey(_ key: String) {
+        guard !key.isEmpty else { return }
+        pi_shell_send("/key \(key)")
+    }
+
+    /// Forget the saved key. A key from the environment is not touched: this process cannot change
+    /// another process's environment, and pretending otherwise would describe a state it cannot
+    /// reach.
+    public func clearSavedKey() {
+        pi_shell_send("/key-clear")
+    }
+
+    /// Switch which tools a turn gets. Honoured on the next turn, not the one running.
+    public func setMode(_ mode: String) {
+        pi_shell_send("/mode \(mode)")
     }
 }

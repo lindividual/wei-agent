@@ -36,7 +36,7 @@ moon run pi -- "prompt"              # 命令行跑一次完整 turn
 moon run verify                      # 全量会话往返验证
 moon run scriptcheck                 # 编译并运行内置 script
 
-macos/build-moonbit.sh               # 原生 macOS 壳（MVP）
+macos/build-moonbit.sh               # 原生 macOS 壳
 cd macos/PiShell && swift run PiShell
 ```
 
@@ -312,6 +312,35 @@ stdout 封顶 **32KB**，`moon` 自己的构建警告不进 digest（它们是�
   删掉，而不是启动时清空目录 —— 那个临时目录是全机器共用的，两个服务器同时跑是常态，先起来的
   没资格删后起来那个正在等的输出。
 
+**模式是「声明」，不是「执行」—— 这两件事必须分开做。** 第一次实测就撞上了：一个在 tools mode 下
+跑了半天的会话被切成 code mode，模型**连着调了 165 次 `bash`**，而每一次都跑成功了 —— 因为
+`execute_tool` 以前只看消息里写的名字，从不检查这个名字是不是本轮声明的。provider 不会替你挡：
+schema 里没有的名字，它照样会让模型发出来。所以判定落在**唯一会真的去执行的地方**
+（`agent/driver.mbt`）：本轮工具集里没有这个名字，就直接回一条可以被模型改的拒绝，**什么也不跑**
+（也因此在它之后才有 job 记录、`tool_calls` 计数也不涨）。
+
+拒绝的措辞是提示文本，不是错误消息 —— 它同时回答「这轮有什么」和「这事该怎么做」：
+
+```
+Refused: this turn has no tool named `bash`, so nothing ran. This turn's tools are `exec`, `wait`.
+A shell command goes in `exec`'s `bash` field.
+```
+
+**为什么会有模型去调一个没声明的工具？** 因为它自己的历史。那次 165 次 `bash` 的会话是**被恢复**
+的：上一轮的对话里全是 `bash` 的调用和结果（模式是逐轮生效的）。对照实验：同样 code mode 下
+**新建**会话，模型第一次就用了 `exec`。所以除了拒绝，还提前说一句：system prompt 里多一段
+`## Tools changed`，只在「对话里出现过的工具 ≠ 本轮的工具」时非空 ——
+
+- 只从**模型看得见的对话**（`Session::context`）里找，所以一次压缩把旧调用抹掉之后，这段话也跟着
+  消失，不会一直挂着；
+- 没有任何陈旧工具时它是**空串**，这一点是承重的：prompt 就是缓存前缀，一段无条件出现的文本会让
+  每个已存在的会话在升级后重新付一次前缀的价钱；
+- 它排在最后一段，因为那是刚变成真的事实。
+
+实测这段提示起作用的证据：在同一个被恢复的会话上，模型这次**第一次调用就是 `exec`**；再让它
+「用名叫 bash 的工具跑一条命令」，它用 `exec` 的 `bash` 字段跑了，并回了一段说明 —— **「`bash` 是
+字段名，不是工具」**。
+
 System prompt 跟着模式换。「工具」那一节是从声明生成的，所以不会列出没有声明的工具；「怎么
 干活」那段也换 —— 八个工具那段里的「只读一个文件时 `read` 更便宜」，在 code mode 下是在描述
 一个不存在的工具。两处由同一个 `ToolMode` 决定，turn 开头读一次、同时喂给 prompt 和 schema，
@@ -416,6 +445,9 @@ node harness/ui-browser-check.mjs   # 真实浏览器验收（自己起 headless
   仍是原始文本进对话。
 - **code mode 是取舍不是增强**：`note` 没有替代（跨压缩的事实记录消失），图片读入
   只剩 `cat` 一个 png 的结果，`wait` 也读不到上一次运行留下的输出文件。见「code mode」一节。
+- **切模式会让「旧工具名」在历史里留一段时间**：模式逐轮生效，所以刚切换后的对话里还躺着上一个
+  模式的调用，模型有概率照抄（实测：被恢复的会话里 165 次 `bash`）。现在会拒绝 + 提前提醒，但
+  真正的解法是**新会话**；旧会话越干净地切换，代价越小。
 - **工作区指令不向上查找**：只有 session 自己那个 cwd 里的 `AGENTS.md` 算数，上级目录一律
   不读，也没有总字节预算。
 - **文件夹选择框只在宿主机有桌面会话时出现**（目前只写了 macOS 的 `osascript`）。SSH、容器、
@@ -439,8 +471,8 @@ DSL 在包外不可用**（`server_side_render` 在 `internal/` 里），**SSE �
 
 ## 原生的第二个前端
 
-`macos/` 是一个原生 macOS 壳（SwiftUI + AppKit），驱动同一套 `core` / `platform` / `agent`。
-看 `macos/README.md`。
+`macos/` 是一个原生 macOS 壳（SwiftUI + AppKit），驱动同一套 `core` / `platform` / `agent`：
+左边是会话列表（切换 / 新建 / 删除），右边是对话。看 `macos/README.md`。
 
 它的意义不只是一个新界面，而是把上面那句「服务器是文档唯一的写者」的边界**再切一刀**：
 
@@ -449,8 +481,13 @@ ui/        服务器拥有文档 → 线上跑 HTML 补丁（浏览器不知道�
 macos/appffi/  host 拥有视图 → 线上跑事实（这段文本来了、这个工具开始了、这一轮结束了）
 ```
 
-`ffi.mbt` 只导出八个事件：`ready` / `user` / `reply` / `thinking` / `tool` / `status` / `end` /
-`error`。它们是事实而不是绘制指令 —— 说发生了什么，不说该怎么画。
+`ffi.mbt` 导出的是一份不长的事件表：`ready` / `sessions` / `session` / `history` / `user` /
+`reply` / `thinking` / `tool` / `status` / `end` / `error`。它们是事实而不是绘制指令 —— 说发生了
+什么，不说该怎么画。
+
+后三个是侧边栏带来的：`sessions` 是整份会话列表，`session` 说换到了哪一份，`history` 把一份宿主
+**没看过**的会话整段发过去（行，不是 delta —— 见 `macos/README.md`）。自己开的会话仍然是靠
+`reply` / `tool` 这种 delta 长出来的，两条路并存，因为「我看到过」和「我没看到过」本来就是两件事。
 
 这条边界的验证方式是**两侧钉住同一批 JSON 字面量**：`macos/appffi/app_wbtest.mbt` 从生产侧断言，
 `macos/PiShell/Tests/PiModelTests/` 从消费侧断言。改一个字段名而不改另一边，挂的是一个构建。

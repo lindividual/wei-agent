@@ -1646,3 +1646,80 @@ async test "a saved tool mode changes the tools and the prompt of the next turn"
   assert_eq(app.tools().length(), 8)
   assert_eq(@platform.load_settings(home).tool_mode, @core.ToolMode::Tools)
 }
+
+///|
+/// The prompt tells the next turn when the conversation it is continuing used other tools.
+///
+/// This is the measured failure: a session that ran in tools mode, resumed into code mode, emitted
+/// `bash` 165 times in one turn — its own history was full of `bash` — while a fresh session in the
+/// same mode reached for `exec` on the first call. The section is derived from the conversation the
+/// model can see, so a session that switched modes is told, and one that never switched sends
+/// exactly the bytes it sent before this existed (the prompt is the cache prefix, and a section that
+/// always fired would invalidate every session on upgrade).
+async test "a session that used another mode's tools is told so in the prompt" {
+  let home = "_build/app_mode_prompt_test/\{@core.new_entry_id()}"
+  @platform.make_dirs(home)
+  let app = test_app_in(home)
+  // A conversation with two `bash` calls in it, as a tools-mode session would have.
+  let entries : Array[@core.Entry] = [
+    {
+      id: "e1",
+      parent_id: None,
+      timestamp: @core.format_iso_utc(0L),
+      kind: @core.Message(
+        message=@core.Assistant({
+          content: [
+            @core.ToolCall(
+              id="c1",
+              name="bash",
+              arguments=Json::object(Map([])),
+            ),
+          ],
+          api: "openai-completions",
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          usage: @core.Usage::zero(),
+          stop_reason: @core.ToolUse,
+          timestamp: 0L,
+          response_id: (None : String?),
+          response_model: (None : String?),
+          raw_stop_reason: (None : String?),
+          error_message: (None : String?),
+        }),
+      ),
+    },
+  ]
+  let header : @core.SessionHeader = {
+    id: "s",
+    timestamp: @core.format_iso_utc(0L),
+    cwd: "/work/one",
+    parent_session: None,
+    version: Some(3),
+  }
+  let runner = Runner::new(
+    @core.Session::new(header, entries),
+    "/store/a.jsonl",
+    @core.default_model_id(),
+  )
+  app.display(runner)
+  // In tools mode the prompt names `bash` and says nothing about a change.
+  let tools_prompt = app.system_prompt(runner, mode=@core.ToolMode::Tools)
+  assert_true(tools_prompt.contains("- bash:"), msg=tools_prompt)
+  assert_false(tools_prompt.contains("## Tools changed"), msg=tools_prompt)
+  // In code mode it names `exec`, and it says what became of the `bash` calls already in the
+  // conversation — including where the command goes now.
+  let code_prompt = app.system_prompt(runner, mode=@core.ToolMode::Code)
+  assert_true(code_prompt.contains("- exec:"), msg=code_prompt)
+  assert_true(code_prompt.contains("## Tools changed"), msg=code_prompt)
+  assert_true(
+    code_prompt.contains("Earlier calls in this conversation used `bash`"),
+    msg=code_prompt,
+  )
+  assert_true(code_prompt.contains("`exec`'s `bash` field"), msg=code_prompt)
+  // It is the last section: nothing but the change notice follows it.
+  let change = code_prompt.find("## Tools changed").unwrap()
+  assert_false(code_prompt[change:].contains("## Workspace"), msg=code_prompt)
+  // And the two halves of one turn agree: the same mode builds the schema, so the tools the prompt
+  // names are the tools the request carries.
+  assert_eq(@core.tools_for_mode(@core.ToolMode::Code).length(), 2)
+}

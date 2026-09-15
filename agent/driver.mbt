@@ -661,6 +661,29 @@ async fn run_tools(
       @core.ToolCall(id~, name~, arguments~) => (id, name, arguments)
       _ => ("", "", Json::object(Map([])))
     }
+    // The tool set is the mode, and this is the only place it is enforced. The mode decides what is
+    // *declared*, and declaring is not enforcing: measured, with `exec` and `wait` as the entire
+    // schema, a model resumed into code mode emitted `bash` 165 times in one turn and every one of
+    // them ran. A tool call is a request to do something, so the refusal belongs here, at the one
+    // place that acts on the request — and before anything is started, so that a refused call leaves
+    // no process and no job record behind.
+    if !@core.has_tool(ctx.tools, name) {
+      let refusal = @core.Message::ToolResult({
+        tool_call_id: id,
+        tool_name: name,
+        content: [@core.Text(@core.undeclared_tool_message(name, ctx.tools))],
+        is_error: true,
+        timestamp,
+        details: None,
+      })
+      current = commit(
+        current,
+        ctx.session_path,
+        @core.Message(message=refusal),
+        now_ms(),
+      )
+      continue
+    }
     // Background work is accounted for per session, and dsh's admission rule is adopted whole:
     // past the limit the command is refused with an instruction to clean up, because "start
     // another background job" must not become a way to accumulate processes nobody counts.

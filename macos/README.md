@@ -1,9 +1,11 @@
-# 原生 macOS 壳（MVP）
+# 原生 macOS 壳
 
 一个原生窗口，驱动同一套 agent。它存在的原因是路线 B 的那句话要落到地上：**界面重写，内核复用**。
 
+窗口左边是会话列表，右边是对话。
+
 ```
-macos/appffi/       MoonBit：agent + 会话 + 事件出口（这一层是新的）
+macos/appffi/       MoonBit：agent + 会话 + 会话列表 + 事件出口（这一层是新的）
 macos/build-moonbit.sh  把上面那个包编译成 host 能链接的 libpiweb.a
 macos/PiShell/      Swift：窗口、对话、边界
 ```
@@ -28,7 +30,21 @@ MoonBit 侧的测试是 `moon test macos/appffi --target native`。
 
 `ui/` 的状态是重写的，不是搬过来的 —— 但也没有重新设计，`appffi/app.mbt` 里的
 `Shell` 就是 `ui/session.mbt` 的 `Runner` 减掉「只有贴着文档才有意义」的那些字段
-（transcript 深度、live patch id、订阅者）。
+（transcript 深度、live patch id、订阅者）。侧边栏同理是 `ui/sidebar.mbt` 减去属于页面的
+那部分：折叠、显示上限、「load earlier」、撤销提示 —— 每一条都是关于一栏网页的决定，而这一栏
+现在是宿主的。剩下的部分是会话有哪些、叫什么、描述一个会话要花多少读。
+
+## 切会话：为什么线上跑的是行，不是事件
+
+宿主手上有两样东西是 Web 版没有的：一份「我看到过的全部事件」的记忆，和一个**它没看过**的会话。
+
+- 自己开的会话，逐步重放事件就对了 —— 它本来就是这么画出来的。
+- 换过去的会话（以及 `PI_SHELL_SESSION` 恢复的那个），事件早就发生完了，宿主一条都没收到。
+  所以 `history` 事件发的是**行**，不是 delta：整段对话一行 JSON，每行都是 `complete`。
+
+行而不是事件，是因为历史没有时间：把一段已经结束的对话重放成一串 delta，是在编造一个所有事情
+都同时发生的下午。id 带 `h-` 前缀，因为流里的 id 是 `reply-1`、`tool-2` —— 两者混在一份记录里
+会让 delta 追加到错误的块上。
 
 ## 分界线的判据
 
@@ -68,8 +84,8 @@ macOS 需要主线程跑自己的事件循环。**两者不能是同一个线程
 
 不是遗漏，是用来换「先知道这条路通不通」的：
 
-- **只有一个会话。** 没有侧边栏，不能新建/切换/删除。会话从 `PI_SHELL_SESSION` 或当前目录最近
-  的 store 里来。
+- **会话列表只在侧边栏里。** 切换/新建/删除都有了，但列表按工作目录分组、不可折叠，也没有显示
+  上限 —— store 小的时候这是优点，大了就是一条要滚很久的栏。
 - **没有设置面板。** key 只从 `DEEPSEEK_API_KEY` 和环境里读；没有 key 时窗口照常开着，状态行
   写 `no API key`。
 - **模型只能从命令行换**（往里发 `/model`），没有下拉框。
@@ -84,6 +100,8 @@ macOS 需要主线程跑自己的事件循环。**两者不能是同一个线程
 - `swift build` 会刷一屏 `was built for newer 'macOS' version` 的警告：MoonBit 用本机 SDK
   编译 `libpiweb.a`，而 Swift 包声明的最低版本更低。是警告，不是错误。
 - 归档要手动重建：改了 `macos/appffi/` 得再跑一次 `build-moonbit.sh`，SwiftPM 不知道它。
+  更阴的一点是 SwiftPM 也可能不重链：`touch` 一个 Swift 文件未必让可执行文件重链，于是新的
+  `.a` 被写着旧二进制。症状是「MoonBit 侧明明改了，线上没变」。`rm` 掉可执行文件再 build 一定对。
 - `swift run PiShell` 是裸可执行文件，不是 .app。`AppDelegate` 里那句
   `setActivationPolicy(.regular)` 就是为它写的 —— 否则有窗口、没菜单栏、不聚焦，看起来像卡死。
   真正打包时它是个 no-op。
@@ -92,9 +110,10 @@ macOS 需要主线程跑自己的事件循环。**两者不能是同一个线程
 
 按「先便宜后贵」排：
 
-1. **会话列表**：`platform.list_sessions` 已经在了，缺的是一条 `sessions` 事件和一个侧边栏。
-2. **设置面板**：key 最先 —— 现在没 key 就是一堵墙；`platform.load_settings` 也在了。
-3. **滚动跟随的细节**：现在每次都跳到最新一行。Web 版只在读者已经在底部时才跟，翻上去看旧内容
+1. **设置面板**：key 最先 —— 现在没 key 就是一堵墙；`platform.load_settings` 也在了。
+2. **滚动跟随的细节**：现在每次都跳到最新一行。Web 版只在读者已经在底部时才跟，翻上去看旧内容
    不会被拽回来。
+3. **侧边栏的规模**：分组折叠、每个工作目录显示最近 N 条、重命名（`Label`/`session_info` 两种
+   入口 `core` 都有）、已删除会话的撤销 —— 现在删除只做到「文件改名藏起来」。
 4. **模型下拉框**，然后是附件、用量面板。
 5. **打包成 .app**：bundle、图标、签名。

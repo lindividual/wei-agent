@@ -6,8 +6,8 @@ import Foundation
 /// a delta has to find *the row with this id* and append to it, which is a lookup by identity, not
 /// a match on a payload. Keeping the kind as a field means the append does not have to know which
 /// kinds it could be appending to.
-public struct Row: Identifiable, Equatable {
-    public enum Kind: Equatable {
+public struct Row: Identifiable, Equatable, Decodable {
+    public enum Kind: String, Equatable, Decodable {
         case user
         case reply
         case thinking
@@ -30,6 +30,13 @@ public struct Row: Identifiable, Equatable {
     public var detail: String = ""
     public var output: String = ""
     public var isError: Bool = false
+
+    /// `isError` crosses as `error`, the same name the `tool` event uses for the same fact — one
+    /// field, spelled once, so a row from a history and a row from a live stream decode alike.
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, text, complete, name, detail, output
+        case isError = "error"
+    }
 
     public init(
         id: String,
@@ -73,6 +80,20 @@ public struct Conversation: Equatable {
 
     public mutating func apply(_ event: PiEvent) {
         switch event {
+        case let .history(rows):
+            // A whole session in one event, because the host did not watch this one happen: every
+            // block in it is finished and no delta is coming for any of them. Replacing rather than
+            // appending is the point — the rows belong to a different session from the ones on
+            // screen.
+            self.rows = rows
+            status = ""
+            openBlock.removeAll()
+            nextNote = 0
+            return
+        case .sessions, .session, .settings:
+            // The sidebar's and the panel's own facts. The transcript is unchanged by any of them: a
+            // switch says which session is open and only the history that follows says what is in it.
+            return
         case let .ready(session, model, cwd, key):
             ready = event
             _ = (session, model, cwd, key)

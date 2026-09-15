@@ -412,3 +412,183 @@ test "a job's ending is named, each one its own" {
   }
   assert_true(stopping.contains("is stopping"), msg=stopping)
 }
+
+// ── the tool set this turn was given ───────────────────────────────────────
+
+///|
+/// A conversation whose earlier calls are the ones worth warning about.
+///
+/// Built from the same shape the model sees, because that is what the notice is derived from: a
+/// message the model cannot see — a call behind a compaction — must not be able to make a turn warn
+/// about a tool that is no longer anywhere in the conversation.
+fn conversation_with_calls(names : Array[String]) -> SessionContext {
+  let blocks : Array[Content] = []
+  for name in names {
+    blocks.push(
+      ToolCall(id="c-\{name}", name~, arguments=Json::object(Map([]))),
+    )
+  }
+  {
+    messages: [
+      ContextMessage::Assistant({
+        content: blocks,
+        api: "openai-completions",
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        usage: Usage::zero(),
+        stop_reason: ToolUse,
+        timestamp: 0L,
+        response_id: (None : String?),
+        response_model: (None : String?),
+        raw_stop_reason: (None : String?),
+        error_message: (None : String?),
+      }),
+    ],
+    thinking_level: "high",
+    model: None,
+  }
+}
+
+///|
+test "a call to a tool this turn does not have is refused, and says what there is" {
+  let code = tools_for_mode(ToolMode::Code)
+  let text = undeclared_tool_message("bash", code)
+  // The refusal has to start by saying nothing ran: a model that reads it as "this partially
+  // happened" will build on work that does not exist.
+  assert_true(
+    text.has_prefix(
+      "Refused: this turn has no tool named `bash`, so nothing ran.",
+    ),
+    msg=text,
+  )
+  assert_true(text.contains("`exec`, `wait`"), msg=text)
+  // And then the way to do it, because the mistake is nearly always the other mode's spelling.
+  assert_true(text.contains("`exec`'s `bash` field"), msg=text)
+  // The rest of the mapping, which is the part a model cannot derive: `read` has one replacement
+  // per use, not one replacement.
+  for
+    pair in [
+      ("script", "`moonbit` field"),
+      ("read", "sed -n '10,40p'"),
+      ("grep", "grep -rn"),
+      ("glob", "list with `ls`"),
+      ("write", "shell redirect"),
+      ("edit", "edit_text"),
+    ] {
+    let (name, phrase) = pair
+    let hint = undeclared_tool_message(name, code)
+    assert_true(hint.contains(phrase), msg="\{name}: \{hint}")
+  }
+  // `note` has no replacement in code mode, and the refusal says that rather than inventing one.
+  assert_true(
+    undeclared_tool_message("note", code).contains("no way to record a note"),
+  )
+  // A tool set with neither dialect — nothing here has a mapping for it — says what there is and
+  // stops, rather than guessing at advice for a mode it does not know.
+  let bare = undeclared_tool_message("bash", [])
+  assert_true(bare.contains("so nothing ran"), msg=bare)
+  assert_false(bare.contains("field"), msg=bare)
+  // A name that is nobody's spelling still gets the list, and no invented advice.
+  let invented = undeclared_tool_message("frobnicate", code)
+  assert_true(invented.contains("`exec`, `wait`"), msg=invented)
+  assert_false(invented.contains("A shell command goes"), msg=invented)
+}
+
+///|
+/// The reverse direction: a turn in tools mode is told what became of code mode's two.
+///
+/// `wait` is the interesting one, because there is no replacement for it — a tools-mode turn has no
+/// record of what a backgrounded command wrote — and saying so is better than letting the model
+/// discover it by calling a tool that is not there.
+test "the hints are per mode, and say when there is no replacement" {
+  let tools = tools_for_mode(ToolMode::Tools)
+  let exec = undeclared_tool_message("exec", tools)
+  assert_true(exec.contains("is `bash` here"), msg=exec)
+  assert_true(exec.contains("`script`"), msg=exec)
+  let wait = undeclared_tool_message("wait", tools)
+  assert_true(
+    wait.contains("Nothing keeps a backgrounded command's output in this mode"),
+    msg=wait,
+  )
+  assert_true(wait.contains("redirect it to a file"), msg=wait)
+  // A name neither mode knows gets the list and nothing else — the fallback that keeps this from
+  // inventing advice about a tool that never existed.
+  let invented = undeclared_tool_message("frobnicate", tools)
+  assert_true(invented.contains("`bash`"), msg=invented)
+  assert_false(invented.contains("here"), msg=invented)
+}
+
+///|
+test "the tools a turn has are looked up by name, and nothing else counts" {
+  let code = tools_for_mode(ToolMode::Code)
+  assert_true(has_tool(code, "exec"))
+  assert_true(has_tool(code, "wait"))
+  assert_false(has_tool(code, "bash"))
+  assert_false(has_tool(code, "Exec"))
+  assert_false(has_tool(code, ""))
+  assert_true(tool_named(code, "exec") is Some(_))
+  assert_true(tool_named(code, "bash") is None)
+}
+
+///|
+/// The stale names are the ones the conversation used and this turn cannot: exactly that, no more.
+test "a conversation's used tools are read back against this turn's set" {
+  let code = tools_for_mode(ToolMode::Code)
+  let tools = tools_for_mode(ToolMode::Tools)
+  // A session that ran in tools mode, now in code mode.
+  let stale = stale_tool_names(
+    conversation_with_calls(["bash", "read", "bash", "exec"]),
+    code,
+  )
+  // In the order first used, each once. `exec` is dropped because this turn has it.
+  assert_eq(stale, ["bash", "read"])
+  // The same conversation in tools mode is stale in the mirror direction, and `read` is not.
+  assert_eq(
+    stale_tool_names(conversation_with_calls(["exec", "wait"]), tools),
+    ["exec", "wait"],
+  )
+  // A conversation that used only what this turn has produces nothing, which is the ordinary case
+  // and the reason the section is empty.
+  assert_eq(stale_tool_names(conversation_with_calls(["bash"]), tools), [])
+  assert_eq(stale_tool_names(conversation_with_calls([]), code), [])
+}
+
+///|
+/// The section is empty when nothing has changed, and that is load-bearing.
+///
+/// The prompt is the cache prefix. A section that said "this turn's tools are …" unconditionally
+/// would be correct and would also rewrite the prefix of every session on upgrade, so the test pins
+/// the empty case first and the content second.
+test "the tool-change section is empty unless the tool set actually changed" {
+  let code = tools_for_mode(ToolMode::Code)
+  assert_eq(tool_change_prompt([], code), "")
+  let section = tool_change_prompt(["bash"], code)
+  assert_true(section.has_prefix("## Tools changed"), msg=section)
+  assert_true(
+    section.contains("Earlier calls in this conversation used `bash`"),
+    msg=section,
+  )
+  assert_true(section.contains("is refused and nothing runs"), msg=section)
+  assert_true(section.contains("`exec`, `wait`"), msg=section)
+  assert_true(section.contains("`exec`'s `bash` field"), msg=section)
+  // Two names read as one sentence rather than two sections.
+  let two = tool_change_prompt(["bash", "read"], code)
+  assert_true(two.contains("used `bash`, `read`"), msg=two)
+}
+
+///|
+/// The section rides at the end of the prompt, after the instructions and the catalog.
+///
+/// It is the one thing in the prompt that becomes true mid-conversation, and a reader comparing the
+/// prompt to the request should find the two tool sets named last rather than buried.
+test "the change section is the last thing in the prompt" {
+  let code = tools_for_mode(ToolMode::Code)
+  let prompt = build_system_prompt("/work", code, mode=ToolMode::Code, sections=[
+    "## Workspace\n\nSomething.",
+    tool_change_prompt(["bash"], code),
+  ])
+  let at = prompt.find("## Tools changed").unwrap()
+  assert_true(prompt.find("## Workspace").unwrap() < at)
+  assert_true(prompt.find("- exec:").unwrap() < at)
+  assert_eq(prompt[at:].contains("## Workspace"), false)
+}

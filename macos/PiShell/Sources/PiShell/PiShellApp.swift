@@ -5,11 +5,12 @@ import PiKit
 
 /// The app.
 ///
-/// A window, a transcript, and a box to type in. What it deliberately does not have is a session
-/// list, a settings panel, a workspace picker, attachments or a cost meter — each of those is a
+/// A window with a session list beside a transcript, and a box to type in. What it deliberately does
+/// not have is a workspace picker, attachments, a cost meter or a model picker — each of those is a
 /// working feature in the web UI, and every one of them would have to be rebuilt here or left
-/// behind. The MVP's question is whether the same agent can be driven through a native view at
-/// all, and one session answers it.
+/// behind. What it does have is the two things without which the rest is unreachable: the sidebar,
+/// because one session at a time was the MVP's question and this is the answer; and a settings panel,
+/// because a machine with no key in its environment has no way in at all.
 ///
 /// `macos/README.md` lists what is missing and in what order it should be added.
 
@@ -21,14 +22,26 @@ struct PiShellApp: App {
     var body: some Scene {
         WindowGroup("pi") {
             RootView(client: client)
-                .frame(minWidth: 520, minHeight: 360)
+                .frame(minWidth: 720, minHeight: 420)
                 .onAppear { client.start() }
         }
-        .defaultSize(width: 780, height: 720)
+        .defaultSize(width: 980, height: 760)
         .commands {
-            // The runtime keeps one session and one thread; a second window would be a second
-            // transcript of the same conversation, which is a lie about how many there are.
-            CommandGroup(replacing: .newItem) {}
+            // The one window: the runtime keeps one session and one thread, so a second window would
+            // be a second view of the same conversation — which is what the sidebar is for. "New"
+            // therefore means a new session, and it is where a Mac user looks for it.
+            CommandGroup(replacing: .newItem) {
+                Button("New Session") { client.newSession() }
+                    .keyboardShortcut("n", modifiers: .command)
+            }
+        }
+
+        // The standard Settings item: ⌘, and the menu entry a Mac user looks in. A separate scene
+        // rather than a sheet, because that is what this is — a place, not a step in something else.
+        // The panel is drawn from the shell's answer, so it can be opened before the shell has said
+        // anything: it shows that it is asking rather than fields it made up.
+        Settings {
+            SettingsView(client: client)
         }
     }
 }
