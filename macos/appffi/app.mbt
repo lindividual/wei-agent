@@ -431,7 +431,19 @@ async fn Shell::run_turn(self : Shell, prompt : String) -> Unit {
     max_rounds=limits.max_rounds.value.to_int(),
     max_cost=limits.max_cost.value,
     max_seconds=limits.max_seconds.value.to_int(),
-    continuing=self.session.turn_in_flight(),
+    // Never `continuing`, and the reason is the sentence this shell is built on: the reader types a
+    // prompt, and a prompt is a new turn. Inferring it from the log — "the session has a turn open,
+    // so this must be a resume" — has no way to tell an interrupted turn the reader wants to continue
+    // from one they have moved on from, and it guessed wrong in the worst direction: after a turn
+    // failed on a network error, the log kept its open turn, the next prompt was read as a resume,
+    // and the reader's words were never sent at all. Measured, not imagined: typed text appeared
+    // nowhere in the request.
+    //
+    // A new turn closes whatever was open as abandoned, which is what the web UI does when a reader
+    // ignores the interrupted-turn notice and simply types. Continuing is offered there as a button
+    // and belongs here as one too, if it is wanted — a decision the reader makes, not one the shell
+    // makes for them.
+    continuing=false,
     on_delta~,
     should_stop=() => self.aborting.val,
     on_tool~,
