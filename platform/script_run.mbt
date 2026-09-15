@@ -92,10 +92,14 @@ pub async fn run_script(arguments : Json, cwd : String) -> @core.ToolOutput {
   // One file name per workspace: the body changes between calls, the path does
   // not, which is what keeps the compiled packages warm.
   let path = "\{dir}/script.mbtx"
-  try @fs.mkdir(dir, recursive=true) catch {
-    e => return @core.ToolOutput::error("Could not create \{dir}: \{e}")
-  } noraise {
-    _ => ()
+  // `recursive=true` does not mean "tolerate an existing directory": it throws
+  // on one. The directory existing is the normal case from the second call on.
+  if !@fs.exists(dir) {
+    try @fs.mkdir(dir, recursive=true) catch {
+      e => return @core.ToolOutput::error("Could not create \{dir}: \{e}")
+    } noraise {
+      _ => ()
+    }
   }
   try @fs.write_file(path, @utf8.encode(staged_source(body))) catch {
     e => return @core.ToolOutput::error("Could not stage the script: \{e}")
@@ -110,7 +114,11 @@ pub async fn run_script(arguments : Json, cwd : String) -> @core.ToolOutput {
   for arg in @core.arg_strings(arguments, "args") {
     argv.push(arg)
   }
-  let running = () => @process.collect_output_merged("moon", argv, cwd~)
+  // Streams kept apart rather than merged: `moon` writes its own build warnings
+  // to stderr, and a dependency's deprecation notice is not this script's output.
+  // Merging put it in every digest — measured, and the model reported it back as
+  // part of the answer.
+  let running = () => @process.collect_output("moon", argv, cwd~)
   let outcome = try @async.with_timeout_opt(script_timeout_ms, running) catch {
     e =>
       return @core.ToolOutput::error(
@@ -124,6 +132,31 @@ pub async fn run_script(arguments : Json, cwd : String) -> @core.ToolOutput {
       @core.ToolOutput::error(
         "The script did not finish within \{script_timeout_ms / 1000}s and was stopped.",
       )
-    Some((code, out)) => @core.format_script_result(out.text(), "", code)
+    Some((code, out, err)) =>
+      @core.format_script_result(out.text(), build_noise(err.text()), code)
   }
+}
+
+///|
+/// Drop `moon`'s own warnings from the child's stderr.
+///
+/// They are about the build, not about what the script did — a dependency's
+/// deprecation notice, for instance. They cost bytes in every digest and read as
+/// part of the answer, which is worse than costing bytes.
+fn build_noise(stderr : String) -> String {
+  let kept : Array[String] = []
+  for line in stderr.split("\n") {
+    if line.has_prefix("Warning:") {
+      continue
+    }
+    kept.push(line.to_owned())
+  }
+  let out = StringBuilder()
+  for line in kept {
+    if out.to_string() != "" {
+      out.write_string("\n")
+    }
+    out.write_string(line)
+  }
+  out.to_string().trim().to_owned()
 }

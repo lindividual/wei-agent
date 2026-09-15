@@ -153,6 +153,16 @@ async fn render_settings_panel(app : App, shown : Runner) -> String {
 }
 
 ///|
+/// The control that opens the panel, as HTML.
+///
+/// Separate from the panel because it belongs somewhere else on the page: the control is pinned to
+/// the corner and the dialog is a modal, and they must not be replaced together — a refresh that
+/// re-rendered the dialog would close it.
+async fn render_settings_trigger(app : App, shown : Runner) -> String {
+  @html.render_settings_trigger(settings_view(app, shown)).render()
+}
+
+///|
 /// Just the panel's contents, as the region a settings post replaces.
 ///
 /// Deliberately not `render_settings_panel`: the patch targets `settings-body`, so sending the

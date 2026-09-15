@@ -132,44 +132,136 @@ pub fn skills_summary(skills : Array[@core.SkillEntry]) -> String {
 }
 
 ///|
-/// The panel.
+/// The panel's sections, in the order they are rendered.
 ///
-/// The outer `<details>` owns only the summary and the open/closed state; everything inside is
-/// `render_settings_body`, which is also what a refresh replaces. The split is not cosmetic:
-/// patching the whole `<details>` would nest one panel inside another — which still *looks* like a
-/// working panel, because the ids inside it are the same, and is exactly the class of bug this UI
-/// has been bitten by before.
-pub fn render_settings(view : SettingsView) -> Node {
-  // Open when there is something to act on — no key at all, or a key the reader saved that a
-  // variable is overruling. Otherwise closed: the panel floats over the conversation, and a
-  // reader who has not asked for it should not have a third of the screen taken by it. Opening it
-  // is the browser's business (`<details>`), so this decision is only about the first paint.
-  let attrs : Array[Attr] = [attr("id", "settings"), cls("settings")]
+/// One list, used by the navigation and by the sections themselves, so the anchors cannot point
+/// at an id that was renamed. The label is what the reader clicks; the id is what it points at.
+pub fn settings_sections() -> Array[(String, String)] {
+  [
+    ("settings-model", "model"),
+    ("settings-limits", "turn limits"),
+    ("settings-instructions", "instructions"),
+    ("settings-key", "api key"),
+    ("settings-skills", "skills"),
+    ("settings-paths", "paths"),
+  ]
+}
+
+///|
+/// The control that opens the panel.
+///
+/// A button rather than a `<summary>`: the panel is a modal dialog now, and a modal is opened by
+/// script (`showModal`), not by the element that holds it. What was worth keeping from the
+/// `<details>` version is that this control never moves — it sits outside every region a refresh
+/// replaces, so a turn arriving mid-edit cannot take it away.
+///
+/// It carries `data-attention` when there is something to act on, and that is the whole of the
+/// prompt to open it. The panel used to open *itself* on the first paint for this case, which was
+/// affordable when it was a small anchored box and is not when it is a modal: taking the screen
+/// before the reader has asked is the kind of interruption a missing key does not justify. A mark
+/// on the button says the same thing without the takeover.
+pub fn render_settings_trigger(view : SettingsView) -> Node {
   let key_overruled = view.env_key_set && view.saved_key_set
-  if view.key_source == "none" || key_overruled {
-    attrs.push(attr("open", ""))
+  let attention = view.key_source == "none" || key_overruled
+  let attrs : Array[Attr] = [
+    attr("id", "settings-open"),
+    attr("type", "button"),
+    cls("settings-open"),
+    attr("aria-haspopup", "dialog"),
+  ]
+  if attention {
+    attrs.push(attr("data-attention", ""))
   }
-  el(Details, attrs~, children=[
-    el(Summary, children=[txt("settings")]),
-    render_settings_body(view),
+  el(Button, attrs~, children=[txt("settings")])
+}
+
+///|
+/// The panel: a modal dialog with its sections in a scrollable column and their names beside them.
+///
+/// A dialog rather than the anchored `<details>` it was: the box had to be narrow enough to sit in
+/// the sidebar's column without covering the composer, and at that width every section was worse to
+/// read than it needed to be — the skills list, the instructions editor and the limit rows all
+/// wanted more room than one column. A modal gets that room by taking the whole surface for as long
+/// as the reader is using it, which is what they asked for by opening it.
+///
+/// The navigation is a **sibling** of `render_settings_body`, not a child. That is the load-bearing
+/// part: a settings post replaces the body, and a navigation inside it would be re-rendered on every
+/// save — losing which section the reader was in, and briefly offering nothing to click. Outside the
+/// patched region it is drawn once and never touched.
+pub fn render_settings(view : SettingsView) -> Node {
+  let nav : Array[Node] = []
+  for entry in settings_sections() {
+    let (id, label) = entry
+    nav.push(
+      el(
+        Button,
+        attrs=[
+          attr("type", "button"),
+          cls("settings-nav-item"),
+          attr("data-section", id),
+        ],
+        children=[txt(label)],
+      ),
+    )
+  }
+  el(Dialog, attrs=[attr("id", "settings"), cls("settings")], children=[
+    el(Div, attrs=[cls("settings-shell")], children=[
+      el(Header, attrs=[cls("settings-head")], children=[
+        el(H2, attrs=[attr("id", "settings-title"), cls("settings-title")], children=[
+          txt("settings"),
+        ]),
+        // A visible way out, beside the two the browser gives (`Esc` and clicking away). Named for
+        // a screen reader rather than with a bare glyph: "✕" is not a word.
+        el(
+          Button,
+          attrs=[
+            attr("id", "settings-close"),
+            attr("type", "button"),
+            cls("settings-close"),
+            attr("aria-label", "Close settings"),
+          ],
+          children=[txt("✕")],
+        ),
+      ]),
+      el(Div, attrs=[cls("settings-main")], children=[
+        el(
+          Nav,
+          attrs=[attr("id", "settings-nav"), cls("settings-nav")],
+          children=nav,
+        ),
+        render_settings_body(view),
+      ]),
+    ]),
   ])
 }
 
 ///|
 /// The panel's contents, and the region a settings post replaces.
 ///
-/// It carries its own id so a refresh replaces *this* rather than the `<details>` around it:
-/// replacing the details would reset whether it is open, which is the one piece of state here the
-/// browser owns — and the panel is open exactly when a reader is using it.
+/// It carries its own id so a refresh replaces *this* rather than the dialog around it: replacing
+/// the dialog would close it under the reader's hands, and the reader is looking at it precisely
+/// because they are in the middle of changing something.
 pub fn render_settings_body(view : SettingsView) -> Node {
-  el(Div, attrs=[attr("id", "settings-body"), cls("settings-body")], children=[
-    render_model_block(view),
-    render_limits_block(view),
-    render_instructions_block(view),
-    render_key_block(view),
-    render_skills_block(view),
-    render_paths_block(view),
-  ])
+  let blocks = [
+    ("settings-model", render_model_block(view)),
+    ("settings-limits", render_limits_block(view)),
+    ("settings-instructions", render_instructions_block(view)),
+    ("settings-key", render_key_block(view)),
+    ("settings-skills", render_skills_block(view)),
+    ("settings-paths", render_paths_block(view)),
+  ]
+  let children : Array[Node] = []
+  for entry in blocks {
+    let (id, block) = entry
+    // Each section is addressable by the navigation, and the id lives here rather than in the
+    // block's own renderer so that the two lists above and below cannot disagree.
+    children.push(
+      el(Section, attrs=[attr("id", id), cls("settings-section")], children=[
+        block,
+      ]),
+    )
+  }
+  el(Div, attrs=[attr("id", "settings-body"), cls("settings-body")], children~)
 }
 
 ///|

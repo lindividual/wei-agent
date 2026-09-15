@@ -22,6 +22,7 @@ fn tag_table() -> Array[(Tag, String)] {
     (Button, "button"),
     (Dd, "dd"),
     (Details, "details"),
+    (Dialog, "dialog"),
     (Div, "div"),
     (Dl, "dl"),
     (Dt, "dt"),
@@ -29,12 +30,14 @@ fn tag_table() -> Array[(Tag, String)] {
     (H2, "h2"),
     (H3, "h3"),
     (Head, "head"),
+    (Header, "header"),
     (Html, "html"),
     (I, "i"),
     (Input, "input"),
     (Label, "label"),
     (Li, "li"),
     (Meta, "meta"),
+    (Nav, "nav"),
     (Option, "option"),
     (P, "p"),
     (Pre, "pre"),
@@ -71,9 +74,9 @@ test "every tag renders the markup it names" {
 /// being total only proves it was *given* a name, not that the name is on this list.
 test "the table names every variant the type has" {
   // A tag the table forgot would still render, so the check is the other direction: the count.
-  // 33 variants, and the number is written down rather than derived because deriving it would
+  // 36 variants, and the number is written down rather than derived because deriving it would
   // defeat the point — someone adding a tag has to come here and update both.
-  assert_eq(tag_table().length(), 33)
+  assert_eq(tag_table().length(), 36)
 }
 
 ///|

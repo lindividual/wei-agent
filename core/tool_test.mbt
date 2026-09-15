@@ -34,7 +34,8 @@ test "every pi tool has a counterpart here" {
     let (name, _, _, _) = entry
     assert_true(names.contains(name), msg="missing tool: \{name}")
   }
-  assert_eq(names.join(","), "bash,read,write,edit,glob,grep,note")
+  // `script` is this project's addition as well, alongside `note`.
+  assert_eq(names.join(","), "bash,read,write,edit,glob,grep,note,script")
 }
 
 // ── Scheduling policy ──────────────────────────────────────────────────────

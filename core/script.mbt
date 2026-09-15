@@ -39,7 +39,7 @@ pub fn script_prelude() -> String {
     #|// Provided by pi-web-shell. Do not redefine these; call them.
     #|
     #|/// Names of files under `dir`, skipping build output and VCS metadata.
-    #|async fn list(dir : String) -> Array[String] {
+    #|pub async fn list(dir : String) -> Array[String] {
     #|  let out : Array[String] = []
     #|  @fs.walk(dir, max_concurrency=1, exclude=skip_path, (d, names) => {
     #|    for name in names {
@@ -53,7 +53,7 @@ pub fn script_prelude() -> String {
     #|}
     #|
     #|/// Whether a path is build output, VCS metadata, or a dependency cache.
-    #|fn skip_path(path : String) -> Bool {
+    #|pub fn skip_path(path : String) -> Bool {
     #|  path.contains("_build") ||
     #|  path.contains("/.git") ||
     #|  path.contains(".mooncakes") ||
@@ -61,12 +61,12 @@ pub fn script_prelude() -> String {
     #|}
     #|
     #|/// The whole file as text. Fails on a file that is not UTF-8.
-    #|async fn read(path : String) -> String {
+    #|pub async fn read(path : String) -> String {
     #|  @fs.read_file(path).text()
     #|}
     #|
     #|/// Lines `from` to `to`, 1-based and inclusive. Clamped to the file.
-    #|async fn read_lines(path : String, from : Int, to : Int) -> Array[String] {
+    #|pub async fn read_lines(path : String, from : Int, to : Int) -> Array[String] {
     #|  let all : Array[String] = []
     #|  let mut n = 0
     #|  for raw in (@fs.read_file(path).text()).split("\n") {
@@ -83,7 +83,7 @@ pub fn script_prelude() -> String {
     #|/// Skips files that are not text: a search that dies on the first PNG is
     #|/// useless. The engine is `moonbitlang/regexp`, which is a VM rather than a
     #|/// backtracker, so a pattern the model gets wrong cannot hang the turn.
-    #|async fn search(pattern : String, dir : String, max : Int) -> Array[String] {
+    #|pub async fn search(pattern : String, dir : String, max : Int) -> Array[String] {
     #|  let re = @regexp.compile(pattern)
     #|  let hits : Array[String] = []
     #|  for path in list(dir) {
@@ -107,7 +107,7 @@ pub fn script_prelude() -> String {
     #|}
     #|
     #|/// Parse a JSON file.
-    #|async fn read_json(path : String) -> Json {
+    #|pub async fn read_json(path : String) -> Json {
     #|  @json.parse(@fs.read_file(path).text())
     #|}
     #|
@@ -115,7 +115,7 @@ pub fn script_prelude() -> String {
     #|///
     #|/// One occurrence rather than first-match: an ambiguous edit is a sign the
     #|/// caller is guessing, and a silent wrong-file edit costs more than the error.
-    #|fn edit_text(text : String, old : String, new : String) -> String raise {
+    #|pub fn edit_text(text : String, old : String, new : String) -> String raise {
     #|  let at = text.find(old)
     #|  match at {
     #|    None => fail("edit_text: the text to replace was not found")
@@ -129,9 +129,21 @@ pub fn script_prelude() -> String {
     #|  }
     #|}
     #|
+    #|/// An integer argument, or `fallback` when it is not one.
+    #|///
+    #|/// A malformed number is not worth failing the call over: the ranges and limits
+    #|/// these scripts take all have sensible defaults.
+    #|pub fn parse_int_or(text : StringView, fallback : Int) -> Int {
+    #|  try @string.parse_int(text) catch {
+    #|    _ => fallback
+    #|  } noraise {
+    #|    v => v
+    #|  }
+    #|}
+    #|
     #|/// Stop with an error, which becomes a failed tool result. For assertions a
     #|/// script wants to make about its own work.
-    #|fn[T] fail(message : String) -> T raise {
+    #|pub fn[T] fail(message : String) -> T raise {
     #|  raise Failure::Failure(message)
     #|}
   )
@@ -151,6 +163,7 @@ pub fn script_imports() -> String {
     #|  "moonbitlang/async/process",
     #|  "moonbitlang/core/env",
     #|  "moonbitlang/core/json",
+    #|  "moonbitlang/core/string",
     #|  "moonbitlang/regexp",
     #|}
     #|
@@ -377,7 +390,7 @@ fn search_script() -> String {
     #|  }
     #|  let dir = if args.length() > 2 { args[2] } else { "." }
     #|  let max = if args.length() > 3 {
-    #|    @strconv.parse_int(args[3]).unwrap_or(200)
+    #|    parse_int_or(args[3], 200)
     #|  } else {
     #|    200
     #|  }
@@ -404,15 +417,15 @@ fn read_script() -> String {
     #|  while i < args.length() {
     #|    let spec = args[i]
     #|    i += 1
-    #|    let parts = spec.split(":")
+    #|    let parts : Array[StringView] = spec.split(":").collect()
     #|    let path = parts[0].to_owned()
     #|    let from = if parts.length() > 1 {
-    #|      @strconv.parse_int(parts[1]).unwrap_or(1)
+    #|      parse_int_or(parts[1], 1)
     #|    } else {
     #|      1
     #|    }
     #|    let to = if parts.length() > 2 {
-    #|      @strconv.parse_int(parts[2]).unwrap_or(1000000000)
+    #|      parse_int_or(parts[2], 1000000000)
     #|    } else {
     #|      1000000000
     #|    }
@@ -424,7 +437,9 @@ fn read_script() -> String {
     #|    } noraise {
     #|      t => t
     #|    }
-    #|    let lines = all.split("\n")
+    #|    // Collected, not an iterator: taking the length of an `Iter` consumes it,
+    #|    // and the loop below would then run zero times.
+    #|    let lines : Array[StringView] = all.split("\n").collect()
     #|    let total = lines.length()
     #|    let last = if to < total { to } else { total }
     #|    println("=== \{path} === lines \{from}-\{last} of \{total}")

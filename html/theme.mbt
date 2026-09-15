@@ -342,27 +342,42 @@ pub fn stylesheet() -> String {
     "#model-picker:hover { color: var(--fg); border-color: var(--line-strong); }",
     "#model-picker:disabled { opacity: .5; cursor: default; }",
     // ── settings ────────────────────────────────────────────────────────────
-    // A floating panel rather than a sidebar section: it is a place a reader goes, not a thing
-    // they watch, and the sidebar is already the busiest column on the page. Pinned to the bottom
-    // left corner of the page, which is the one spot no region is ever patched into — so it is
-    // where the reader left it, whatever the conversation is doing.
+    // A modal dialog, opened by a control that never moves. The control is the one piece of the
+    // page that has to survive every refresh: it sits outside all of the regions, so a turn landing
+    // while the reader is reaching for it cannot take it away.
     //
-    // `left` follows the layout's own left edge: the page is a centred column of `--layout-max`, so
-    // a plain `1rem` would leave the panel adrift to the left of everything else on a wide screen.
-    // `max()` is what says "the layout's edge, but never off the edge of a narrow one".
-     "details.settings { position: fixed; left: max(var(--space-4), calc((100vw - var(--layout-max)) / 2 + var(--space-4))); bottom: var(--space-4); z-index: 4; font-size: var(--text-sm); }",
-    "details.settings > summary { list-style: none; cursor: pointer; color: var(--muted); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .1rem .5rem; white-space: nowrap; }",
-    "details.settings > summary::-webkit-details-marker { display: none; }", "details.settings[open] > summary { color: var(--fg); border-color: var(--line-strong); }",
-    // The panel is taken out of flow, and opens upward: it is anchored to the bottom of the window,
-    // so growing down would put most of it off the screen.
-    // The panel opens *upward* and stays inside the sidebar's column, and the second half of that
-    // is the part worth explaining. It used to hang off the right end of the top bar, where 34rem
-    // was free. From the bottom-left corner that width reaches across the column the conversation
-    // is in — over the composer, which is where the reader's hands are, and it covered the input
-    // it was sharing a line with. The left column is the sidebar's, and a panel drawn in it cannot
-    // collide with anything: the transcript and the composer both start to its right.
-     ".settings-body { position: absolute; left: 0; bottom: calc(100% + var(--space-2)); z-index: 3; width: calc(var(--sidebar-width) - var(--space-2)); max-height: 75vh; overflow-y: auto; text-align: left; background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: 0 12px 32px rgba(0, 0, 0, .18); padding: var(--space-3); }",
-    ".settings-block { margin-bottom: var(--space-4); }", ".settings-block > h3 { margin: 0 0 var(--space-2); font-size: var(--text-xs); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }",
+    // The panel used to be a small box anchored in the sidebar's column, which kept it out of the
+    // way and made every section narrow — the skills list, the instructions editor and the limit
+    // rows all wanted more room than one column. A modal gets the room by taking the surface, for
+    // exactly as long as the reader asked to be using it.
+     "#settings-open { position: fixed; left: max(var(--space-4), calc((100vw - var(--layout-max)) / 2 + var(--space-4))); bottom: var(--space-4); z-index: 4; font: inherit; font-size: var(--text-sm); cursor: pointer; color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .1rem .5rem; white-space: nowrap; }",
+    "#settings-open:hover { color: var(--fg); border-color: var(--line-strong); }",
+    // Something to act on — no key at all, or a saved one a variable is overruling. A mark on the
+    // control rather than opening the panel by itself: it was affordable to take the corner, not
+    // the screen.
+     "#settings-open[data-attention] { color: var(--fg); border-color: var(--accent); }",
+    "dialog.settings { width: min(60rem, calc(100vw - var(--space-5))); height: min(44rem, calc(100vh - var(--space-5))); max-width: none; max-height: none; margin: auto; padding: 0; color: var(--fg); background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: 0 24px 64px rgba(0, 0, 0, .28); font-size: var(--text-sm); }",
+    "dialog.settings::backdrop { background: rgba(0, 0, 0, .38); }",
+    // The shell is the flex column that makes the body scroll rather than the dialog: a dialog whose
+    // own height varies with its content would jump as sections grow, and the header has to stay put.
+     ".settings-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }",
+    ".settings-head { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--line); }",
+    ".settings-title { margin: 0; font-size: var(--text-md); font-weight: 600; letter-spacing: .02em; }",
+    ".settings-close { margin-left: auto; font: inherit; font-size: var(--text-sm); line-height: 1; cursor: pointer; color: var(--muted); background: none; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); }",
+    ".settings-close:hover { color: var(--fg); border-color: var(--line-strong); }",
+    // Navigation on the left, sections on the right, each scrolling on its own: the names are short
+    // and fixed, the content is long and varies by far more than the names do.
+     ".settings-main { display: grid; grid-template-columns: 11rem 1fr; min-height: 0; flex: 1 1 auto; }",
+    ".settings-nav { display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-3); border-right: 1px solid var(--line); overflow-y: auto; }",
+    ".settings-nav-item { font: inherit; font-size: var(--text-xs); text-align: left; cursor: pointer; color: var(--muted); background: none; border: 1px solid transparent; border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); }",
+    ".settings-nav-item:hover { color: var(--fg); background: var(--surface); }",
+    // Which section the reader is in, marked by the same three signals the current session gets —
+    // a bar, a tint and weight — because it is the same kind of thing: one item in a list that is
+    // the one you are looking at.
+     ".settings-nav-item[aria-current=true] { color: var(--fg); background: var(--surface); border-color: var(--line); box-shadow: inset 2px 0 0 var(--accent); font-weight: 600; }",
+    ".settings-body { overflow-y: auto; padding: var(--space-4); text-align: left; }",
+    ".settings-section { scroll-margin-top: var(--space-4); }", ".settings-block { margin-bottom: var(--space-4); }",
+    ".settings-block > h3 { margin: 0 0 var(--space-2); font-size: var(--text-xs); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }",
     ".settings-block > h3 .count { text-transform: none; letter-spacing: 0; }", ".settings .facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); margin: 0; }",
     ".settings .facts dt { color: var(--muted); }", ".settings .facts dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }",
     ".settings .hint { color: var(--muted); font-size: var(--text-xs); margin: var(--space-2) 0 0; }",
@@ -374,7 +389,7 @@ pub fn stylesheet() -> String {
      ".settings .limit-list { display: flex; flex-direction: column; gap: var(--space-1); }",
     ".settings label.limit { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1); border: 1px solid var(--line); border-radius: var(--radius-sm); }",
     ".settings label.limit .limit-name { flex: 1 1 auto; min-width: 0; }", ".settings label.limit .limit-value { display: inline-flex; align-items: center; gap: var(--space-2); font-family: var(--mono); font-size: var(--text-xs); }",
-    ".settings label.limit input { width: 6rem; font: inherit; font-size: var(--text-sm); color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); }",
+    ".settings label.limit input { width: 8rem; font: inherit; font-size: var(--text-sm); color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); }",
     ".settings label.limit input::placeholder { color: var(--muted); }",
     // A pinned limit reads as pinned: a dimmed row with a lock-like note, not an input that looks
     // like the others and silently ignores what is typed into it.
@@ -428,17 +443,25 @@ pub fn stylesheet() -> String {
     // says which conversation this is, and it is worth exactly one line of a phone screen. The
     // navigation follows it, at `top: var(--titlebar-h)`.
      "  .titlebar { z-index: 4; }",
-    // Settings stops being a corner and joins the folded list: pinned to the bottom of a narrow
-    // window it would sit on top of the composer, which is where the reader's hands are. Laid out
-    // inline, it is one more section of the header the reader opened — with none of the panel's own
-    // chrome, because there is nothing left for it to float above.
-     "  details.settings { position: static; }", "  .settings-body { position: static; width: auto; max-height: none; border: 0; box-shadow: none; padding: 0; }",
+    // The settings control stays where it is — it is a modal now, so a narrow window does not change
+    // what it would cover; the dialog simply fills more of the screen. What does change is the
+    // layout inside it: two columns do not fit a phone, so the navigation becomes a strip above the
+    // sections and scrolls sideways.
+     "  #settings-open { left: var(--space-3); right: var(--space-3); bottom: var(--space-3); text-align: center; }",
+    "  dialog.settings { width: calc(100vw - var(--space-3)); height: calc(100vh - var(--space-3)); }",
+    "  .settings-main { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }",
+    "  .settings-nav { flex-direction: row; gap: var(--space-1); border-right: 0; border-bottom: 1px solid var(--line); overflow-x: auto; padding: var(--space-2) var(--space-3); }",
+    "  .settings-nav-item { white-space: nowrap; }", "  .settings-nav-item[aria-current=true] { box-shadow: inset 0 -2px 0 var(--accent); }",
     "  #nav-toggle { display: block; width: auto; text-align: left; color: var(--muted); border-color: var(--line); padding: var(--space-1) var(--space-3); }",
     "  #nav-toggle[aria-expanded=true] { color: var(--fg); border-color: var(--line-strong); }",
     // Everything except the button is folded away until it is asked for. Written as "> :not(...)"
     // rather than by naming the panels, so a region added later folds with the rest.
      "  .sidebar > :not(#nav-toggle) { display: none; }", "  .sidebar.open > :not(#nav-toggle) { display: block; }",
-    "  #transcript { padding: var(--space-4) var(--space-4) var(--space-5); }", "}",
+    // The control used to be a section of this list; it is fixed now, so it is excluded rather than
+    // folded — otherwise every refresh would re-apply `display: none` to it and the panel would
+    // become unreachable on a phone.
+     "  .sidebar > #settings-open { display: block; }", "  #transcript { padding: var(--space-4) var(--space-4) var(--space-5); }",
+    "}",
   ].join("\n")
 }
 

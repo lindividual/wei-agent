@@ -157,26 +157,60 @@ test "an empty catalog explains what a skill is instead of showing nothing" {
 }
 
 ///|
-/// The body is replaced on every change, so it carries the id the patch targets — and that is
-/// also what keeps the browser's `<details>` open state out of the server's hands.
-test "the settings body is a replaceable region inside the open/closed element" {
+/// The body is replaced on every change, and the navigation is deliberately outside it.
+///
+/// The split is what makes the panel usable: a save replaces the sections, and if the navigation
+/// were inside them it would be re-rendered on every save — losing which section the reader was in,
+/// and briefly offering nothing to click.
+test "the body is a replaceable region, and the navigation is not part of it" {
   let html = render_settings(view()).render()
-  // Exactly one of each: a refresh sends the body, and sending the `<details>` instead would nest
-  // a second panel inside the first — which still renders and still works, because the ids inside
-  // are unchanged, so only a count catches it.
+  // Exactly one of each: a refresh sends the body, and sending the dialog instead would nest a
+  // second panel inside the first — which still renders and still works, because the ids inside are
+  // unchanged, so only a count catches it.
   assert_eq(count_of(html, "id=\"settings-body\""), 1)
   assert_eq(count_of(html, "id=\"settings\""), 1)
-  assert_eq(count_of(html, "<details"), 1)
-  assert_eq(count_of(html, "<summary"), 1)
-  // The body is the only thing inside the details besides the summary, so replacing it cannot
-  // lose the way to close the panel either.
-  let details = html.find("<details").unwrap()
+  assert_eq(count_of(html, "<dialog"), 1)
+  assert_eq(count_of(html, "<nav"), 1)
+  // The dialog must not be open on the first paint. A modal takes the whole surface, so opening it
+  // is something the reader asks for; the stylesheet shows the open attribute would be wrong here.
+  assert_false(
+    html.contains("<dialog id=\"settings\" class=\"settings\" open"),
+    msg=html,
+  )
+  // The navigation is a sibling of the body, not a child: a patch that replaces the body cannot
+  // take the navigation with it.
+  let nav = html.find("id=\"settings-nav\"").unwrap()
   let body = html.find("id=\"settings-body\"").unwrap()
-  let close = html.find("</details>").unwrap()
-  assert_true(details < body && body < close, msg=html)
-  // And the two renderings agree: the body on its own is the body inside the panel.
+  assert_true(nav < body, msg=html)
+  let body_end = html.find("</div></div></div></dialog>").unwrap()
+  assert_true(nav < body && body < body_end, msg=html)
+  // And the two renderings agree: the body on its own is the body inside the dialog.
   let full = render_settings(view()).render()
   assert_true(full.contains(render_settings_body(view()).render()), msg=full)
+}
+
+///|
+/// Every navigation anchor points at a section that exists, and every section is reachable.
+///
+/// Two lists that have to agree, so the test is that they do — a renamed id would otherwise leave a
+/// button that scrolls nowhere.
+test "the navigation and the sections are the same list" {
+  let html = render_settings(view()).render()
+  for entry in settings_sections() {
+    let (id, label) = entry
+    assert_true(
+      html.contains("data-section=\"\{id}\"") &&
+      html.contains(">\{label}</button>"),
+      msg="nav is missing \{id} / \{label}",
+    )
+    assert_eq(count_of(html, "id=\"\{id}\""), 1)
+    // A section, not a bare div: the anchors are a table of contents for the panel.
+    assert_true(html.contains("<section id=\"\{id}\""), msg=html)
+  }
+  // The dialog has a way out that is not the browser's, and a name for it that a screen reader can
+  // read — "✕" is not a word.
+  assert_eq(count_of(html, "id=\"settings-close\""), 1)
+  assert_true(html.contains("aria-label=\"Close settings\""), msg=html)
 }
 
 ///|
@@ -242,36 +276,46 @@ test "a cost limit is formatted so the field round-trips it" {
 ///|
 /// Where the key came from is the first thing the panel has to answer, and the environment
 /// overruling a saved key is the one case a reader reads as a bug.
-test "the key panel names the provider, and opens when action is needed" {
+test "the key panel names the provider, and the control asks for attention when action is needed" {
   let saved = render_settings(view()).render()
   assert_true(saved.contains("saved by this panel"), msg=saved)
-  // Nothing is wrong and nothing needs doing: the panel stays closed.
-  assert_false(saved.contains(" open"), msg=saved)
+  // Nothing is wrong and nothing needs doing: the control stays quiet.
+  assert_false(
+    render_settings_trigger(view()).render().contains("data-attention"),
+    msg="the control should not ask for attention when nothing needs doing",
+  )
   // A key the reader saved, overruled by a variable, is the case that needs explaining, so the
-  // panel opens by itself. (The hint is what does the explaining.)
+  // control is marked. It is a mark rather than the panel opening by itself: taking the corner was
+  // affordable, taking the screen before being asked is not.
   let overruled : SettingsView = {
     ..view(),
     key_source: "environment",
     env_key_set: true,
     saved_key_set: true,
   }
+  let overruled_trigger = render_settings_trigger(overruled).render()
+  assert_true(
+    overruled_trigger.contains("data-attention"),
+    msg=overruled_trigger,
+  )
   let overruled_html = render_settings(overruled).render()
-  assert_true(overruled_html.contains(" open"), msg=overruled_html)
   assert_true(
     overruled_html.contains("DEEPSEEK_API_KEY is set"),
     msg=overruled_html,
   )
-  // The variable alone, with nothing saved for it to overrule, is the ordinary case — opening the
-  // panel for it would mean opening it on almost every machine.
+  // The variable alone, with nothing saved for it to overrule, is the ordinary case — marking the
+  // control for it would mean marking it on almost every machine.
   let from_env : SettingsView = {
     ..view(),
     key_source: "environment",
     env_key_set: true,
     saved_key_set: false,
   }
-  assert_false(render_settings(from_env).render().contains(" open"))
-  // No key at all is the one case where the panel owes the reader a visible way to fix it without
-  // being asked.
+  assert_false(
+    render_settings_trigger(from_env).render().contains("data-attention"),
+  )
+  // No key at all is the one case where the reader needs a visible way to fix it, so the control
+  // says so — without opening itself.
   let missing : SettingsView = {
     ..view(),
     key_source: "none",
@@ -280,7 +324,10 @@ test "the key panel names the provider, and opens when action is needed" {
   }
   let missing_html = render_settings(missing).render()
   assert_true(missing_html.contains("no key"), msg=missing_html)
-  assert_true(missing_html.contains(" open"), msg=missing_html)
+  assert_true(
+    render_settings_trigger(missing).render().contains("data-attention"),
+    msg="a missing key should mark the control",
+  )
 }
 
 ///|

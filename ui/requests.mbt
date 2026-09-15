@@ -504,16 +504,18 @@ async fn Requests::page(self : Requests) -> String {
   // scanned would come out as a directory with none. Either way the list is built before the page
   // that shows it.
   app.load_skills(shown.cwd)
-  // The sidebar holds the regions with different reasons to change: what is running, what exists,
-  // and the settings panel. That last one is not a region at all — it is drawn once here, pinned to
-  // the bottom left corner of the window by the stylesheet, and it survives every refresh because
-  // nothing replaces the sidebar. On a narrow screen, where the sidebar is the folded header, it
-  // joins the list instead of the corner.
+  // The sidebar holds the regions with different reasons to change: what is running, and what
+  // exists. The settings panel is not one of them — it is a modal dialog, drawn once here and never
+  // replaced, with its control pinned to the bottom left corner by the stylesheet. Both survive
+  // every refresh because nothing replaces the sidebar, and the dialog has to: replacing it would
+  // close it under the reader's hands.
   let sidebar = @html.render_sidebar([
     @html.raw(render_tasks(app, shown)),
     @html.raw(render_jobs(app, @env.now().reinterpret_as_int64())),
     @html.raw(workspace_items_and_render(app, shown)),
-    @html.raw(render_settings_panel(app, shown)),
+    // The control only. The dialog itself is a sibling of the layout: a modal is positioned by the
+    // browser, and leaving it inside the sidebar would make the mobile fold rules apply to it.
+    @html.raw(render_settings_trigger(app, shown)),
   ])
   let column = @html.el(Div, attrs=[@html.cls("column")], children=[
     title_node(app, shown),
@@ -532,8 +534,13 @@ async fn Requests::page(self : Requests) -> String {
       ),
     ),
   ])
+  // The dialog is a sibling of the layout rather than a child of anything: it is out of flow when
+  // closed and browser-positioned when open, and keeping it out of the layout means no region's
+  // rules — the mobile fold in particular — can reach it and take it away.
   let body = @html.el(Div, attrs=[@html.cls("layout")], children=[
-    sidebar, column,
+    sidebar,
+    column,
+    @html.raw(render_settings_panel(app, shown)),
   ])
   @html.render_page("pi", @html.stylesheet(), client_script(), [body]).render()
 }

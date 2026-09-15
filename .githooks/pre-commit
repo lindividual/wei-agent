@@ -11,3 +11,12 @@ moon check
 # not this script.
 moon check -p core --target js
 moon check -p core --target wasm-gc
+
+# The bundled `script` programs are MoonBit source inside string literals, so no
+# type checker sees them: a typo compiles the project and fails only when a model
+# calls that script. This compiles and runs all of them.
+#
+# It is a separate executable rather than a test because running it means running
+# `moon`, and `moon run` from inside `moon test` deadlocks on the build lock —
+# measured, twice. Keep it out of `moon test`.
+moon run scriptcheck

@@ -1929,44 +1929,112 @@ async function main() {
       "the added workspace is remembered in the store",
     );
 
-    console.log("\nsettings (the panel, its live facts and its one editable list)");
-    // The panel is a `<details>`, so the browser owns whether it is open — which is also what
-    // toggling a skill must not reset.
+    console.log("\nsettings (a modal, its navigation, its live facts and its one editable list)");
+    // The control is a button, not a `<details>`: a modal is opened by script, and the browser
+    // owns the ways out from there.
     check(
-      (await cdp.eval("document.querySelectorAll('#settings').length")) === 1,
-      "the settings panel is on the page exactly once",
+      (await cdp.eval("document.querySelectorAll('#settings').length")) === 1 &&
+        (await cdp.eval("document.querySelectorAll('#settings-open').length")) === 1,
+      "the settings dialog and its control are on the page exactly once",
     );
-    // Pinned to the bottom-left corner, which is the one region no refresh replaces.
     check(
-      (await cdp.eval(
-        "getComputedStyle(document.getElementById('settings')).position",
-      )) === "fixed",
-      "the settings panel is pinned rather than laid out in the flow",
+      (await cdp.eval("document.getElementById('settings').open === false")),
+      "the dialog starts closed: a modal takes the whole surface, so it is asked for",
     );
-    // Counting both, because a refresh that sends the `<details>` instead of the body nests a
-    // second panel inside the first — and that still renders, still has the ids, and still works.
-    // Only the counts see it.
+    // The control is pinned to the corner and, crucially, outside every region a refresh replaces
+    // and outside the sidebar's mobile fold — it is the only way in.
+    const control = JSON.parse(
+      await cdp.eval(
+        `JSON.stringify((() => {
+          const box = document.getElementById('settings-open').getBoundingClientRect();
+          return { position: getComputedStyle(document.getElementById('settings-open')).position,
+                   left: box.left, bottom: box.bottom, width: window.innerWidth, height: window.innerHeight };
+        })())`,
+      ),
+    );
+    check(control.position === "fixed", "the control is pinned", JSON.stringify(control));
     check(
-      (await cdp.eval("document.querySelectorAll('#settings-body').length")) === 1,
-      "the panel body is not nested in itself",
+      control.left >= 0 && control.left < control.width / 2 && control.height - control.bottom < 200,
+      "the control sits in the bottom-left corner",
+      JSON.stringify(control),
     );
-    // A working key from pi's store, with nothing saved and nothing wrong: the panel stays closed
-    // rather than taking a third of the screen on every load. (It opens by itself in the two cases
-    // that need the reader: no key at all, or a saved key a variable is overruling.)
+    // Opening it: a real click on the real control, because the whole point is that the dialog is
+    // opened by a listener rather than declaratively.
+    await cdp.eval("document.getElementById('settings-open').click()");
+    await cdp.waitFor("document.getElementById('settings').open === true", "the dialog to open", 5000);
+    check(true, "clicking the control opens the dialog");
+    // A modal, not a box: `showModal` is what puts it in the top layer and gives it focus trapping,
+    // `Esc` and the backdrop. `open` alone would be true for a plain `<div>` too.
     check(
-      (await cdp.eval("document.getElementById('settings').open === false")) ||
-        (await cdp.eval(
-          "document.querySelector('#settings-body .key-state .state').textContent.includes('no key')",
-        )),
-      "the panel opens by itself only when there is something to act on",
+      (await cdp.eval("document.getElementById('settings').matches(':modal')")),
+      "the dialog is modal, so the browser owns Esc and the backdrop",
     );
+    const dialog = JSON.parse(
+      await cdp.eval(
+        `JSON.stringify((() => {
+          const box = document.getElementById('settings').getBoundingClientRect();
+          return { left: box.left, right: box.right, top: box.top, bottom: box.bottom,
+                   width: window.innerWidth, height: window.innerHeight,
+                   w: box.width, h: box.height };
+        })())`,
+      ),
+    );
+    check(
+      dialog.left > 0 && dialog.right < dialog.width && dialog.top > 0 && dialog.bottom < dialog.height,
+      "the dialog is centred, with an edge of the page still visible around it",
+      JSON.stringify(dialog),
+    );
+    // Wider than the sidebar column it used to live in, and that was the point of the change.
+    check(
+      dialog.w > 640 && dialog.h > 400,
+      "the dialog is substantially larger than the old anchored box",
+      JSON.stringify(dialog),
+    );
+    // The navigation: one item per section, every one of which scrolls to a section that exists.
+    const navCount = await cdp.eval("document.querySelectorAll('.settings-nav-item').length");
+    const sectionCount = await cdp.eval(
+      "document.querySelectorAll('#settings-body .settings-section').length",
+    );
+    check(
+      navCount === sectionCount && navCount >= 4,
+      "every section has a navigation anchor and every anchor has a section",
+      `${navCount} nav / ${sectionCount} sections`,
+    );
+    // Clicking an anchor scrolls the body to that section and marks only that one.
     await cdp.eval(
-      `(() => { document.getElementById('settings').open = true; return true; })()`,
+      `(() => {
+        const items = [...document.querySelectorAll('.settings-nav-item')];
+        items[items.length - 1].click();
+        return true;
+      })()`,
     );
-    await cdp.waitFor(
-      "document.getElementById('settings-body') !== null",
-      "the panel body",
-      10000,
+    await new Promise((r) => setTimeout(r, 600));
+    const navState = JSON.parse(
+      await cdp.eval(
+        `JSON.stringify((() => {
+          const body = document.getElementById('settings-body');
+          const last = [...document.querySelectorAll('.settings-section')].pop();
+          const marked = [...document.querySelectorAll('.settings-nav-item')]
+            .filter(b => b.getAttribute('aria-current') === 'true')
+            .map(b => b.dataset.section);
+          return { scrollTop: body.scrollTop, markCount: marked.length, marked,
+                   lastId: last.id, lastTop: last.offsetTop };
+        })())`,
+      ),
+    );
+    check(navState.scrollTop > 0, "clicking an anchor scrolls to the section", JSON.stringify(navState));
+    check(
+      navState.markCount === 1,
+      "exactly one navigation item is marked current",
+      JSON.stringify(navState),
+    );
+    // The mark has to be at the end of the list, not the start: the body cannot scroll far enough
+    // to bring the last section's top to the top edge, so the deepest section in view is the last
+    // one. A wrong-order navigation would mark something earlier, which is what this catches.
+    check(
+      navState.marked[0] === navState.lastId,
+      "the marked item is the deepest section, which is where that click lands",
+      JSON.stringify(navState),
     );
     const panel = await cdp.eval(
       "document.getElementById('settings-body').textContent",
@@ -1976,8 +2044,7 @@ async function main() {
       "the panel reports the model actually in use and the store actually resolved",
       panel,
     );
-    // The key it is using is shown as a fingerprint. With no environment key, and a credential on
-    // file from pi, the panel must say which one — and never print it.
+    // The key it is using is shown as a fingerprint, never printed.
     const keyState = await cdp.eval(
       "document.querySelector('#settings-body .key-state').textContent",
     );
@@ -1986,47 +2053,34 @@ async function main() {
       "the panel identifies the key rather than printing it",
       keyState,
     );
-    check(
-      keyState.length > 0,
-      "the panel says where the key in use came from",
-      keyState,
+    // The dialog must not push the page around: it is in the top layer, so the title it used to sit
+    // beside has not moved.
+    const titleTop = await cdp.eval(
+      "document.getElementById('title').getBoundingClientRect().top",
     );
-    // The panel is taken out of the flow so a long skill list cannot push the conversation
-    // around, and it must still be inside the window it floats over — an absolutely positioned box
-    // anchored to the wrong edge is invisible and would pass every byte-level assertion.
-    const layout = await cdp.eval(
-      `JSON.stringify((() => {
-        const body = document.getElementById('settings-body').getBoundingClientRect();
-        const title = document.getElementById('title').getBoundingClientRect();
-        return {
-          left: body.left,
-          right: body.right,
-          top: body.top,
-          bottom: body.bottom,
-          height: window.innerHeight,
-          width: window.innerWidth,
-          titleTop: title.top,
-        };
-      })())`,
+    check(titleTop <= 4, "opening the dialog does not push the title down", String(titleTop));
+    // Escape closes it — the browser's own way out, which is why a modal is worth it.
+    await cdp.eval(
+      `document.getElementById('settings').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`,
     );
-    const geometry = JSON.parse(layout);
-    check(
-      geometry.left >= 0 && geometry.right <= geometry.width + 1,
-      "the panel stays inside the viewport",
-      layout,
-    );
-    // Pinned to the bottom left corner, opening upward: the anchor is the bottom edge, so a panel
-    // that grew downward from a top anchor would be most of the way off the screen.
-    check(
-      geometry.bottom <= geometry.height + 1 && geometry.top >= 0,
-      "the panel opens upward from the corner it is anchored to",
-      layout,
-    );
-    check(
-      geometry.titleTop <= 4,
-      "opening the panel does not push the title down",
-      layout,
-    );
+    await new Promise((r) => setTimeout(r, 200));
+    if (await cdp.eval("document.getElementById('settings').open === true")) {
+      // Browsers do not synthesize the cancel from a dispatched event, so fall back to the
+      // button — what is being asserted either way is that there is a way out that is not a
+      // page reload.
+      await cdp.eval("document.getElementById('settings-close').click()");
+      await cdp.waitFor(
+        "document.getElementById('settings').open === false",
+        "the dialog to close from its own button",
+        5000,
+      );
+      check(true, "the close button closes the dialog");
+    } else {
+      check(true, "Escape closes the dialog");
+    }
+    // And it reopens with everything intact, because the check below applies a setting.
+    await cdp.eval("document.getElementById('settings-open').click()");
+    await cdp.waitFor("document.getElementById('settings').open === true", "the dialog to reopen", 5000);
 
     // The seeded skill is listed and on. The count is read rather than hardcoded: this machine may
     // have skills of its own under a root the check does not control, and what is being tested is

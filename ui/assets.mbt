@@ -366,6 +366,47 @@ pub fn client_script() -> String {
     // is that the offer is a courtesy rather than a control: a reader who has moved on should not
     // have to dismiss it.
      "  for (const node of document.querySelectorAll('[data-expires]')) {", "    if (Number(node.dataset.expires) <= now) node.remove();",
-    "  }", "}", "setInterval(tick, 1000);",
+    "  }", "}", "setInterval(tick, 1000);", "",
+    // ── settings, as a modal ───────────────────────────────────────────────
+    // Opened by script rather than by the element that holds it, which is the price of a modal:
+    // `showModal` is what gives focus trapping, `Esc` and the backdrop for free, and no declarative
+    // attribute reaches it. What it buys is worth that: the panel gets the whole surface instead of
+    // the sidebar's column, and the browser owns the ways out.
+     "const settingsDialog = document.getElementById('settings');",
+    // Delegated from the document, not bound inside the dialog: the control is rendered once and
+    // never replaced, but the dialog's insides are replaced on every save, so a listener bound in
+    // there would belong to a node that no longer exists after the first Apply.
+     "document.addEventListener('click', event => {", "  if (event.target.closest('#settings-open')) {",
+    "    if (!settingsDialog.open) settingsDialog.showModal();", "    syncSettingsNav();",
+    "    return;", "  }", "  if (event.target.closest('#settings-close')) { settingsDialog.close(); return; }",
+    "  const item = event.target.closest('.settings-nav-item');", "  if (!item) return;",
+    "  const section = document.getElementById(item.dataset.section);",
+    // Scrolled rather than jumped: the sections are one column and a jump loses the reader's sense
+    // of where they are in it. `block: 'start'` lands the heading under the top edge, which is what
+    // `scroll-margin-top` on the section is for.
+     "  if (section) section.scrollIntoView({ block: 'start', behavior: 'smooth' });",
+    "  markSettingsNav(item.dataset.section);", "});", "", "function markSettingsNav(id) {",
+    "  for (const button of document.querySelectorAll('.settings-nav-item')) {",
+    "    button.setAttribute('aria-current', button.dataset.section === id ? 'true' : 'false');",
+    "  }", "}", "",
+    // The mark follows scrolling, not only clicks: a reader who scrolls by hand should see it move,
+    // and one who clicks should not be told they are somewhere they are not. Not `scrollend` — it is
+    // not everywhere yet — so this measures from the browser's own geometry instead.
+     "function syncSettingsNav() {", "  const body = document.getElementById('settings-body');",
+    "  if (!body) return;", "  const sections = [...body.querySelectorAll('.settings-section')];",
+    "  if (!sections.length) return;",
+    // Scrolled to the bottom, the last section is what the reader is looking at even though its
+    // heading is still below the top edge. Without this the last item can never be marked: the
+    // panel's content is shorter than its viewport, so even the deepest scroll position leaves the
+    // last heading halfway down. Measured rather than assumed — the browser check caught exactly
+    // this, with the mark stuck on the section before the one that was clicked.
+     "  if (body.scrollTop + body.clientHeight >= body.scrollHeight - 2) {", "    markSettingsNav(sections[sections.length - 1].id);",
+    "    return;", "  }", "  const mark = body.scrollTop + 1;", "  let current = null;",
+    "  for (const section of sections) {", "    if (section.offsetTop <= mark) current = section.id;",
+    "  }", "  if (current) markSettingsNav(current);", "}", "",
+    // Bound with `capture`, because scroll does not bubble: without it the document never hears an
+    // event that happened on a descendant.
+     "document.addEventListener('scroll', event => {", "  if (event.target && event.target.id === 'settings-body') syncSettingsNav();",
+    "}, true);",
   ].join("\n")
 }

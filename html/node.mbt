@@ -49,6 +49,7 @@ pub(all) enum Tag {
   Button
   Dd
   Details
+  Dialog
   Div
   Dl
   Dt
@@ -56,12 +57,14 @@ pub(all) enum Tag {
   H2
   H3
   Head
+  Header
   Html
   I
   Input
   Label
   Li
   Meta
+  Nav
   Option
   P
   Pre
@@ -92,6 +95,7 @@ fn Tag::name(self : Tag) -> String {
     Button => "button"
     Dd => "dd"
     Details => "details"
+    Dialog => "dialog"
     Div => "div"
     Dl => "dl"
     Dt => "dt"
@@ -99,12 +103,14 @@ fn Tag::name(self : Tag) -> String {
     H2 => "h2"
     H3 => "h3"
     Head => "head"
+    Header => "header"
     Html => "html"
     I => "i"
     Input => "input"
     Label => "label"
     Li => "li"
     Meta => "meta"
+    Nav => "nav"
     Option => "option"
     P => "p"
     Pre => "pre"
