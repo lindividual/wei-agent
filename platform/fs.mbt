@@ -81,6 +81,111 @@ pub async fn read_prefix(path : String, max_bytes : Int) -> String {
 }
 
 ///|
+/// How many bytes a file holds, or zero when it is not there.
+///
+/// A file's size is the one thing about it that is true of the bytes rather than of their decoding:
+/// a caller that has read a file as text and wants to resume from where it stopped needs this, not
+/// the length of the text, which a lossy decode changes.
+pub async fn file_size(path : String) -> Int64 {
+  if !path_exists(path) {
+    return 0L
+  }
+  let file = @fs.open(path, mode=@fs.Mode::ReadOnly)
+  defer file.close()
+  file.size()
+}
+
+///|
+/// A slice of a file, from a byte offset, bounded by a byte count.
+///
+/// Returns the text, how many bytes of the file it consumed, and the file's size — the last two so
+/// a caller that is following a file as it grows can decide whether anything is left, and where to
+/// start next, without another syscall.
+///
+/// The slice is cut on a character boundary. A caller of this is reading a file whose end is not
+/// under its control — a running process's output — so a cut in the middle of a character is the
+/// normal case rather than an error, and the next read would begin inside the same character, which
+/// the lossy decode turns into a replacement character that was never written.
+pub async fn read_slice(
+  path : String,
+  offset : Int,
+  max_bytes : Int,
+) -> (String, Int, Int64) {
+  if !path_exists(path) {
+    return ("", 0, 0L)
+  }
+  let file = @fs.open(path, mode=@fs.Mode::ReadOnly)
+  defer file.close()
+  let size = file.size()
+  if size <= offset.to_int64() || max_bytes <= 0 {
+    return ("", 0, size)
+  }
+  let wanted = if size - offset.to_int64() < max_bytes.to_int64() {
+    (size - offset.to_int64()).to_int()
+  } else {
+    max_bytes
+  }
+  let buffer = FixedArray::make(wanted, b'\x00')
+  let read = file.read_at(buffer, position=offset.to_int64(), len=wanted)
+  let exact = FixedArray::make(read, b'\x00')
+  for i in 0..<read {
+    exact[i] = buffer[i]
+  }
+  let bytes = Bytes::from_array(exact)
+  let cut = utf8_cut(bytes, read)
+  if cut != read {
+    let shortened = FixedArray::make(cut, b'\x00')
+    for i in 0..<cut {
+      shortened[i] = exact[i]
+    }
+    return (@utf8.decode_lossy(Bytes::from_array(shortened)), cut, size)
+  }
+  (@utf8.decode_lossy(bytes), cut, size)
+}
+
+///|
+/// How long the UTF-8 character that starts with `lead` is, in bytes.
+///
+/// A byte that starts with `10` is a continuation with nothing leading it, and one that would
+/// encode a character past U+10FFFF is malformed; both are counted as one byte, which is what the
+/// lossy decoder will make of them anyway.
+fn utf8_width(lead : Int) -> Int {
+  if lead < 0x80 {
+    1
+  } else if (lead & 0xE0) == 0xC0 {
+    2
+  } else if (lead & 0xF0) == 0xE0 {
+    3
+  } else if (lead & 0xF8) == 0xF0 {
+    4
+  } else {
+    1
+  }
+}
+
+///|
+/// The largest count at most `limit` that ends where a character ends.
+///
+/// Walks back to the start of the character the last byte belongs to and keeps it only if all of
+/// it was read. At most three steps back, because no character is longer than four bytes.
+fn utf8_cut(bytes : Bytes, limit : Int) -> Int {
+  if limit <= 0 {
+    return 0
+  }
+  let mut start = limit - 1
+  let mut steps = 0
+  while start > 0 && steps < 3 && (bytes[start].to_int() & 0xC0) == 0x80 {
+    start -= 1
+    steps += 1
+  }
+  if start + utf8_width(bytes[start].to_int()) <= limit {
+    limit
+  } else {
+    start
+  }
+}
+
+///|
 pub async fn path_exists(path : String) -> Bool {
   @fs.exists(path)
 }

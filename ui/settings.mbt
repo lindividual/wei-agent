@@ -2,7 +2,7 @@
 /// The settings panel: what it shows, and what a post from it changes.
 ///
 /// Three things are changeable, and the test is whether a running process can honour the change: a
-/// saved key, the set of enabled skills, and the two turn limits. Everything else in the panel is
+/// saved key, the set of enabled skills, and the turn limits. Everything else in the panel is
 /// shown read-only with the flag that would change it, because a field that appears to accept a value
 /// the process will ignore is worse than no field. The model is changeable too, but it belongs to a
 /// session rather than to the process, so it lives in `model.mbt`.
@@ -21,6 +21,7 @@ fn App::refresh_limits(self : App) -> Unit {
   self.limits = @core.choose_limits(
     self.flag_max_rounds,
     self.flag_max_cost,
+    self.flag_max_seconds,
     self.settings,
   )
 }
@@ -198,6 +199,11 @@ async fn settings_view(app : App, shown : Runner) -> @html.SettingsView {
     saved_key_set: app.settings.saved_api_key != "",
     max_rounds: limit_view(app.limits.max_rounds, "--max-rounds", integer=true),
     max_cost: limit_view(app.limits.max_cost, "--max-cost", integer=false),
+    max_seconds: limit_view(
+      app.limits.max_seconds,
+      "--max-seconds",
+      integer=true,
+    ),
     // Both in one field, because they are one decision: the source says which of the two the
     // workspace is getting, and the text is what it is getting. A panel that reported only the
     // source would leave "my file is being ignored" and "my saved text is being ignored"
@@ -210,6 +216,7 @@ async fn settings_view(app : App, shown : Runner) -> @html.SettingsView {
       app.discovered_skills(shown.cwd),
       app.settings.disabled_skills,
     ),
+    tool_mode: app.settings.tool_mode.to_string(),
   }
 }
 
@@ -239,6 +246,13 @@ async fn apply_settings_post(
   shown : Runner,
   post : @core.SettingsPost,
 ) -> String {
+  // The catalog first, for the same reason the panel loads it before rendering: a workspace whose
+  // skills have never been scanned has an empty cache, and `ApplySkills` derives the new disabled
+  // list *from the catalog*. Without this, switching a skill off in a workspace no turn has run in
+  // yet computes an empty list from an empty catalog and silently discards the change — and the
+  // render that follows loads the catalog, so the panel then shows the skill back on. Measured:
+  // the log said `discovered=0 enabled=[]` for a workspace whose skills existed all along.
+  app.load_skills(shown.cwd)
   let next = match post {
     SaveKey(key~, clear~) =>
       if clear {
@@ -254,9 +268,11 @@ async fn apply_settings_post(
           enabled,
         ),
       )
-    ApplyLimits(max_rounds~, max_cost~) =>
-      app.settings.with_limits(max_rounds, max_cost)
+    ApplyLimits(max_rounds~, max_cost~, max_seconds~) =>
+      app.settings.with_limits(max_rounds, max_cost, max_seconds)
     ApplyAgentsMd(text~) => app.settings.with_agents_md(text)
+    ApplyToolMode(mode~) =>
+      app.settings.with_tool_mode(@core.parse_tool_mode(mode))
   }
   let saved = try {
     @platform.save_settings(app.home, next)
@@ -317,13 +333,35 @@ async fn apply_settings_post(
           "instructions saved: the next turn in a workspace without AGENTS.md uses them"
         @core.Absent => "saved instructions cleared: no instructions are sent"
       }
+    ApplyToolMode(..) =>
+      // Said in terms of what changes rather than in terms of the word that was posted: "code"
+      // alone would restate the click, and the number is the part the reader is deciding about.
+      "\{app.settings.tool_mode.to_string()} mode: \{app.tools().length()} tools on the next turn"
     ApplyLimits(..) => {
       let rounds = app.limits.max_rounds
       let cost = app.limits.max_cost
-      if rounds.source == @core.Flag || cost.source == @core.Flag {
+      let seconds = app.limits.max_seconds
+      if rounds.source == @core.Flag ||
+        cost.source == @core.Flag ||
+        seconds.source == @core.Flag {
         "saved; \{flag_limit_note(app)} still in force"
       } else {
-        "limits saved: \{limit_summary(rounds)} calls, \{limit_summary(cost)} per turn"
+        let calls = if rounds.value <= 0.0 {
+          "no call bound"
+        } else {
+          "\{limit_summary(rounds)} calls"
+        }
+        let spend = if cost.value <= 0.0 {
+          "no cost bound"
+        } else {
+          "$\{limit_summary(cost)}"
+        }
+        let time = if seconds.value <= 0.0 {
+          "no time bound"
+        } else {
+          "\{limit_summary(seconds)}s"
+        }
+        "limits saved: \{calls}, \{spend}, \{time} per turn"
       }
     }
   }
@@ -350,6 +388,9 @@ fn flag_limit_note(app : App) -> String {
   }
   if app.limits.max_cost.source == @core.Flag {
     names.push("--max-cost")
+  }
+  if app.limits.max_seconds.source == @core.Flag {
+    names.push("--max-seconds")
   }
   names.join(" and ")
 }

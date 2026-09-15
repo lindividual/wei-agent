@@ -390,6 +390,10 @@ async fn run_prompt(
   // not have still runs — the fallback is the default — because refusing to answer would be a
   // worse outcome than answering on the wrong model.
   let spec = @core.model_spec_for(runner.model_id).0
+  // Read once, then used for both the prompt and the schema. Two reads of the same setting would
+  // be two values if a settings post landed between them, and the prompt would name a tool the
+  // request does not carry.
+  let mode = app.settings.tool_mode
   let ctx = @agent.AgentContext::new(
     session=runner.session,
     session_path=runner.path,
@@ -398,8 +402,8 @@ async fn run_prompt(
     // The workspace's instructions and the skill catalog both ride the prompt's appended sections:
     // each is the empty string when there is nothing to say, so a workspace with no `AGENTS.md`
     // and no skills sends exactly the prompt it sent before either existed.
-    system_prompt=app.system_prompt(runner),
-    tools=app.tools,
+    system_prompt=app.system_prompt(runner, mode~),
+    tools=@core.tools_for_mode(mode),
     // The session's model, not the process's: this is the one line that makes the choice mean
     // anything. Its pricing, window and thinking levels all come from the same catalog entry, so
     // a turn cannot be billed at one model's rates while calling another.
@@ -451,7 +455,7 @@ async fn run_prompt(
         thinking_level="high",
         max_rounds=app.limits.max_rounds.value.to_int(),
         max_cost=app.limits.max_cost.value,
-        max_seconds=app.max_seconds,
+        max_seconds=app.limits.max_seconds.value.to_int(),
         continuing~,
         on_delta=report,
         should_stop=() => runner.aborting.value,

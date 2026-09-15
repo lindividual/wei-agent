@@ -24,11 +24,19 @@ pub(all) struct ExecOutcome {
   /// The ones still alive once the shell exited. Non-empty means the command left work
   /// running, which is the case this whole file exists for.
   lingering : Array[Int]
+  /// Where the output was written, when the caller asked for it to be kept. `None` means the files
+  /// were read and removed, which is right for a caller that will never look at them again.
+  output : @core.JobOutput?
 } derive(Debug)
 
 ///|
-/// A directory for the process-table dumps, under the system's temporary directory.
-fn tree_dir() -> String {
+/// The working directory for a command's process-table dump and its kept output, under the
+/// system's temporary directory.
+///
+/// Shared by every server on the machine, which is why the only thing that ever removes a file from
+/// it is a check on the file's age — and why it is the one place a test can put a file to see what
+/// the pruner does.
+pub fn tree_dir() -> String {
   match @env.get_env_var("TMPDIR") {
     Some(dir) if dir != "" => "\{dir}/pi-web-shell"
     _ => "/tmp/pi-web-shell"
@@ -182,6 +190,10 @@ pub async fn exec_managed(
   timeout_ms? : Int,
   on_shell_pid? : (Int) -> Unit,
   on_sample? : (Array[Int]) -> Unit,
+  /// Keep the files the output was written to, instead of reading them and removing them. For a
+  /// command that leaves something running: the shell that would have reported it is gone, and the
+  /// child's output keeps arriving at a file only this flag keeps around.
+  keep_output? : Bool = false,
 ) -> ExecOutcome {
   try @fs.mkdir(tree_dir(), recursive=true) catch {
     _ => ()
@@ -190,8 +202,8 @@ pub async fn exec_managed(
   }
   let stamp = @core.new_entry_id()
   let tree_file = "\{tree_dir()}/tree-\{stamp}.txt"
-  let out_file = "\{tree_dir()}/out-\{stamp}.txt"
-  let err_file = "\{tree_dir()}/err-\{stamp}.txt"
+  let out_file = "\{tree_dir()}/job-\{stamp}.out"
+  let err_file = "\{tree_dir()}/job-\{stamp}.err"
   // The command's own exit status has to survive the extra step, and the dump has to happen even
   // when the command fails — so neither `set -e` nor the last command's status is relied on.
   let wrapped = "\{command}\n__pws_status=$?\n/bin/ps -eo pid=,ppid= > '\{tree_file}' 2>/dev/null\nexit $__pws_status\n"
@@ -268,7 +280,14 @@ pub async fn exec_managed(
   } else {
     []
   }
-  for path in [tree_file, out_file, err_file] {
+  // The tree dump is a working file and always goes. The output is the one thing a caller may
+  // still need: a command that left something running has a child writing to it right now.
+  let removals : Array[String] = if keep_output {
+    [tree_file]
+  } else {
+    [tree_file, out_file, err_file]
+  }
+  for path in removals {
     try @fs.remove(path) catch {
       _ => ()
     } noraise {
@@ -294,6 +313,64 @@ pub async fn exec_managed(
     shell_pid,
     children,
     lingering: live_of(children),
+    output: if keep_output {
+      Some({
+        out_path: out_file,
+        err_path: err_file,
+        // What the caller is about to show, counted in bytes of the file rather than of the
+        // decoded text: the offset a later read resumes from has to be the file's.
+        out_read: file_size(out_file).to_int(),
+        err_read: file_size(err_file).to_int(),
+      })
+    } else {
+      None
+    },
+  }
+}
+
+///|
+/// How long an output file nobody has written to is kept, in milliseconds.
+///
+/// A day, because that is longer than any run and shorter than forever. This is the only thing that
+/// prunes a `job-*` file: where a job's output lives is a fact about the run that made it rather
+/// than about the job, so it is not in the store, and a `wait` that never comes leaves the file with
+/// nothing left to delete it.
+fn job_output_ttl_ms() -> Int64 {
+  24L * 60L * 60L * 1000L
+}
+
+///|
+/// Remove the output files earlier runs left behind.
+///
+/// Called once at startup, and bounded by age rather than clearing the directory. The unbounded
+/// version would be wrong when a second server is running: the directory is the machine's temp
+/// directory rather than this process's, two servers share it, and one starting up must not delete
+/// the other's live job output. Age is what makes the two cases distinguishable — a job that is
+/// still being waited for has been written to recently, and a file nobody has touched in a day
+/// belongs to a run that is over in every sense but the record.
+pub async fn clear_job_outputs(now : Int64) -> Unit {
+  let names : Array[String] = @fs.readdir(tree_dir()) catch {
+    // A first run has no directory, and a directory that cannot be read is not a reason to fail to
+    // start.
+    _ => return
+  }
+  for name in names {
+    if !name.has_prefix("job-") {
+      continue
+    }
+    let path = "\{tree_dir()}/\{name}"
+    // A file that cannot be dated is left alone: guessing is what deletes the wrong one.
+    let written = @fs.mtime(path) catch { _ => continue }
+    let (seconds, nanos) = written
+    let age = now - (seconds * 1000L + nanos.to_int64() / 1000000L)
+    if age < job_output_ttl_ms() {
+      continue
+    }
+    try @fs.remove(path) catch {
+      _ => ()
+    } noraise {
+      _ => ()
+    }
   }
 }
 

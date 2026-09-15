@@ -2169,7 +2169,68 @@ async function main() {
     );
     check(true, "a switched-off skill can be switched back on");
 
-    // The limits: the two guards a reader can move without a restart. Driven through the form the
+    // The tool mode: the one setting whose effect is on the next request rather than on the page,
+    // so the round trip through the form is the only part a browser can check. What the mode does
+    // to the prompt and the tool schema is asserted in `ui/app_wbtest.mbt`, where both are
+    // readable; here it is that the form posts, is acknowledged, is written down, and can be put
+    // back — the turn check below uses `bash`, which code mode replaces with `exec`.
+    check(
+      (await cdp.eval(
+        `document.querySelector('#settings-body input[name="tool_mode"][value="tools"]')?.checked === true`,
+      )),
+      "the mode in force is shown as the chosen one",
+    );
+    await cdp.eval(
+      `(() => {
+        document.querySelector('#settings-body input[name="tool_mode"][value="code"]').checked = true;
+        document.getElementById('mode-form').requestSubmit();
+        return true;
+      })()`,
+    );
+    await cdp.waitFor(
+      "document.getElementById('status').textContent.includes('mode')",
+      "the mode change to be applied",
+      15000,
+    );
+    check(true, "choosing a mode posts and is acknowledged");
+    check(
+      JSON.parse(readFileSync(settingsFile, "utf8")).tool_mode === "code",
+      "the mode is written to the settings file",
+      readFileSync(settingsFile, "utf8"),
+    );
+    await cdp.waitFor(
+      `document.querySelector('#settings-body input[name="tool_mode"][value="code"]')?.checked === true`,
+      "the panel to come back with code mode chosen",
+      15000,
+    );
+    check(true, "the panel renders the mode now in force rather than the one clicked from");
+    // Back to the default, because the check further down runs a turn with `bash`.
+    await cdp.eval(
+      `(() => {
+        document.querySelector('#settings-body input[name="tool_mode"][value="tools"]').checked = true;
+        document.getElementById('mode-form').requestSubmit();
+        return true;
+      })()`,
+    );
+    // Awaited on the acknowledgement rather than on the radio: the radio was set by the script
+    // above, so it is already checked when the request goes out and waiting on it would race the
+    // write. The status line is the server saying the write happened.
+    await cdp.waitFor(
+      "document.getElementById('status').textContent.includes('tools mode')",
+      "the change back to be acknowledged",
+      15000,
+    );
+    check(
+      JSON.parse(readFileSync(settingsFile, "utf8")).tool_mode === "tools",
+      "switching the mode back is written down too",
+    );
+    await cdp.waitFor(
+      `document.querySelector('#settings-body input[name="tool_mode"][value="tools"]')?.checked === true`,
+      "the panel to come back with the tools chosen",
+      15000,
+    );
+
+    // The limits: the guards a reader can move without a restart. Driven through the form the
     // page actually renders, because the interesting failure is a form that posts and changes
     // nothing — the value the next turn reads is what has to move.
     const limitsBefore = await cdp.eval(
@@ -2184,6 +2245,7 @@ async function main() {
       `(() => {
         document.querySelector('#limits-form input[name="max_rounds"]').value = '57';
         document.querySelector('#limits-form input[name="max_cost"]').value = '0.75';
+        document.querySelector('#limits-form input[name="max_seconds"]').value = '900';
         document.getElementById('limits-form').requestSubmit();
         return true;
       })()`,
@@ -2196,7 +2258,8 @@ async function main() {
     check(true, "saving a limit posts and is acknowledged");
     let settingsNow = JSON.parse(readFileSync(settingsFile, "utf8"));
     check(
-      settingsNow.max_rounds === 57 && settingsNow.max_cost === 0.75,
+      settingsNow.max_rounds === 57 && settingsNow.max_cost === 0.75 &&
+        settingsNow.max_seconds === 900,
       "the limits are written to the settings file",
       JSON.stringify(settingsNow),
     );
@@ -2248,6 +2311,7 @@ async function main() {
       `(() => {
         document.querySelector('#limits-form input[name="max_rounds"]').value = '';
         document.querySelector('#limits-form input[name="max_cost"]').value = '';
+        document.querySelector('#limits-form input[name="max_seconds"]').value = '';
         document.getElementById('limits-form').requestSubmit();
         return true;
       })()`,
@@ -2262,7 +2326,8 @@ async function main() {
     );
     settingsNow = JSON.parse(readFileSync(settingsFile, "utf8"));
     check(
-      settingsNow.max_rounds === null && settingsNow.max_cost === null,
+      settingsNow.max_rounds === null && settingsNow.max_cost === null &&
+        settingsNow.max_seconds === null,
       "clearing the fields records no opinion rather than a bound of zero",
       JSON.stringify(settingsNow),
     );

@@ -14,7 +14,9 @@
 /// - `POST /abort`    stop the running turn
 /// - `POST /settings/key`    save or clear the key the panel writes
 /// - `POST /settings/skills` apply the set of enabled skills
-/// - `POST /settings/limits` set or clear the two turn limits
+/// - `POST /settings/agents` save the fallback instructions
+/// - `POST /settings/limits` set or clear the turn limits
+/// - `POST /settings/mode`   choose which tools a turn gets
 /// - `POST /model`    switch the displayed session's model
 ///
 /// The POST routes answer immediately and the work happens behind them. A turn
@@ -337,7 +339,8 @@ pub async fn serve(
       (Post, "/settings/key")
       | (Post, "/settings/skills")
       | (Post, "/settings/limits")
-      | (Post, "/settings/agents") => {
+      | (Post, "/settings/agents")
+      | (Post, "/settings/mode") => {
         let text = read_body(body)
         ok(conn)
         (routes.settings)(text)

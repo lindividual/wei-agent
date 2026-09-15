@@ -185,6 +185,9 @@ test "settling a job whose processes are gone distinguishes stopping from exitin
   )
   // The reader asked for one of them to stop; the other simply ended.
   ignore(store.request_stop(stopped))
+  // Both calls have returned, so what the store knows is everything there is to know.
+  store.finish_call(stopped)
+  store.finish_call(left)
   // While every job still has a live process, nothing settles.
   assert_false(store.settle_gone(pid => pid == 10 || pid == 12, now=5L))
   assert_true(store.get(stopped).unwrap().is_live())
@@ -391,4 +394,58 @@ fn duration_label_of(ms : Int64) -> String {
   } else {
     "\{seconds / 3600L}h \{(seconds % 3600L) / 60L}m"
   }
+}
+
+///|
+/// A job whose owning call is still in flight is not settled, however dead its shell looks.
+///
+/// The window this covers is milliseconds wide and was found the hard way: the shell of a
+/// backgrounded command exits the moment the command does, the call that started it is still
+/// reading the process table, and what is known at that instant is the shell's pid alone. Settling
+/// there recorded "exited on its own" about a command whose child was running — and the record that
+/// the panel and `wait` both read was gone.
+test "a job whose call is still in flight is left alone" {
+  let store = JobStore::new()
+  let id = store.start(
+    kind="exec",
+    label="sleep 30 &",
+    session="/a",
+    started_at=0L,
+    pids=[],
+  )
+  // The shell is seen, and has already exited.
+  store.observe(id, [41], tail="")
+  assert_false(store.settle_gone(_pid => false, now=10L))
+  assert_true(store.get(id).unwrap().is_live())
+  // The call reports what the command left: only now is the list complete, and only now can a
+  // settled verdict mean anything.
+  store.finish_call(id)
+  store.observe(id, [42], tail="")
+  assert_false(store.settle_gone(pid => pid == 42, now=11L))
+  assert_true(store.get(id).unwrap().is_live())
+  // The child goes, and the job settles.
+  assert_true(store.settle_gone(_pid => false, now=12L))
+  assert_eq(store.get(id).unwrap().status, Completed)
+}
+
+///|
+/// A record read back from disk has no call in flight, so it is settled by the process table alone.
+///
+/// The opposite direction of the test above, and the reason the flag is not persisted: after a
+/// restart there is no call left to wait for, and a job whose processes are gone must not be stuck
+/// claiming to run forever.
+test "a job read back from disk settles on the process table" {
+  let store = JobStore::new()
+  let id = store.start(
+    kind="exec",
+    label="npm run dev",
+    session="/a",
+    started_at=0L,
+    pids=[77, 78],
+  )
+  store.finish_call(id)
+  let reloaded = parse_job_store(store.to_json().stringify())
+  assert_true(reloaded.get(id).unwrap().is_live())
+  assert_true(reloaded.settle_gone(_pid => false, now=5L))
+  assert_eq(reloaded.get(id).unwrap().status, Completed)
 }

@@ -30,11 +30,13 @@ fn view() -> SettingsView {
     saved_key_set: true,
     max_rounds: { text: "40", source: "saved", editable: true, },
     max_cost: { text: "0.25", source: "saved", editable: true, },
+    max_seconds: { text: "1800", source: "saved", editable: true, },
     instructions_source: "AGENTS.md in this workspace",
     instructions_preview: "Run moon test before committing.",
     agents_md: "Prefer small diffs.",
     agents_md_chars: 18,
     skills: [entry("alpha", true), entry("beta", false)],
+    tool_mode: "tools",
   }
 }
 
@@ -214,17 +216,19 @@ test "the navigation and the sections are the same list" {
 }
 
 ///|
-/// The turn limits: the two guards a reader can actually move at runtime.
+/// The turn limits: the guards a reader can actually move at runtime.
 test "the limits are shown with their source, and a flag-pinned one is not editable" {
   let html = render_settings(view()).render()
   assert_true(html.contains("id=\"limits-form\""), msg=html)
   assert_true(html.contains("name=\"max_rounds\""), msg=html)
   assert_true(html.contains("name=\"max_cost\""), msg=html)
-  // The form always carries its marker, for the same reason the skills one does: clearing both
-  // fields is an otherwise empty body.
+  assert_true(html.contains("name=\"max_seconds\""), msg=html)
+  // The form always carries its marker, for the same reason the skills one does: clearing every
+  // field is an otherwise empty body.
   assert_true(html.contains("name=\"limits\""), msg=html)
   assert_true(html.contains("value=\"40\""), msg=html)
   assert_true(html.contains("value=\"0.25\""), msg=html)
+  assert_true(html.contains("value=\"1800\""), msg=html)
   assert_true(html.contains("saved"), msg=html)
   // A resolved default is a placeholder, not a value: an empty box means "no opinion", and a box
   // pre-filled with the default would freeze that default the first time Apply was pressed.
@@ -232,26 +236,54 @@ test "the limits are shown with their source, and a flag-pinned one is not edita
     ..view(),
     max_rounds: { text: "", source: "default", editable: true, },
     max_cost: { text: "", source: "default", editable: true, },
+    max_seconds: { text: "", source: "default", editable: true, },
   }
   let default_html = render_settings(by_default).render()
   assert_true(default_html.contains("placeholder=\"40\""), msg=default_html)
   assert_true(default_html.contains("placeholder=\"0.25\""), msg=default_html)
+  assert_true(default_html.contains("placeholder=\"1800\""), msg=default_html)
   assert_false(default_html.contains("value=\"40\""), msg=default_html)
+  assert_false(default_html.contains("value=\"1800\""), msg=default_html)
   // A limit a launch flag set is shown but readonly, with the flag named: the one case where
   // saving a setting does nothing, and the worst one to leave unexplained.
   let pinned : SettingsView = {
     ..view(),
     max_rounds: { text: "5", source: "set by --max-rounds", editable: false, },
     max_cost: { text: "0", source: "set by --max-cost", editable: false, },
+    max_seconds: {
+      text: "60",
+      source: "set by --max-seconds",
+      editable: false,
+    },
   }
   let pinned_html = render_settings(pinned).render()
   assert_true(pinned_html.contains("readonly"), msg=pinned_html)
   assert_true(pinned_html.contains("set by --max-rounds"), msg=pinned_html)
   assert_true(pinned_html.contains("set by --max-cost"), msg=pinned_html)
+  assert_true(pinned_html.contains("set by --max-seconds"), msg=pinned_html)
   assert_true(pinned_html.contains("class=\"limit pinned\""), msg=pinned_html)
-  // Nothing is editable when both are pinned, so there is no form that could post a change the
-  // process would ignore.
+  // Nothing is editable when all three are pinned, so there is no form that could post a change
+  // the process would ignore.
   assert_false(pinned_html.contains("id=\"limits-form\""), msg=pinned_html)
+  // A pinned seconds field is not editable on its own either: that is the case the flag exists for,
+  // and the field must not offer a change the next turn would ignore.
+  let only_seconds : SettingsView = {
+    ..view(),
+    max_seconds: {
+      text: "60",
+      source: "set by --max-seconds",
+      editable: false,
+    },
+  }
+  let only_seconds_html = render_settings(only_seconds).render()
+  assert_true(
+    only_seconds_html.contains("set by --max-seconds"),
+    msg=only_seconds_html,
+  )
+  assert_true(
+    only_seconds_html.contains("class=\"limit pinned\""),
+    msg=only_seconds_html,
+  )
 }
 
 ///|
@@ -341,4 +373,40 @@ test "the panel reports the real paths and the real launch flags" {
   assert_true(html.contains("--model"), msg="the model says how to change it")
   assert_true(html.contains("--port"), msg=html)
   assert_true(html.contains("--store"), msg=html)
+}
+
+///|
+/// The mode block: the ids and field names the client posts, and that the reader can see which one
+/// is in force.
+///
+/// The two choices are the same shape as the skills list — a labelled radio per choice — because the
+/// client posts every settings form through the same handler, which finds the form by id and sends
+/// its fields. A block that used a `<select>` would need a second path through that script.
+test "the mode block carries the ids and field names the client posts" {
+  let html = render_settings(view()).render()
+  assert_true(html.contains("id=\"mode-form\""), msg=html)
+  assert_true(html.contains("name=\"tool_mode\""), msg=html)
+  // Both choices are offered, whichever is in force.
+  assert_true(html.contains("value=\"tools\""), msg=html)
+  assert_true(html.contains("value=\"code\""), msg=html)
+  // The one in force is the checked one — and the other is not, so a browser posting the form
+  // cannot send two values.
+  let tools = html.find("value=\"tools\"").unwrap()
+  assert_true(html[tools:tools + 40].contains("checked"), msg=html)
+  let code = html.find("value=\"code\"").unwrap()
+  assert_false(html[code:code + 40].contains("checked"), msg=html)
+  // What each mode costs is stated, because the panel is the only place the reader can find out:
+  // code mode drops the file tools.
+  assert_true(html.contains("Eight tools, one verb each"), msg=html)
+  assert_true(html.contains("Reading a file is a command"), msg=html)
+}
+
+///|
+test "the mode block shows code mode as the chosen one when it is" {
+  let code : SettingsView = { ..view(), tool_mode: "code", }
+  let html = render_settings(code).render()
+  let value = html.find("value=\"code\"").unwrap()
+  assert_true(html[value:value + 40].contains("checked"), msg=html)
+  let tools = html.find("value=\"tools\"").unwrap()
+  assert_false(html[tools:tools + 40].contains("checked"), msg=html)
 }

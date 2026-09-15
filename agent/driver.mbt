@@ -664,7 +664,12 @@ async fn run_tools(
     // Background work is accounted for per session, and dsh's admission rule is adopted whole:
     // past the limit the command is refused with an instruction to clean up, because "start
     // another background job" must not become a way to accumulate processes nobody counts.
-    let job_id : String? = if name == "bash" {
+    //
+    // Which calls are watched is `leaves_a_process`'s answer rather than a name test here: a
+    // command in either mode is worth a record, and a `moonbit` program — which is compiled and
+    // run inside its own call — is not. A record for one would report a process table entry that
+    // does not exist and occupy one of the session's ten slots.
+    let job_id : String? = if @core.leaves_a_process(name, arguments) {
       if ctx.jobs.live_count(ctx.session_path) >=
         @core.max_live_jobs_per_session() {
         let refusal = @core.Message::ToolResult({
@@ -689,7 +694,8 @@ async fn run_tools(
       }
       Some(
         ctx.jobs.start(
-          kind="bash",
+          // The tool's own name, so an id read off a result says which tool made the job.
+          kind=name,
           label=@core.tool_summary(arguments),
           session=ctx.session_path,
           started_at=now_ms(),
@@ -705,7 +711,10 @@ async fn run_tools(
     let output = @async.with_task_group(group => {
       let task = group.spawn(() => {
         try
-          @platform.execute_tool(name, arguments, ctx.cwd, watcher={
+          @platform.execute_tool(name, arguments, ctx.cwd, jobs=ctx.jobs, watcher={
+            // Carried into the result, so a command that leaves something running comes back with
+            // the id to collect it by rather than with the instruction to go and find one.
+            id: job_id,
             started: pids => {
               match job_id {
                 Some(id) => ctx.jobs.observe(id, pids, tail="")
@@ -714,17 +723,7 @@ async fn run_tools(
             },
             finished: outcome => {
               match job_id {
-                Some(id) => {
-                  ctx.jobs.observe(id, outcome.children, tail="")
-                  if outcome.lingering.is_empty() {
-                    // Finished and left nothing behind: not background work, so the record goes.
-                    // A panel that listed every tool call would be a log, not an answer.
-                    ctx.jobs.forget(id)
-                  } else {
-                    // Still running, which is the whole point of the record.
-                    ctx.jobs.observe(id, outcome.lingering, tail="")
-                  }
-                }
+                Some(id) => @platform.note_execution(ctx.jobs, id, outcome)
                 None => ()
               }
             },

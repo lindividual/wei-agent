@@ -10,6 +10,7 @@
 pub fn build_system_prompt(
   cwd : String,
   tools : Array[ToolDef],
+  mode? : ToolMode = Tools,
   sections? : Array[String],
 ) -> String {
   let out = StringBuilder()
@@ -21,17 +22,7 @@ pub fn build_system_prompt(
   for tool in tools {
     out.write_string("- \{tool.name}: \{tool.snippet}\n")
   }
-  out.write_string(
-    "\n## How to work\n\n" +
-    "- Read before you write. Do not edit a file you have not read.\n" +
-    "- Prefer several small, verifiable steps over one large change.\n" +
-    "- When a command fails, read the error before retrying; do not repeat a failing command unchanged.\n" +
-    "- Reach for `script` when a step needs more than two or three reads, when you would loop or\n" +
-    "  aggregate over files, or when a command's raw output is much larger than the part you need:\n" +
-    "  it runs a program and returns a digest instead of the raw output. For a single file, `read`\n" +
-    "  is cheaper.\n" +
-    "- Report what you did and what you found. If you could not finish a task, say so plainly rather than implying success.\n",
-  )
+  out.write_string(how_to_work(mode))
   // In the order given, and skipping the empty ones: a caller assembles these from whatever the
   // session actually has, and the two callers — the turn and the context figure — must build the
   // same prompt or the size the bar reports would be of a prompt nobody sent.
@@ -45,4 +36,45 @@ pub fn build_system_prompt(
     None => ()
   }
   out.to_string()
+}
+
+///|
+/// The half of the prompt that is not the tool list, and the half that has to follow the mode.
+///
+/// The tool list already says which tools exist, so the bullets below are not a second list — they
+/// are what the model has to know that the declarations cannot say. In code mode that is the whole
+/// of the difficulty: eight tools become two, and the file operations every other instruction
+/// assumes have to be written as commands. A prompt that still said "for a single file, `read` is
+/// cheaper" would be describing a tool that is not in the request, and the model would spend a call
+/// learning that from an error.
+fn how_to_work(mode : ToolMode) -> String {
+  match mode {
+    Tools =>
+      "\n## How to work\n\n" +
+      "- Read before you write. Do not edit a file you have not read.\n" +
+      "- Prefer several small, verifiable steps over one large change.\n" +
+      "- When a command fails, read the error before retrying; do not repeat a failing command unchanged.\n" +
+      "- Reach for `script` when a step would otherwise be several reads, a grep across the repo, a\n" +
+      "  loop or an aggregation over files, a command whose raw output is much larger than the part\n" +
+      "  you need, or a program you would write just to change files: it runs a program and returns\n" +
+      "  a digest instead of the raw output. Bundled scripts cover `moon check`, `moon test`, repo\n" +
+      "  search and range reads. For a single file, `read` is cheaper.\n" +
+      "- Report what you did and what you found. If you could not finish a task, say so plainly rather than implying success.\n"
+    Code =>
+      "\n## How to work\n\n" +
+      "Everything you do, you do by writing a command. There is no file tool: reading is `cat` or\n" +
+      "`sed -n`, searching is `grep -rn`, listing is `ls`, editing is `ed`-style or a `moonbit`\n" +
+      "program that writes the file. Plan the command, not the step.\n\n" +
+      "- Read before you write. Do not edit a file you have not read.\n" +
+      "- Prefer one command that answers the question over several that each need another call: a\n" +
+      "  pipeline, a loop, or a `moonbit` program that filters and aggregates. Only what a command\n" +
+      "  prints reaches you, and the conversation pays for every byte of it.\n" +
+      "- Narrow output in the command (`| tail -30`, `--stat`, `-q`) instead of printing a lot and\n" +
+      "  reading it. The cap keeps the end of what was printed, so an un-narrowed dump loses the part\n" +
+      "  you were looking for.\n" +
+      "- Nothing is interactive. Pass the flags that fail instead of prompting (`-y`, `--no-pager`,\n" +
+      "  `-batch`, `</dev/null`) and a timeout to anything that might not return.\n" +
+      "- When a command fails, read the error before retrying; do not repeat a failing command unchanged.\n" +
+      "- Report what you did and what you found. If you could not finish a task, say so plainly rather than implying success.\n"
+  }
 }

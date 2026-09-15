@@ -18,6 +18,8 @@ test "a round trip preserves the key, the names and the limits" {
     agents_md: "Prefer small diffs.",
     max_rounds: Some(40),
     max_cost: Some(0.25),
+    max_seconds: Some(1800),
+    tool_mode: Code,
   }
   let decoded = decode_app_settings(encode_app_settings(settings))
   assert_eq(decoded, settings)
@@ -27,15 +29,23 @@ test "a round trip preserves the key, the names and the limits" {
       ..settings,
       max_rounds: Some(0),
       max_cost: Some(0.0),
+      max_seconds: Some(0),
     }),
   )
   assert_eq(off.max_rounds, Some(0))
   assert_eq(off.max_cost, Some(0.0))
+  assert_eq(off.max_seconds, Some(0))
   let unset = decode_app_settings(
-    encode_app_settings({ ..settings, max_rounds: None, max_cost: None, }),
+    encode_app_settings({
+      ..settings,
+      max_rounds: None,
+      max_cost: None,
+      max_seconds: None,
+    }),
   )
   assert_true(unset.max_rounds is None)
   assert_true(unset.max_cost is None)
+  assert_true(unset.max_seconds is None)
 }
 
 ///|
@@ -298,66 +308,94 @@ test "a form field is percent-decoded, including names that are not ascii" {
 /// be able to turn it into a suggestion.
 test "a limit comes from the flag, then the setting, then the default" {
   let unset = AppSettings::new()
-  let from_default = choose_limits(None, None, unset)
+  let from_default = choose_limits(None, None, None, unset)
   assert_eq(from_default.max_rounds.value, default_max_rounds().to_double())
   assert_eq(from_default.max_rounds.source, Default)
   assert_eq(from_default.max_cost.value, default_max_cost())
   assert_eq(from_default.max_cost.source, Default)
-  let saved = unset.with_limits(Some(5), Some(0.02))
-  let from_saved = choose_limits(None, None, saved)
+  assert_eq(from_default.max_seconds.value, default_max_seconds().to_double())
+  assert_eq(from_default.max_seconds.source, Default)
+  let saved = unset.with_limits(Some(5), Some(0.02), Some(90))
+  let from_saved = choose_limits(None, None, None, saved)
   assert_eq(from_saved.max_rounds.value, 5.0)
   assert_eq(from_saved.max_rounds.source, Saved)
   assert_eq(from_saved.max_cost.value, 0.02)
   assert_eq(from_saved.max_cost.source, Saved)
-  // A flag wins for its own limit and leaves the other one where it was: setting a cost cap on the
+  assert_eq(from_saved.max_seconds.value, 90.0)
+  assert_eq(from_saved.max_seconds.source, Saved)
+  // A flag wins for its own limit and leaves the others where they were: setting a cost cap on the
   // command line should not also throw away a saved call limit.
-  let mixed = choose_limits(Some(9), None, saved)
+  let mixed = choose_limits(Some(9), None, None, saved)
   assert_eq(mixed.max_rounds.value, 9.0)
   assert_eq(mixed.max_rounds.source, Flag)
   assert_eq(mixed.max_cost.source, Saved)
+  assert_eq(mixed.max_seconds.source, Saved)
+  // Each flag is independent of the other two, in both directions.
+  let seconds_pinned = choose_limits(None, None, Some(45), saved)
+  assert_eq(seconds_pinned.max_seconds.value, 45.0)
+  assert_eq(seconds_pinned.max_seconds.source, Flag)
+  assert_eq(seconds_pinned.max_rounds.source, Saved)
+  assert_eq(seconds_pinned.max_cost.source, Saved)
   // Zero is a value, not an absence: it disables the bound rather than falling back.
-  let off = choose_limits(Some(0), Some(0.0), saved)
+  let off = choose_limits(Some(0), Some(0.0), Some(0), saved)
   assert_eq(off.max_rounds.value, 0.0)
   assert_eq(off.max_rounds.source, Flag)
   assert_eq(off.max_cost.source, Flag)
+  assert_eq(off.max_seconds.value, 0.0)
+  assert_eq(off.max_seconds.source, Flag)
 }
 
 ///|
 /// The limits form is told apart by its own marker, and each field reads the way a reader would
 /// expect: empty means no opinion, `0` means no bound, and something that is not a number means no
 /// opinion rather than a bound of zero.
-test "the limits form decodes to the two values or to none" {
-  match parse_settings_post("limits=1&max_rounds=40&max_cost=0.25") {
-    Some(ApplyLimits(max_rounds~, max_cost~)) => {
+test "the limits form decodes to each value or to none" {
+  match
+    parse_settings_post("limits=1&max_rounds=40&max_cost=0.25&max_seconds=1800") {
+    Some(ApplyLimits(max_rounds~, max_cost~, max_seconds~)) => {
       assert_eq(max_rounds, Some(40))
       assert_eq(max_cost, Some(0.25))
+      assert_eq(max_seconds, Some(1800))
     }
     _ => fail("a limits form is a limits post")
   }
-  // Both boxes cleared posts only the marker, and that is "clear both" rather than "nothing to
+  // Every box cleared posts only the marker, and that is "clear all" rather than "nothing to
   // do" — which is what a reader does after raising them once.
   match parse_settings_post("limits=1") {
-    Some(ApplyLimits(max_rounds~, max_cost~)) => {
+    Some(ApplyLimits(max_rounds~, max_cost~, max_seconds~)) => {
       assert_true(max_rounds is None)
       assert_true(max_cost is None)
+      assert_true(max_seconds is None)
     }
-    _ => fail("the marker alone clears both")
+    _ => fail("the marker alone clears all of them")
   }
-  // One of the two left as it is never happens through the form — it submits both — but a hand-typed
-  // body can, and the missing field is "no opinion" rather than a bound of zero.
+  // One of them left as it is never happens through the form — it submits all three — but a
+  // hand-typed body can, and the missing field is "no opinion" rather than a bound of zero.
   match parse_settings_post("limits=1&max_cost=2") {
-    Some(ApplyLimits(max_rounds~, max_cost~)) => {
+    Some(ApplyLimits(max_rounds~, max_cost~, max_seconds~)) => {
       assert_true(max_rounds is None)
       assert_eq(max_cost, Some(2.0))
+      assert_true(max_seconds is None)
     }
     _ => fail("half a form is still a limits post")
+  }
+  // The seconds field is a limit field like the others: on its own it is a limits post, and its
+  // value decodes as seconds rather than being dropped.
+  match parse_settings_post("max_seconds=60") {
+    Some(ApplyLimits(max_rounds~, max_cost~, max_seconds~)) => {
+      assert_true(max_rounds is None)
+      assert_true(max_cost is None)
+      assert_eq(max_seconds, Some(60))
+    }
+    _ => fail("a bare seconds field is a limits post")
   }
   // No marker at all, but a limit field: still a limits post, because that is what someone typing
   // at `curl` means by it.
   match parse_settings_post("max_cost=0.5") {
-    Some(ApplyLimits(max_rounds~, max_cost~)) => {
+    Some(ApplyLimits(max_rounds~, max_cost~, max_seconds~)) => {
       assert_true(max_rounds is None)
       assert_eq(max_cost, Some(0.5))
+      assert_true(max_seconds is None)
     }
     _ => fail("a bare limit field is a limits post")
   }
@@ -365,9 +403,10 @@ test "the limits form decodes to the two values or to none" {
   // The marker with an empty value is still the marker — an unchecked box would have been dropped
   // by `FormData`, but this field is hidden and always sent, so `limits=` can only mean the form.
   match parse_settings_post("limits=") {
-    Some(ApplyLimits(max_rounds~, max_cost~)) => {
+    Some(ApplyLimits(max_rounds~, max_cost~, max_seconds~)) => {
       assert_true(max_rounds is None)
       assert_true(max_cost is None)
+      assert_true(max_seconds is None)
     }
     _ => fail("the bare marker is still a limits post")
   }
@@ -400,19 +439,26 @@ test "a limit field reads empty, zero and nonsense distinctly" {
 ///|
 /// A hand-edited file is not allowed to smuggle in a bound the guard would ignore.
 test "a nonsense limit in the file is no opinion, not a disabled bound" {
-  let negative = decode_app_settings("{\"max_rounds\": -5, \"max_cost\": -1}")
+  let negative = decode_app_settings(
+    "{\"max_rounds\": -5, \"max_cost\": -1, \"max_seconds\": -30}",
+  )
   assert_true(negative.max_rounds is None)
   assert_true(negative.max_cost is None)
+  assert_true(negative.max_seconds is None)
   let wrong_type = decode_app_settings(
-    "{\"max_rounds\": \"40\", \"max_cost\": \"0.5\"}",
+    "{\"max_rounds\": \"40\", \"max_cost\": \"0.5\", \"max_seconds\": \"60\"}",
   )
   assert_true(wrong_type.max_rounds is None)
   assert_true(wrong_type.max_cost is None)
+  assert_true(wrong_type.max_seconds is None)
   // Zero is a legitimate value from a hand-edited file too: it is how a reader who knows what they
   // are doing turns the bound off for good.
-  let off = decode_app_settings("{\"max_rounds\": 0, \"max_cost\": 0}")
+  let off = decode_app_settings(
+    "{\"max_rounds\": 0, \"max_cost\": 0, \"max_seconds\": 0}",
+  )
   assert_eq(off.max_rounds, Some(0))
   assert_eq(off.max_cost, Some(0.0))
+  assert_eq(off.max_seconds, Some(0))
 }
 
 ///|

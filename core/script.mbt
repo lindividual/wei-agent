@@ -191,27 +191,35 @@ pub(all) struct ScriptInfo {
 /// another 10%. `check` and `test` take the bulk of the command half, `search`
 /// and `read` the other — and those four are the ones where the raw output is
 /// far larger than what the caller can use.
+///
+/// Each `about` names the command it replaces. That is not decoration: measured
+/// over one 604-call session, 507 calls went to `bash` forms these four exist to
+/// replace — 266 `grep -rn`, 99 `python3 - <<'PY'` file rewrites, 66 `moon test`,
+/// 52 `moon check` — and none of them was made through this tool. The tool was in
+/// the prompt and worked; what it lacked was a reason to be reached for. Saying
+/// "instead of `moon check 2>&1 | tail -30`" is that reason, in the smallest form
+/// it has.
 pub fn builtin_scripts() -> Array[ScriptInfo] {
   [
     {
       name: "check",
       args: "[package]",
-      about: "run moon check and report errors grouped by file, without the surrounding source dump",
+      about: "moon check, errors grouped by file, without the source dump — instead of `moon check 2>&1 | tail -30`",
     },
     {
       name: "test",
       args: "[package-or-file]",
-      about: "run moon test and report only failures, with long values elided",
+      about: "moon test, failures only, long values elided — instead of `moon test 2>&1 | tail -40`",
     },
     {
       name: "search",
       args: "pattern [dir]",
-      about: "regex search the workspace, skipping build output",
+      about: "regex search the workspace, skipping build output — instead of `grep -rn`",
     },
     {
       name: "read",
       args: "path[:from:to] ...",
-      about: "read several files or line ranges in one call",
+      about: "several files or line ranges in one call — instead of one `read` per file",
     },
   ]
 }
@@ -461,22 +469,71 @@ fn read_script() -> String {
 // ── The tool ───────────────────────────────────────────────────────────────
 
 ///|
+/// What a caller needs to know to write a MoonBit program here: the bundled
+/// scripts, the prelude's API, and two examples.
+///
+/// Shared by the `script` tool and by code mode's `exec`, which run the same
+/// programs through the same prelude and therefore have to describe them the
+/// same way. Only the sentence that says how to hand the program over differs,
+/// and that one stays with each tool.
+///
+/// Written as prose plus a generated list rather than one literal: `#|` takes
+/// quotes and backslashes literally, which is what makes the examples readable,
+/// but it does not interpolate — so the list is concatenated in.
+///
+/// `bundled` and `own` are the two sentences that name how the program is handed over, which is
+/// the one thing the two tools spell differently — `script` takes `source` or `name`, `exec` takes
+/// one `moonbit` field that is either.
+pub fn moonbit_program_help(bundled~ : String, own~ : String) -> String {
+  let scripts = StringBuilder()
+  for info in builtin_scripts() {
+    scripts.write_string(
+      "\n  - @builtin/\{info.name} \{info.args}: \{info.about}",
+    )
+  }
+  let tail =
+    #|
+    #|It must define `async fn main`, and the prelude provides `list`, `read`, `read_lines`,
+    #|`search`, `read_json`, `edit_text` and `fail`:
+    #|
+    #|  search the repository:
+    #|    async fn main {
+    #|      for hit in search("fn trim_", "core", 10) { println(hit) }
+    #|    }
+    #|
+    #|  change a file (edit_text replaces a string that must occur exactly once):
+    #|    async fn main {
+    #|      let path = "core/trim.mbt"
+    #|      write(path, edit_text(read(path), "recent_window: 20", "recent_window: 40"))
+    #|    }
+    #|
+    #|A program can read, write and run commands in the workspace. stdout is the result, truncated
+    #|at 32KB — print the part you need, not everything you found.
+  bundled + scripts.to_string() + "\n\n" + own + tail
+}
+
+///|
 /// The `script` tool.
 ///
 /// `Exclusive` because a script can write files and run commands, which is the
 /// same reason `bash` is.
 pub fn script_tool() -> ToolDef {
-  let scripts = StringBuilder()
-  for info in builtin_scripts() {
-    scripts.write_string(
-      "\n- @builtin/\{info.name} \{info.args}: \{info.about}",
-    )
-  }
+  let head =
+    #|Run a MoonBit program against the workspace and get back only what it prints.
+    #|
+    #|Reach for this instead of a `bash` command when a step would otherwise be several reads,
+    #|a grep across the repo, a loop or an aggregation over files, a command whose raw output is
+    #|much larger than the part you need, or a program you would write just to change files. The
+    #|work happens inside the call, so the conversation receives the result rather than everything
+    #|the program had to read to produce it. For a single file, `read` is cheaper.
+    #|
   {
     name: "script",
-    description: "Run a MoonBit program against the workspace, and get back only what it prints. Use it when a step needs more than two or three reads, when you would loop or aggregate over files, or when a command's raw output is much larger than the part you need. Prefer a bundled script when one fits:" +
-    scripts.to_string() +
-    "\n\nPass `name` to run a bundled script with `args`, or `source` to run a program of your own (it must define `async fn main`; the prelude provides list, read, read_lines, search, read_json, edit_text, and fail). A script can read, write, and run commands in the workspace; stdout is the result, truncated at 32KB.",
+    description: head +
+    moonbit_program_help(
+      bundled="Bundled scripts — pass `name` and `args`:",
+      own="Or pass `source` with a program of your own.",
+    ),
     parameters: object_schema(
       [
         (
@@ -506,7 +563,7 @@ pub fn script_tool() -> ToolDef {
     // A script runs its own command (a `moon check` is seconds); the turn's
     // stop reaches it through the same process-group path `bash` uses.
     timeout_ms: None,
-    snippet: "Run a MoonBit script: bundled digests, or your own program",
+    snippet: "Run a program instead of a long chain of reads, greps or edits",
   }
 }
 
@@ -525,11 +582,15 @@ pub fn format_script_result(
   exit_code : Int,
 ) -> ToolOutput {
   let out = StringBuilder()
-  let head = truncate_script_output(stdout)
+  // Unwrapped per stream, before the `stderr:` label is added. Unwrapping the
+  // assembled text instead never fires in the case it exists for: an uncaught
+  // `fail` arrives on stderr, so the whole text begins `stderr:` and not
+  // `Failure(` — measured by the test below failing while the code looked right.
+  let head = truncate_script_output(unwrap_raise(stdout))
   if head != "" {
     out.write_string(head)
   }
-  let tail = truncate_script_output(stderr)
+  let tail = truncate_script_output(unwrap_raise(stderr))
   if tail != "" {
     if out.to_string() != "" {
       out.write_string("\n")
@@ -545,7 +606,7 @@ pub fn format_script_result(
       },
     )
   }
-  let text = unwrap_raise(out.to_string())
+  let text = out.to_string()
   if exit_code != 0 {
     return ToolOutput::error("\{text}\n\nScript exited \{exit_code}")
   }

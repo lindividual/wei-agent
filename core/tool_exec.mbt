@@ -326,8 +326,11 @@ pub fn apply_edits(
 /// right now" at a glance — the command, the file, the pattern — where JSON would bury that
 /// in punctuation. Falls back to the whole object when nothing recognisable is there, so an
 /// unfamiliar tool still says something rather than nothing.
+///
+/// `bash` and `moonbit` are here because they are what code mode's `exec` calls them: the same one
+/// line, under the two names the tool set spells a command with.
 pub fn tool_summary(arguments : Json) -> String {
-  for key in ["command", "path", "pattern", "query", "url"] {
+  for key in ["command", "bash", "moonbit", "path", "pattern", "query", "url"] {
     match arg_string(arguments, key) {
       Some(value) if value != "" => return clip_one_line(value, 120)
       _ => ()

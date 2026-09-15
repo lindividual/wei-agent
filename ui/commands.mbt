@@ -54,12 +54,16 @@ pub fn parse_command(text : String) -> Command? {
 ///
 /// Each insert ends in a space where an argument is expected, so the reader lands where the
 /// argument goes rather than having to add the space themselves.
+/// `skills_for` rather than `discovered_skills`: a skill that is switched off is not something the
+/// reader can invoke, so offering it would be offering a command that does nothing. It is the same
+/// filter the catalog and the panel use, which is what keeps the three from disagreeing about what
+/// is on.
 fn command_hints(app : App, shown : Runner) -> Array[@html.CommandHint] {
   let hints : Array[@html.CommandHint] = [
     { insert: "/name ", what: "name this session", },
     { insert: "/model ", what: "switch the model", },
   ]
-  for skill in app.discovered_skills(shown.cwd) {
+  for skill in app.skills_for(shown.cwd) {
     hints.push({ insert: "/skill:\{skill.name} ", what: skill.description, })
   }
   hints

@@ -23,8 +23,15 @@ async test "settings round trip through a file" {
     .with_saved_api_key("sk-abc")
     .with_skill_enabled("alpha", false)
     .with_skill_enabled("beta", false)
+    .with_limits(Some(40), Some(0.25), Some(1800))
   save_settings(home, settings)
-  assert_eq(load_settings(home), settings)
+  let loaded = load_settings(home)
+  assert_eq(loaded, settings)
+  // The limits survive the file as their three states, seconds included: this is the read a restart
+  // does before the panel can show anything.
+  assert_eq(loaded.max_rounds, Some(40))
+  assert_eq(loaded.max_cost, Some(0.25))
+  assert_eq(loaded.max_seconds, Some(1800))
   // The write goes through a temporary file, and it is the rename that publishes it.
   assert_true(path_exists(settings_path(home)))
   assert_false(path_exists("\{settings_path(home)}.tmp"))
@@ -33,6 +40,7 @@ async test "settings round trip through a file" {
   let cleared = load_settings(home)
   assert_eq(cleared.saved_api_key, "")
   assert_eq(cleared.disabled_skills.length(), 0)
+  assert_true(cleared.max_seconds is None)
 }
 
 ///|

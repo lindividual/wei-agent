@@ -308,8 +308,18 @@ async fn App::load_skills(self : App, cwd : String) -> Unit {
 ///
 /// The instructions come before the catalog, which is the order of specificity: how this workspace
 /// wants to work, then what can be asked of it.
-async fn App::system_prompt(self : App, runner : Runner) -> String {
-  @core.build_system_prompt(runner.cwd, self.tools, sections=[
+/// The mode is a parameter with the current setting as its default, and the pair matters: the two
+/// must agree, because the prompt names the tools the request also sends. A caller that has already
+/// read the mode — the turn, which reads it once and uses it for both the schema and the prompt —
+/// passes it, so a settings change arriving mid-expression cannot produce a prompt that describes
+/// a tool set the request does not carry. The callers that want "what would a turn send now" — the
+/// context figure — get the current setting.
+async fn App::system_prompt(
+  self : App,
+  runner : Runner,
+  mode? : @core.ToolMode = self.settings.tool_mode,
+) -> String {
+  @core.build_system_prompt(runner.cwd, @core.tools_for_mode(mode), mode~, sections=[
     self.instructions(runner.cwd).text,
     @core.skill_catalog_prompt(self.skills_for(runner.cwd)),
   ])
@@ -335,7 +345,18 @@ async fn App::instructions(self : App, cwd : String) -> @core.Instructions {
 /// Takes the prompt rather than building it, because the two callers are already async for other
 /// reasons and a second read of `AGENTS.md` could see a different file than the one that is sent.
 fn App::overhead_tokens(self : App, prompt : String) -> Int {
-  @core.request_overhead_tokens(prompt, self.tools)
+  @core.request_overhead_tokens(prompt, self.tools())
+}
+
+///|
+/// The tools a turn in this process is given.
+///
+/// Derived from the settings rather than stored, so the mode, the prompt and the tool list sent to
+/// the model are one decision. The alternative — an array built at startup and refreshed on every
+/// settings change — is a field that a missed refresh leaves silently disagreeing with the panel
+/// the reader is looking at.
+fn App::tools(self : App) -> Array[@core.ToolDef] {
+  @core.tools_for_mode(self.settings.tool_mode)
 }
 
 ///|
@@ -374,16 +395,12 @@ struct App {
   settings_lock : @async.Mutex
   /// The address the page is served on, for the panel to report.
   address : String
-  tools : Array[@core.ToolDef]
-  /// The limits this process was launched with: `--max-cost` and `--max-rounds`, each `None`
-  /// when the flag was not given. Kept as the flags rather than as resolved numbers so that
-  /// changing the saved setting re-derives from them, and a flag keeps its precedence.
+  /// The limits this process was launched with: `--max-cost`, `--max-rounds` and `--max-seconds`,
+  /// each `None` when the flag was not given. Kept as the flags rather than as resolved numbers so
+  /// that changing the saved setting re-derives from them, and a flag keeps its precedence.
   flag_max_cost : Double?
   flag_max_rounds : Int?
-  /// Longest one turn may take, resolved once at startup. Not part of `Limits` because it has no
-  /// saved counterpart: it is a backstop for a hang, not a spending policy, so there is nothing for
-  /// the panel to edit and nothing to re-derive when the panel saves.
-  max_seconds : Int
+  flag_max_seconds : Int?
   /// The limits a turn will actually run under, and where each came from.
   ///
   /// Mutable because the panel can change the saved value, and read at the top of every turn —

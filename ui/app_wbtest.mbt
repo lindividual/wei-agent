@@ -105,11 +105,10 @@ fn test_app_in(home : String) -> App {
     settings_lock: @async.Mutex(),
     address: "127.0.0.1:8790",
     flag_max_cost: None,
-    max_seconds: 0,
     flag_max_rounds: None,
+    flag_max_seconds: None,
     // The defaults, which is what a process launched with no limit flags and no settings file has.
-    limits: @core.choose_limits(None, None, @core.AppSettings::new()),
-    tools: [],
+    limits: @core.choose_limits(None, None, None, @core.AppSettings::new()),
     hub: @server.Hub::new(),
     registry: [],
     jobs: @core.JobStore::new(),
@@ -996,40 +995,63 @@ async test "a saved limit is adopted on the next turn, and reported as it will b
   let message = apply_settings_post(
     app,
     runner,
-    @core.SettingsPost::ApplyLimits(max_rounds=Some(40), max_cost=Some(0.25)),
+    @core.SettingsPost::ApplyLimits(
+      max_rounds=Some(40),
+      max_cost=Some(0.25),
+      max_seconds=Some(1800),
+    ),
   )
   assert_true(message.contains("limits saved"), msg=message)
   assert_true(message.contains("0.25"), msg=message)
+  assert_true(message.contains("1800"), msg=message)
   // In force immediately: the next turn reads the app's limits, not the file.
   assert_eq(app.limits.max_rounds.value, 40.0)
   assert_eq(app.limits.max_rounds.source, @core.Saved)
   assert_eq(app.limits.max_cost.value, 0.25)
   assert_eq(app.limits.max_cost.source, @core.Saved)
+  assert_eq(app.limits.max_seconds.value, 1800.0)
+  assert_eq(app.limits.max_seconds.source, @core.Saved)
   // And on disk, so a restart keeps them.
   let reloaded = @platform.load_settings(home)
   assert_eq(reloaded.max_rounds, Some(40))
   assert_eq(reloaded.max_cost, Some(0.25))
-  // Zero is kept as zero rather than treated as "unset": it is how a reader removes the bound.
-  ignore(
-    apply_settings_post(
-      app,
-      runner,
-      @core.SettingsPost::ApplyLimits(max_rounds=Some(0), max_cost=Some(0.0)),
+  assert_eq(reloaded.max_seconds, Some(1800))
+  // Zero is kept as zero rather than treated as "unset": it is how a reader removes the bound,
+  // and the status line says so in words rather than printing a bound of zero.
+  let off = apply_settings_post(
+    app,
+    runner,
+    @core.SettingsPost::ApplyLimits(
+      max_rounds=Some(0),
+      max_cost=Some(0.0),
+      max_seconds=Some(0),
     ),
   )
   assert_eq(app.limits.max_cost.value, 0.0)
   assert_eq(@platform.load_settings(home).max_cost, Some(0.0))
-  // Clearing both goes back to the built-in defaults rather than to no bound, and the file records
-  // that the reader has no opinion.
+  assert_true(off.contains("no time bound"), msg=off)
+  // Clearing all of them goes back to the built-in defaults rather than to no bound, and the file
+  // records that the reader has no opinion.
   let cleared = apply_settings_post(
     app,
     runner,
-    @core.SettingsPost::ApplyLimits(max_rounds=None, max_cost=None),
+    @core.SettingsPost::ApplyLimits(
+      max_rounds=None,
+      max_cost=None,
+      max_seconds=None,
+    ),
   )
+  // The default is back, and nothing is saved — an empty box is "no opinion", not a bound.
   assert_eq(app.limits.max_rounds.source, @core.Default)
   assert_eq(app.limits.max_cost.value, @core.default_max_cost())
+  assert_eq(
+    app.limits.max_seconds.value,
+    @core.default_max_seconds().to_double(),
+  )
   assert_true(@platform.load_settings(home).max_cost is None)
+  assert_true(@platform.load_settings(home).max_seconds is None)
   assert_true(cleared.contains("200 calls"), msg=cleared)
+  assert_true(cleared.contains("1800s"), msg=cleared)
 }
 
 ///|
@@ -1044,28 +1066,44 @@ async test "a flag keeps its precedence over a saved limit, and says so" {
     ..base,
     flag_max_cost: Some(0.1),
     flag_max_rounds: None,
-    limits: @core.choose_limits(None, Some(0.1), @core.AppSettings::new()),
+    flag_max_seconds: Some(60),
+    limits: @core.choose_limits(
+      None,
+      Some(0.1),
+      Some(60),
+      @core.AppSettings::new(),
+    ),
   }
-  // The run flag wins even before anything is saved.
+  // The run flags win even before anything is saved.
   assert_eq(app.limits.max_cost.value, 0.1)
   assert_eq(app.limits.max_cost.source, @core.Flag)
+  assert_eq(app.limits.max_seconds.value, 60.0)
+  assert_eq(app.limits.max_seconds.source, @core.Flag)
   let runner = runner_at("/store/a.jsonl", 0)
   let message = apply_settings_post(
     app,
     runner,
-    @core.SettingsPost::ApplyLimits(max_rounds=Some(40), max_cost=Some(5.0)),
+    @core.SettingsPost::ApplyLimits(
+      max_rounds=Some(40),
+      max_cost=Some(5.0),
+      max_seconds=Some(1800),
+    ),
   )
-  // Saved, because the setting is still what a restart without the flag would use.
+  // Saved, because the setting is still what a restart without the flags would use.
   let reloaded = @platform.load_settings(home)
   assert_eq(reloaded.max_cost, Some(5.0))
   assert_eq(reloaded.max_rounds, Some(40))
-  // But the cost limit in force is still the flag's, and the call limit — which the flag did not
-  // pin — is the saved one.
+  assert_eq(reloaded.max_seconds, Some(1800))
+  // But the cost and seconds limits in force are still the flags', and the call limit — which no
+  // flag pinned — is the saved one.
   assert_eq(app.limits.max_cost.value, 0.1)
   assert_eq(app.limits.max_cost.source, @core.Flag)
+  assert_eq(app.limits.max_seconds.value, 60.0)
+  assert_eq(app.limits.max_seconds.source, @core.Flag)
   assert_eq(app.limits.max_rounds.value, 40.0)
   assert_eq(app.limits.max_rounds.source, @core.Saved)
   assert_true(message.contains("--max-cost"), msg=message)
+  assert_true(message.contains("--max-seconds"), msg=message)
   assert_true(message.contains("still in force"), msg=message)
 }
 
@@ -1266,15 +1304,21 @@ test "a finished turn says nothing on the status line; its figures are on the fo
 test "the limits are parsed, and zero is distinct from absent" {
   assert_true(parse_args(["ui"]).max_cost is None)
   assert_true(parse_args(["ui"]).max_rounds is None)
+  assert_true(parse_args(["ui"]).max_seconds is None)
   assert_eq(parse_args(["ui", "--max-cost", "0.25"]).max_cost, Some(0.25))
   assert_eq(parse_args(["ui", "--max-rounds", "40"]).max_rounds, Some(40))
+  assert_eq(parse_args(["ui", "--max-seconds", "1800"]).max_seconds, Some(1800))
   // Zero is the off switch, which is why it cannot be collapsed into "not given".
   assert_eq(parse_args(["ui", "--max-cost", "0"]).max_cost, Some(0.0))
   assert_eq(parse_args(["ui", "--max-rounds", "0"]).max_rounds, Some(0))
-  // Each flag is independent: setting one does not clear the other.
-  let both = parse_args(["ui", "--max-cost", "2", "--max-rounds", "7"])
-  assert_eq(both.max_cost, Some(2.0))
-  assert_eq(both.max_rounds, Some(7))
+  assert_eq(parse_args(["ui", "--max-seconds", "0"]).max_seconds, Some(0))
+  // Each flag is independent: setting one does not clear the others.
+  let all = parse_args([
+    "ui", "--max-cost", "2", "--max-rounds", "7", "--max-seconds", "90",
+  ])
+  assert_eq(all.max_cost, Some(2.0))
+  assert_eq(all.max_rounds, Some(7))
+  assert_eq(all.max_seconds, Some(90))
   // A malformed value is refused rather than becoming zero, which would silently mean unlimited —
   // the opposite of what someone typing a limit intends.
   let bad = try {
@@ -1286,6 +1330,15 @@ test "the limits are parsed, and zero is distinct from absent" {
     raised => raised
   }
   assert_true(bad, msg="a non-numeric cost should raise")
+  let bad_seconds = try {
+    ignore(parse_args(["ui", "--max-seconds", "soon"]))
+    false
+  } catch {
+    _ => true
+  } noraise {
+    raised => raised
+  }
+  assert_true(bad_seconds, msg="a non-numeric number of seconds should raise")
   let negative = try {
     ignore(parse_args(["ui", "--max-cost", "-1"]))
     false
@@ -1295,6 +1348,15 @@ test "the limits are parsed, and zero is distinct from absent" {
     raised => raised
   }
   assert_true(negative, msg="a negative cost should raise")
+  let negative_seconds = try {
+    ignore(parse_args(["ui", "--max-seconds", "-1"]))
+    false
+  } catch {
+    _ => true
+  } noraise {
+    raised => raised
+  }
+  assert_true(negative_seconds, msg="a negative number of seconds should raise")
 }
 
 // ── the model, per session ─────────────────────────────────────────────────
@@ -1459,4 +1521,128 @@ test "opening a session reports why its last turn ended" {
   ])
   let quiet = Runner::new(plain, "/store/t.jsonl", "deepseek-v4-flash")
   assert_false(quiet.status.contains("limit"), msg=quiet.status)
+}
+
+///|
+/// Switching a skill off works in a workspace whose skills have never been scanned.
+///
+/// This is the bug the browser check hit, and it is worth its own test because the failure is
+/// silent and self-erasing: `ApplySkills` derives the new disabled list *from the catalog*, so an
+/// unscanned workspace computes an empty list from an empty catalog, discards the reader's change,
+/// and then renders a panel that loaded the catalog — showing the skill back on, with no error
+/// anywhere. The workspace in this test is one no turn has run in, which is the normal state of a
+/// directory that was just added.
+async test "a skill can be switched off before any turn has run" {
+  let home = "_build/app_skill_apply/\{@core.new_entry_id()}"
+  @platform.make_dirs("\{home}/.pi/agent/skills/demo")
+  @platform.write_text(
+    "\{home}/.pi/agent/skills/demo/SKILL.md",
+    "---\nname: demo\ndescription: A skill for tests.\n---\n",
+  )
+  let app = test_app_in(home)
+  // A registry entry, because `app.shown()` is `registry[0]` when nothing is being displayed — and
+  // an empty registry is an abort, not a failed assertion.
+  let shown = runner_at("/tmp/store/a.jsonl", 1)
+  app.display(shown)
+  // Deliberately no `load_skills`: nothing has looked at this directory yet, which is exactly the
+  // state the panel's Apply used to be reading.
+  assert_eq(app.discovered_skills(shown.cwd).length(), 0)
+  let message = apply_settings_post(app, shown, @core.ApplySkills(enabled=[]))
+  // The change landed, and the message counts the catalog rather than an empty cache.
+  assert_true(message.contains("0 skill(s) enabled"), msg=message)
+  assert_eq(app.skills_for(shown.cwd).length(), 0)
+  assert_eq(app.settings.disabled_skills, ["demo"])
+  // The skill is still discoverable — switching it back on must not need the file to be found again.
+  assert_eq(app.discovered_skills(shown.cwd).length(), 1)
+}
+
+///|
+/// The `/` hints offer only the skills that are on.
+///
+/// A switched-off skill cannot be invoked, so listing it offers a command that does nothing — and
+/// the reader has just switched it off, which makes the hint the one place the switch visibly did
+/// not take.
+async test "command hints list enabled skills only" {
+  let home = "_build/app_hints_test/\{@core.new_entry_id()}"
+  @platform.make_dirs("\{home}/.pi/agent/skills/demo")
+  @platform.write_text(
+    "\{home}/.pi/agent/skills/demo/SKILL.md",
+    "---\nname: demo\ndescription: A skill for tests.\n---\n",
+  )
+  let app = test_app_in(home)
+  let shown = runner_at("/tmp/store/a.jsonl", 1)
+  app.display(shown)
+  app.load_skills(shown.cwd)
+  let insertions = () => {
+    let out : Array[String] = []
+    for hint in command_hints(app, shown) {
+      out.push(hint.insert)
+    }
+    out
+  }
+  assert_true(insertions().contains("/skill:demo "), msg=insertions().join(","))
+  app.settings = app.settings.with_skill_enabled("demo", false)
+  assert_false(
+    insertions().contains("/skill:demo "),
+    msg=insertions().join(","),
+  )
+  // The commands that are not skills are always there: this filters the catalog, not the list.
+  assert_true(insertions().contains("/name "))
+  assert_true(insertions().contains("/model "))
+}
+
+///|
+/// Switching the tool mode changes what the next turn is given, and what the prompt describes.
+///
+/// The pair is the whole point: the request carries a tool schema and a prompt that names the same
+/// tools, and a mode that changed one of them would describe a tool the model does not have. The
+/// prompt is built from the mode the turn read, not from a second read of the setting, so the two
+/// cannot come from different values.
+async test "a saved tool mode changes the tools and the prompt of the next turn" {
+  let home = "_build/app_mode_test/\{@core.new_entry_id()}"
+  @platform.make_dirs(home)
+  let app = test_app_in(home)
+  let runner = runner_at("/store/a.jsonl", 0)
+  // The default is the eight tools, and the prompt says so.
+  assert_eq(app.tools().length(), 8)
+  let before = app.system_prompt(runner)
+  assert_true(before.contains("- read:"), msg=before)
+
+  let message = apply_settings_post(
+    app,
+    runner,
+    @core.SettingsPost::ApplyToolMode(mode="code"),
+  )
+  assert_true(message.contains("code mode"), msg=message)
+  assert_true(message.contains("2 tools"), msg=message)
+  // In force immediately for the next turn: two tools, and a prompt that no longer names the file
+  // tools or tells the model to reach for them.
+  assert_eq(app.tools().length(), 2)
+  assert_eq(app.tools()[0].name, "exec")
+  let after = app.system_prompt(runner)
+  assert_true(after.contains("- exec:"), msg=after)
+  assert_false(after.contains("- read:"), msg=after)
+  assert_false(
+    after.contains("For a single file, `read` is cheaper"),
+    msg=after,
+  )
+  // Persisted, so a restart keeps it — and an unreadable value in the file is the default mode
+  // rather than a broken process.
+  assert_eq(@platform.load_settings(home).tool_mode, @core.ToolMode::Code)
+  @platform.write_text(@platform.settings_path(home), "{\"tool_mode\":\"cod\"}")
+  assert_eq(
+    @platform.load_settings(home).tool_mode,
+    @core.ToolMode::Tools,
+    msg="an unknown mode reads as the default",
+  )
+  // And back, so the round trip is checked in both directions.
+  ignore(
+    apply_settings_post(
+      app,
+      runner,
+      @core.SettingsPost::ApplyToolMode(mode="tools"),
+    ),
+  )
+  assert_eq(app.tools().length(), 8)
+  assert_eq(@platform.load_settings(home).tool_mode, @core.ToolMode::Tools)
 }

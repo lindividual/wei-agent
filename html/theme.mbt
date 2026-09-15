@@ -405,6 +405,13 @@ pub fn stylesheet() -> String {
     ".settings .agents-form { display: flex; flex-direction: column; gap: var(--space-2); }",
     ".settings .agents-label { color: var(--muted); font-size: var(--text-xs); }",
     ".settings .agents-form textarea { font: inherit; font-size: var(--text-sm); color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space-2); resize: vertical; }",
+    // The mode: two rows, the chosen one marked. The description is the part that matters — it is
+    // the only place the panel says what code mode costs, and it is why the rows are not a select.
+     ".settings .mode-list { display: flex; flex-direction: column; gap: var(--space-1); }",
+    ".settings label.mode { display: flex; gap: var(--space-2); align-items: flex-start; padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }",
+    ".settings label.mode:hover { background: var(--surface); }", ".settings label.mode.off { color: var(--muted); }",
+    ".settings .mode-text { min-width: 0; }", ".settings .mode-text b { display: block; font-family: var(--mono); }",
+    ".settings .mode-text i { font-style: normal; font-size: var(--text-xs); }",
     ".settings .btn-row { display: flex; align-items: center; gap: var(--space-2); }",
     ".settings .btn-row .hint { margin: 0; }", ".settings .skill-list { max-height: 16rem; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); }",
     ".settings label.skill { display: flex; gap: var(--space-2); align-items: flex-start; padding: var(--space-2); border-bottom: 1px solid var(--line); cursor: pointer; }",

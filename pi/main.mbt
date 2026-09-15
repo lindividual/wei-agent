@@ -36,13 +36,36 @@ async fn api_key(home : String) -> String? {
 }
 
 ///|
+/// The prompt, and the mode to run it in.
+///
+/// `--mode tools|code` is the only flag, because it is the one a reader wants a second run of: the
+/// saved setting already applies, and a second look at a prompt in the other mode is the reason to
+/// type one. Everything left over is the prompt.
+fn parse_args(argv : Array[String]) -> (String, @core.ToolMode?) {
+  let words : Array[String] = []
+  let mut mode : @core.ToolMode? = None
+  let mut index = 1
+  while index < argv.length() {
+    if argv[index] == "--mode" && index + 1 < argv.length() {
+      mode = Some(@core.parse_tool_mode(argv[index + 1]))
+      index += 2
+      continue
+    }
+    words.push(argv[index])
+    index += 1
+  }
+  let prompt = if words.is_empty() {
+    "List the files in the current directory, then read the first one you find and summarize it in one sentence."
+  } else {
+    words.join(" ")
+  }
+  (prompt, mode)
+}
+
+///|
 async fn main {
   let args = @env.args()
-  let prompt = if args.length() > 1 {
-    args[1]
-  } else {
-    "List the files in the current directory, then read the first one you find and summarize it in one sentence."
-  }
+  let (prompt, flag_mode) = parse_args(args)
   let home = match @env.get_env_var("HOME") {
     Some(home) => home
     None => abort("HOME is not set")
@@ -66,16 +89,22 @@ async fn main {
   }
   @platform.create_session(path, header)
 
-  let tools = @core.builtin_tools()
+  // The mode is the saved setting, unless the flag says otherwise — the same precedence the server
+  // uses, so a one-shot turn runs what the panel is showing.
+  let settings = @platform.load_settings(home)
+  let mode = match flag_mode {
+    Some(mode) => mode
+    None => settings.tool_mode
+  }
+  let tools = @core.tools_for_mode(mode)
   // Same discovery as the server, so a one-shot CLI turn sees the skills and the instructions a
   // web turn would.
   let skills = @platform.discover_skills(cwd, home)
-  let settings = @platform.load_settings(home)
   let instructions = @core.choose_instructions(
     settings,
     @platform.workspace_agents_md(cwd),
   )
-  let system_prompt = @core.build_system_prompt(cwd, tools, sections=[
+  let system_prompt = @core.build_system_prompt(cwd, tools, mode~, sections=[
     instructions.text,
     @core.skill_catalog_prompt(skills),
   ])
@@ -89,6 +118,7 @@ async fn main {
   )
 
   println("prompt   \{prompt}")
+  println("mode     \{mode.to_string()} (\{tools.length()} tools)")
   println("cwd      \{cwd}")
   println("session  \{path}")
   println("")

@@ -6,7 +6,7 @@
 /// so a panel that appeared to change them would be lying about what it can do, and they are shown
 /// as read-only facts instead. What is stored here is exactly what every turn reads fresh: a key,
 /// the skills that should stay out of the catalog, the instructions a workspace with no `AGENTS.md`
-/// of its own gets, and the two limits that bound a turn.
+/// of its own gets, and the limits that bound a turn.
 ///
 /// The limits belong here for the same reason the skills do. They are read at the top of every
 /// turn, so a change takes effect on the next one — which matters most in exactly the case the
@@ -43,6 +43,14 @@ pub(all) struct AppSettings {
   max_rounds : Int?
   /// Most one turn may cost, in US dollars, or `None` when the reader has not said.
   max_cost : Double?
+  /// Longest one turn may take, in seconds, or `None` when the reader has not said.
+  max_seconds : Int?
+  /// Which tools a turn is given: the eight built-in ones, or code mode's two.
+  ///
+  /// Changeable mid-session, unlike the model or the endpoint, because it is honored on the next
+  /// turn: the mode decides which tools are *declared*, and a declaration is only read when a
+  /// request is built.
+  tool_mode : ToolMode
 } derive(Eq, Debug)
 
 ///|
@@ -53,7 +61,18 @@ pub fn AppSettings::new() -> AppSettings {
     agents_md: "",
     max_rounds: None,
     max_cost: None,
+    max_seconds: None,
+    tool_mode: Tools,
   }
+}
+
+///|
+/// A copy with a different tool mode.
+pub fn AppSettings::with_tool_mode(
+  self : AppSettings,
+  mode : ToolMode,
+) -> AppSettings {
+  { ..self, tool_mode: mode, }
 }
 
 ///|
@@ -91,6 +110,8 @@ pub fn AppSettings::with_skill_enabled(
     agents_md: self.agents_md,
     max_rounds: self.max_rounds,
     max_cost: self.max_cost,
+    max_seconds: self.max_seconds,
+    tool_mode: self.tool_mode,
   }
 }
 
@@ -118,6 +139,8 @@ pub fn AppSettings::with_disabled_skills(
     agents_md: self.agents_md,
     max_rounds: self.max_rounds,
     max_cost: self.max_cost,
+    max_seconds: self.max_seconds,
+    tool_mode: self.tool_mode,
   }
 }
 
@@ -134,6 +157,8 @@ pub fn AppSettings::with_saved_api_key(
     agents_md: self.agents_md,
     max_rounds: self.max_rounds,
     max_cost: self.max_cost,
+    max_seconds: self.max_seconds,
+    tool_mode: self.tool_mode,
   }
 }
 
@@ -154,6 +179,8 @@ pub fn AppSettings::with_agents_md(
     agents_md: text.trim().to_owned(),
     max_rounds: self.max_rounds,
     max_cost: self.max_cost,
+    max_seconds: self.max_seconds,
+    tool_mode: self.tool_mode,
   }
 }
 
@@ -167,6 +194,7 @@ pub fn AppSettings::with_limits(
   self : AppSettings,
   max_rounds : Int?,
   max_cost : Double?,
+  max_seconds : Int?,
 ) -> AppSettings {
   {
     saved_api_key: self.saved_api_key,
@@ -174,6 +202,8 @@ pub fn AppSettings::with_limits(
     agents_md: self.agents_md,
     max_rounds,
     max_cost,
+    max_seconds,
+    tool_mode: self.tool_mode,
   }
 }
 
@@ -345,10 +375,11 @@ pub(all) struct Limit {
 } derive(Eq, Debug)
 
 ///|
-/// The two limits in force for a turn.
+/// The limits in force for a turn.
 pub(all) struct Limits {
   max_rounds : Limit
   max_cost : Limit
+  max_seconds : Limit
 } derive(Eq, Debug)
 
 ///|
@@ -392,6 +423,7 @@ pub(all) struct Instructions {
 pub fn choose_limits(
   flag_rounds : Int?,
   flag_cost : Double?,
+  flag_seconds : Int?,
   settings : AppSettings,
 ) -> Limits {
   let rounds = match flag_rounds {
@@ -410,7 +442,15 @@ pub fn choose_limits(
         None => { value: default_max_cost(), source: Default, }
       }
   }
-  { max_rounds: rounds, max_cost: cost, }
+  let seconds = match flag_seconds {
+    Some(value) => { value: value.to_double(), source: Flag, }
+    None =>
+      match settings.max_seconds {
+        Some(value) => { value: value.to_double(), source: Saved, }
+        None => { value: default_max_seconds().to_double(), source: Default, }
+      }
+  }
+  { max_rounds: rounds, max_cost: cost, max_seconds: seconds, }
 }
 
 ///|
@@ -475,6 +515,10 @@ pub fn encode_app_settings(settings : AppSettings) -> String {
     Some(value) => Json::number(value)
     None => Json::null()
   }
+  let seconds : Json = match settings.max_seconds {
+    Some(value) => Json::number(value.to_double())
+    None => Json::null()
+  }
   Json::object(
     Map([
       ("saved_api_key", Json::string(settings.saved_api_key)),
@@ -482,6 +526,8 @@ pub fn encode_app_settings(settings : AppSettings) -> String {
       ("agents_md", Json::string(settings.agents_md)),
       ("max_rounds", rounds),
       ("max_cost", cost),
+      ("max_seconds", seconds),
+      ("tool_mode", Json::string(settings.tool_mode.to_string())),
     ]),
   ).stringify()
 }
@@ -529,6 +575,10 @@ pub fn decode_app_settings(text : String) -> AppSettings {
     Some(Number(value, ..)) if value >= 0.0 && !value.is_nan() => Some(value)
     _ => None
   }
+  let max_seconds = match settings_field(parsed, "max_seconds") {
+    Some(Number(value, ..)) if value >= 0.0 => Some(value.to_int())
+    _ => None
+  }
   let agents_md = match settings_field(parsed, "agents_md") {
     // Trimmed here as well as in `with_agents_md`, so a hand-edited file behaves like one the
     // panel wrote. Not trimming would make the box and the preview disagree about the same text,
@@ -536,7 +586,21 @@ pub fn decode_app_settings(text : String) -> AppSettings {
     Some(String(text)) => text.trim().to_owned()
     _ => ""
   }
-  { saved_api_key, disabled_skills, agents_md, max_rounds, max_cost, }
+  // An unrecognised word reads as the default mode: a typo in a hand-edited file should cost the
+  // reader a mode, not the file.
+  let tool_mode = match settings_field(parsed, "tool_mode") {
+    Some(String(name)) => parse_tool_mode(name)
+    _ => Tools
+  }
+  {
+    saved_api_key,
+    disabled_skills,
+    agents_md,
+    max_rounds,
+    max_cost,
+    max_seconds,
+    tool_mode,
+  }
 }
 
 ///|
@@ -569,13 +633,16 @@ pub(all) enum SettingsPost {
   /// The complete set of skill names that should be on. A set rather than a toggle, so applying
   /// it has one outcome: what was posted is what is enabled afterwards.
   ApplySkills(enabled~ : Array[String])
-  /// The two turn limits. `None` clears the saved value, which is different from `Some(0)` — that
+  /// The turn limits. `None` clears the saved value, which is different from `Some(0)` — that
   /// is the reader saying "no bound at all".
-  ApplyLimits(max_rounds~ : Int?, max_cost~ : Double?)
+  ApplyLimits(max_rounds~ : Int?, max_cost~ : Double?, max_seconds~ : Int?)
   /// The fallback instructions, whole. Wholesale rather than patched, like the skills: what the
   /// textarea contained is what the next workspace without an `AGENTS.md` will get, and an empty
   /// one is a reader saying they want no fallback.
   ApplyAgentsMd(text~ : String)
+  /// Which tools a turn gets. Its own form rather than a field on another, because it is the one
+  /// edit whose whole effect is on the next request.
+  ApplyToolMode(mode~ : String)
 } derive(Eq, Debug)
 
 ///|
@@ -590,13 +657,17 @@ pub fn parse_settings_post(body : String) -> SettingsPost? {
   let mut is_skills = false
   let mut is_limits = false
   let mut is_agents = false
+  let mut is_mode = false
+  let mut tool_mode : String? = None
   let mut agents_md : String? = None
   let mut max_rounds : Int? = None
   let mut max_cost : Double? = None
+  let mut max_seconds : Int? = None
   // Which limit fields the form carried at all, as distinct from carrying them empty. An empty
   // field means "no opinion"; a field that is not there means the form was not about limits.
   let mut saw_rounds = false
   let mut saw_cost = false
+  let mut saw_seconds = false
   let skills : Array[String] = []
   for field in fields {
     let (name, value) = field
@@ -615,6 +686,11 @@ pub fn parse_settings_post(body : String) -> SettingsPost? {
       // And for the instructions form, where the empty body is the case that matters most: a
       // reader who wants no fallback instructions empties the textarea and presses Apply.
       is_agents = true
+    } else if name == "tool_mode" {
+      // Its own marker as well as its own value: the form is a pair of radio buttons, and the one
+      // that is chosen is the only field it sends.
+      is_mode = true
+      tool_mode = Some(value)
     } else if name == "agents_md" {
       agents_md = Some(value)
     } else if name == "max_rounds" {
@@ -623,13 +699,26 @@ pub fn parse_settings_post(body : String) -> SettingsPost? {
     } else if name == "max_cost" {
       saw_cost = true
       max_cost = parse_limit_cost(value)
+    } else if name == "max_seconds" {
+      saw_seconds = true
+      max_seconds = parse_limit_int(value)
     } else if name == "skill" && value != "" && !skills.contains(value) {
       skills.push(value)
     }
   }
   // The markers first, since each one is what makes an otherwise-empty body mean something.
+  if is_mode {
+    return Some(
+      ApplyToolMode(
+        mode=match tool_mode {
+          Some(value) => value
+          None => ""
+        },
+      ),
+    )
+  }
   if is_limits {
-    return Some(ApplyLimits(max_rounds~, max_cost~))
+    return Some(ApplyLimits(max_rounds~, max_cost~, max_seconds~))
   }
   if is_skills {
     return Some(ApplySkills(enabled=skills))
@@ -653,8 +742,8 @@ pub fn parse_settings_post(body : String) -> SettingsPost? {
     None =>
       // A limit field with no marker is still a limits post: `curl -d 'max_cost=0.5'` is a
       // reasonable thing to type, and rejecting it would only teach the wrong thing.
-      if saw_rounds || saw_cost {
-        Some(ApplyLimits(max_rounds~, max_cost~))
+      if saw_rounds || saw_cost || saw_seconds {
+        Some(ApplyLimits(max_rounds~, max_cost~, max_seconds~))
       } else {
         None
       }

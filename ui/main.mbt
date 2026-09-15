@@ -28,7 +28,17 @@ async fn main {
   let home = home_dir()
   // Read before the key is resolved, because the saved key is one of the three places one can
   // come from. A settings file that cannot be read is the empty settings, so this cannot fail.
-  let settings = @platform.load_settings(home)
+  // The mode this run starts in. `--mode` wins over the saved setting, like the limits: a flag is
+  // something a person typed for this run, and the saved value is what applies when nobody did.
+  // The output files a run that is over left behind. Pruned by age rather than cleared: the
+  // directory is shared with any other server running on this machine.
+  @platform.clear_job_outputs(@env.now().reinterpret_as_int64())
+  let mut settings = @platform.load_settings(home)
+  match args.mode {
+    Some(mode) =>
+      settings = settings.with_tool_mode(@core.parse_tool_mode(mode))
+    None => ()
+  }
   let env_key = environment_key()
   let pi_key = pi_api_key(home)
   let choice = @core.choose_api_key(env_key, settings.saved_api_key, pi_key)
@@ -71,12 +81,13 @@ async fn main {
     address: "127.0.0.1:\{args.port}",
     flag_max_cost: args.max_cost,
     flag_max_rounds: args.max_rounds,
-    max_seconds: match args.max_seconds {
-      Some(value) => value
-      None => @core.default_max_seconds()
-    },
-    limits: @core.choose_limits(args.max_rounds, args.max_cost, settings),
-    tools: @core.builtin_tools(),
+    flag_max_seconds: args.max_seconds,
+    limits: @core.choose_limits(
+      args.max_rounds,
+      args.max_cost,
+      args.max_seconds,
+      settings,
+    ),
     hub: @server.Hub::new(),
     registry: [first],
     // The records from last time, not an empty store. A background job outlives the tool call that
@@ -107,6 +118,12 @@ async fn main {
   }
   log("pi-mb   http://127.0.0.1:\{args.port}")
   log("model   \{args.model}")
+  // Which tools a turn gets, and where the answer came from. A reader who ran `--mode code` and is
+  // wondering why the model is behaving differently should be able to see it without opening the
+  // panel — and `saved` says the panel is where it came from.
+  log(
+    "mode    \{app.settings.tool_mode.to_string()} (\{app.tools().length()} tools\{if args.mode is Some(_) { ", --mode" } else { ", saved" }})",
+  )
   log("cwd     \{cwd}")
   log("session \{first.path}")
   log("store   \{root}")

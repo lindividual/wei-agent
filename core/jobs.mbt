@@ -44,6 +44,21 @@ pub fn JobStatus::is_live(self : JobStatus) -> Bool {
 }
 
 ///|
+/// Where a job's output is being written, and how much of it has been handed back.
+///
+/// Paths rather than file handles because the job's writer is a process of its own: the shell exits
+/// the moment the command is backgrounded, and the child that inherits the file keeps writing to it
+/// with nothing of ours left open.
+pub(all) struct JobOutput {
+  out_path : String
+  err_path : String
+  /// Bytes of each stream that the result of the call which started the job already showed. What
+  /// `wait` returns starts after them, so waiting twice returns each line once.
+  out_read : Int
+  err_read : Int
+} derive(Eq, Debug)
+
+///|
 /// One background job.
 pub(all) struct Job {
   /// `<kind>-N`, as dsh issues them.
@@ -68,6 +83,26 @@ pub(all) struct Job {
   pids : Array[Int]
   /// The last output seen, bounded, so the panel can say what it is doing.
   mut tail : String
+  /// Where the output is, when there is somewhere to read it from.
+  ///
+  /// Not persisted, and `None` for a job read back from disk after a restart: the files belong to
+  /// the run that made them, so a path from a previous run is a path that is gone. `wait` says so
+  /// rather than reading whatever now happens to be at that name.
+  mut output : JobOutput?
+  /// Whether the tool call that started this job is still in flight.
+  ///
+  /// The pids are learned *from* that call, and that call is also what knows what the command left
+  /// running: the shell of a backgrounded command exits within milliseconds, while the call that
+  /// started it is still reading the process table. In that window the process table already looks
+  /// finished and nothing has been recorded yet, so `settle_gone` leaves an open call alone.
+  ///
+  /// Measured: without this, a backgrounded `sh -c 'sleep 2; echo …'` was recorded as "exited on its
+  /// own" 20ms after it started, on the first of three attempts — and the record that the whole
+  /// feature exists for was gone, along with the running child it pointed at.
+  ///
+  /// Only ever true in the process that started the call, so it is not persisted; a job read back
+  /// from disk has nothing left to wait for.
+  mut call_open : Bool
 } derive(Debug)
 
 ///|
@@ -143,8 +178,22 @@ pub fn JobStore::start(
     detail: "",
     pids,
     tail,
+    output: None,
+    call_open: true,
   })
   id
+}
+
+///|
+/// Record that the call which started this job has returned.
+///
+/// Called with the command's outcome in hand, which is what makes the pids in the store complete:
+/// until it is called, "every pid I know about is gone" is a statement about an incomplete list.
+pub fn JobStore::finish_call(self : JobStore, id : String) -> Unit {
+  match self.get(id) {
+    None => ()
+    Some(job) => job.call_open = false
+  }
 }
 
 ///|
@@ -270,6 +319,51 @@ pub fn JobStore::reconcile(
 }
 
 ///|
+/// Record where a job's output is written, so a later call can read what the job printed after the
+/// call that started it returned.
+///
+/// Attached once, and only while the job is live: a job that has already ended has already had its
+/// output read by whoever waited for it.
+pub fn JobStore::attach_output(
+  self : JobStore,
+  id : String,
+  output : JobOutput,
+) -> Unit {
+  match self.get(id) {
+    None => ()
+    // Attached whether or not the job reads as live: the caller has the command's own outcome in
+    // hand, so the output exists and handing it back can only help.
+    Some(job) => job.output = Some(output)
+  }
+}
+
+///|
+/// Record that everything up to `out_bytes` and `err_bytes` has been handed back.
+///
+/// Called with what a read actually consumed, which is not always what it asked for: the file may
+/// have ended, or the read may have stopped at its ceiling.
+pub fn JobStore::mark_read(
+  self : JobStore,
+  id : String,
+  out_bytes~ : Int,
+  err_bytes~ : Int,
+) -> Unit {
+  match self.get(id) {
+    None => ()
+    Some(job) =>
+      match job.output {
+        Some(output) =>
+          job.output = Some({
+            ..output,
+            out_read: out_bytes,
+            err_read: err_bytes,
+          })
+        None => ()
+      }
+  }
+}
+
+///|
 /// Record more pids and output for a live job.
 pub fn JobStore::observe(
   self : JobStore,
@@ -357,6 +451,12 @@ pub fn JobStore::settle_gone(
     // registered when it starts and learns its pids a moment later, and settling in that window
     // would drop the record of something that is running right then.
     if job.pids.is_empty() {
+      continue
+    }
+    // And the pids are only complete once the call has reported them. The last thing a backgrounded
+    // command does is exit, leaving the child that is the actual work behind — and the call that
+    // started it is still running at that moment, so what is known here is the shell alone.
+    if job.call_open {
       continue
     }
     let mut any_alive = false
@@ -556,6 +656,9 @@ pub fn parse_job_store(text : String) -> JobStore {
       detail: json_string(item, "detail").unwrap_or(""),
       pids,
       tail: json_string(item, "tail").unwrap_or(""),
+      output: None,
+      // The process that made the call is gone; there is nothing left to report.
+      call_open: false,
     })
   }
   {

@@ -1,0 +1,24 @@
+import {
+  "lindividual/pi-web-shell/agent",
+  "lindividual/pi-web-shell/core",
+  "lindividual/pi-web-shell/platform",
+  "moonbitlang/async",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/env",
+  "moonbitlang/core/json",
+}
+
+supported_targets = "+native"
+
+// The point of this package: `#export_name`, so the host can call into MoonBit by name.
+// The compiler only permits that in a foreign library, and it is also what makes
+// `moon build` stop insisting on a `main`.
+pkgtype(kind: "foreign_library")
+
+// Two pieces of C, both because the boundary is C's: the command inbox, whose queue needs a real
+// lock because the host posts into it from another thread; and the weak default for the callback
+// the host is expected to define, so that `moon test` links without a host.
+
+options(
+  "native-stub": [ "inbox.c", "host_stub.c" ],
+)

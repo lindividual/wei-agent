@@ -40,10 +40,15 @@ struct Args {
   max_rounds : Int?
   /// Longest one turn may take in seconds, or `None` when the flag was not given.
   ///
-  /// Flag-only for now, with no saved counterpart: the panel's two limits are the ones that bound
-  /// spending, and this one is a backstop for the case neither can see — a command that hangs.
-  /// `@core.default_max_seconds()` is what runs when it is absent.
+  /// The third limit the panel can edit, and a backstop the other two cannot see: a command that
+  /// hangs costs nothing per model call and would otherwise run until the socket gives up.
+  /// `@core.default_max_seconds()` is what runs when neither the flag nor the saved setting says.
   max_seconds : Int?
+  /// `--mode tools|code`, or `None` when the flag was not given.
+  ///
+  /// A string rather than a `ToolMode` so that the two spellings the flag accepts are parsed in one
+  /// place, next to the saved setting that can say the same thing.
+  mode : String?
   /// Set when the reader asked for no folder chooser.
   ///
   /// The host is asked whether it can open a dialog either way; this is for the case where it can
@@ -54,7 +59,7 @@ struct Args {
 
 ///|
 fn usage() -> String {
-  "usage: ui [--port N] [--model M] [--base-url URL] [--continue | --resume <path|id>] [--store DIR] [--max-cost USD] [--max-rounds N] [--max-seconds N] [--no-picker]"
+  "usage: ui [--port N] [--model M] [--base-url URL] [--continue | --resume <path|id>] [--store DIR] [--max-cost USD] [--max-rounds N] [--max-seconds N] [--mode tools|code] [--no-picker]"
 }
 
 ///|
@@ -71,6 +76,7 @@ fn parse_args(argv : Array[String]) -> Args raise {
   let mut max_cost : Double? = None
   let mut max_rounds : Int? = None
   let mut max_seconds : Int? = None
+  let mut mode : String? = None
   let mut no_picker = false
   let mut index = 1
   while index < argv.length() {
@@ -82,7 +88,8 @@ fn parse_args(argv : Array[String]) -> Args raise {
       flag == "--store" ||
       flag == "--max-cost" ||
       flag == "--max-rounds" ||
-      flag == "--max-seconds"
+      flag == "--max-seconds" ||
+      flag == "--mode"
     if needs_value && index + 1 >= argv.length() {
       raise Failure::Failure("\{flag} needs a value\n\{usage()}")
     }
@@ -151,6 +158,20 @@ fn parse_args(argv : Array[String]) -> Args raise {
         max_seconds = Some(value)
         index += 2
       }
+      "--mode" => {
+        // An unknown word is refused rather than read as the default. The saved setting can afford
+        // to be forgiving because it is a file nobody is watching; a flag is typed at a terminal
+        // that is about to print something, and silently starting in the other mode is the kind of
+        // mistake that is found out a turn later.
+        match argv[index + 1] {
+          "tools" | "code" => mode = Some(argv[index + 1])
+          other =>
+            raise Failure::Failure(
+              "--mode takes `tools` or `code`, not \{other}",
+            )
+        }
+        index += 2
+      }
       "--continue" | "-c" => {
         start = Continue
         index += 1
@@ -176,6 +197,7 @@ fn parse_args(argv : Array[String]) -> Args raise {
     max_cost,
     max_rounds,
     max_seconds,
+    mode,
     no_picker,
   }
 }
