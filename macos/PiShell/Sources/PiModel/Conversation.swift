@@ -76,17 +76,55 @@ public struct Row: Identifiable, Equatable, Decodable {
 public struct Conversation: Equatable {
     public private(set) var rows: [Row] = []
     public private(set) var status: String = ""
+    /// The pictures on the next prompt, as the shell holds them.
+    public private(set) var attachments: [Attachment] = []
+    /// Whether the model the session is running on can be shown a picture at all. Drawn next to the
+    /// attachments, because it is only interesting when there is one.
+    public private(set) var canSendImages = true
+    /// What the session has used, and what its last turn cost. `nil` until the shell says, which is
+    /// drawn as absent rather than as zeroes.
+    public private(set) var usage: Usage?
+    /// Whether a turn is in flight.
+    ///
+    /// Read from the events rather than kept as its own flag across the wire: a turn starts when the
+    /// shell echoes the prompt and ends at `end` — or at `error`, which is how the path that caught a
+    /// failure ends one. There is no third way out, so there is nothing to keep in step.
+    public private(set) var running = false
     /// The last thing the shell said about itself. Kept apart from the status line because it is a
     /// fact about the session rather than about this moment.
     public private(set) var ready: PiEvent?
 
     private var nextNote = 0
 
+    /// Which turn the live rows on screen belong to.
+    ///
+    /// A live row's identity is this and the id the shell named, never the id alone. The shell names
+    /// its blocks per turn — `<kind>-<turn>-<seq>`, so two turns cannot collide — but the host is the
+    /// side that would *lose* a transcript if that stopped being true, and a delta is appended to
+    /// whatever row carries the id it arrived under. Scoping here costs a counter and makes a
+    /// repeated name from the shell append a new row instead of writing into the previous turn's:
+    /// the failure it prevents is an answer that grows inside the one before it while its own
+    /// thinking and tool rows are overwritten, which is silent and looks like nothing happening.
+    ///
+    /// The boundary is free: a prompt is one turn, and the shell echoes every prompt back.
+    private var turn = 0
+
+    /// The name a live row is looked up and stored under.
+    ///
+    /// The separator is one the shell never puts in an id, which is what keeps a scoped id from ever
+    /// colliding with a history row, a user row or the note a finished turn leaves behind.
+    private func live(_ id: String) -> String { "\(turn)/\(id)" }
+
     public init() {}
 
     /// Which block the deltas are currently landing in, per kind.
     private var openBlock: [Row.Kind: String] = [:]
 
+    /// Apply one event.
+    ///
+    /// The session is not a parameter: the host routes by session *before* calling this — an event for
+    /// another conversation goes to that conversation's own `Conversation`, not here — so the only
+    /// events that reach this one are the ones this transcript is made of.
     public mutating func apply(_ event: PiEvent) {
         switch event {
         case let .history(rows):
@@ -103,41 +141,61 @@ public struct Conversation: Equatable {
             // The row stopped growing and this is how it should be drawn. Patched in place rather
             // than appended: the row is already on screen from its deltas, and the parse describes
             // the text that is already there.
-            if let index = rows.firstIndex(where: { $0.id == id }) {
+            if let index = rows.firstIndex(where: { $0.id == live(id) }) {
                 rows[index].blocks = blocks
             }
 
-        case .sessions, .session, .settings:
-            // The sidebar's and the panel's own facts. The transcript is unchanged by any of them: a
-            // switch says which session is open and only the history that follows says what is in it.
+        case .sessions, .session, .settings, .models, .jobs:
+            // The sidebar's, the panel's and the picker's own facts. The transcript is unchanged by any
+            // of them: a switch says which session is open and only the history that follows says
+            // what is in it.
             return
-        case let .ready(session, model, cwd, key):
+
+        case let .images(items, canSend):
+            // Whole, not merged: the shell holds the list, and the composer draws it. A host that
+            // applied its own adds and removes would be a second opinion about what is on its way.
+            attachments = items
+            canSendImages = canSend
+
+        case let .usage(value):
+            usage = value
+        case let .ready(model, cwd, key):
             ready = event
-            _ = (session, model, cwd, key)
+            _ = (model, cwd, key)
             status = ""
 
-        case let .user(text):
-            rows.append(Row(id: "user-\(rows.count)", kind: .user, text: text, complete: true))
+        case let .user(text, continued):
+            running = true
+            // The prompt's own row is named by the turn rather than by how many rows there are: a
+            // count is not an identity — a `history` replace resets it, and two rows that happened to
+            // land on the same number would be one row as far as `ForEach` is concerned.
+            turn += 1
+            // A continued turn gets the new set of row names without a second question on screen:
+            // the question is already the last user row, from the run that was interrupted.
+            if !continued {
+                rows.append(Row(id: "user-\(turn)", kind: .user, text: text, complete: true))
+            }
             // The prompt is what the answer is about, so everything before it is finished.
             closeAllBlocks()
 
         case let .reply(id, delta):
-            append(id: id, kind: .reply, delta: delta)
+            append(id: live(id), kind: .reply, delta: delta)
 
         case let .thinking(id, delta):
-            append(id: id, kind: .thinking, delta: delta)
+            append(id: live(id), kind: .thinking, delta: delta)
 
         case let .tool(id, name, detail, done, output, isError):
             // One id for the whole life of the tool: the running row is the one the report
             // replaces, so a finished tool does not leave a spinner behind it.
-            if let index = rows.firstIndex(where: { $0.id == id }) {
+            let key = live(id)
+            if let index = rows.firstIndex(where: { $0.id == key }) {
                 rows[index].name = name
                 rows[index].detail = detail.isEmpty ? rows[index].detail : detail
                 rows[index].output = output
                 rows[index].isError = isError
                 rows[index].complete = done
             } else {
-                var row = Row(id: id, kind: .tool)
+                var row = Row(id: key, kind: .tool)
                 row.name = name
                 row.detail = detail
                 row.output = output
@@ -154,9 +212,23 @@ public struct Conversation: Equatable {
         case let .status(text):
             status = text
 
+        case let .note(text, label):
+            // A row at the point in the conversation where the compacting happened, because that is
+            // where the reader's own words stopped being what the model was sent. Everything before
+            // it is finished: what it replaces is above it, and the summary is a different thing
+            // from the answer that follows.
+            closeAllBlocks()
+            nextNote += 1
+            var row = Row(id: "note-\(nextNote)", kind: .note)
+            row.text = text
+            row.name = label
+            row.complete = true
+            rows.append(row)
+
         case let .end(text, calls, tools, cost):
             closeAllBlocks()
             status = ""
+            running = false
             // The figures are a note rather than a status, because they are about a turn that is
             // over. Saying them on the status line too would put them on screen twice.
             nextNote += 1
@@ -166,6 +238,10 @@ public struct Conversation: Equatable {
             rows.append(row)
 
         case let .error(text):
+            // A failure during a turn is the turn ending: the shell's own path that catches one says
+            // so and then stops. Setting this here rather than waiting for an `end` that is never
+            // sent is what keeps the composer from offering Stop for the rest of the afternoon.
+            running = false
             nextNote += 1
             var row = Row(id: "note-\(nextNote)", kind: .note)
             row.text = text

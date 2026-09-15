@@ -68,7 +68,8 @@ final class ConversationTests: XCTestCase {
             #"{"kind":"tool","id":"tool-1","name":"bash","detail":"ls","done":true,"output":"","error":false}"#,
             #"{"kind":"reply","id":"reply-2","delta":"here it is"}"#,
         ])
-        XCTAssertEqual(conversation.rows.map(\.id), ["reply-1", "tool-1", "reply-2"])
+        // Named per turn by the host, so this turn's ids are scoped by it — see `Conversation.turn`.
+        XCTAssertEqual(conversation.rows.map(\.id), ["0/reply-1", "0/tool-1", "0/reply-2"])
         XCTAssertTrue(conversation.rows[0].complete)
         XCTAssertFalse(conversation.rows[2].complete)
     }
@@ -116,5 +117,66 @@ final class ConversationTests: XCTestCase {
             #"{"kind":"reply","id":"reply-1","delta":"answer"}"#,
         ])
         XCTAssertEqual(conversation.rows.map(\.kind), [.thinking, .reply])
+    }
+
+    /// A second turn's blocks are new rows, not more of the first turn's.
+    ///
+    /// The bug this is here for: the shell names a turn's blocks `thinking-1`, `reply-1`, `tool-1`,
+    /// starting again every turn. A host that appended by that name alone wrote the second answer
+    /// into the first answer's row, overwrote the first turn's tool rows in place, and left the
+    /// reader with a transcript whose previous thinking and tool calls had simply gone. Reported as
+    /// "once a turn ends and I continue, the thinking and tool calls are gone and I cannot follow the
+    /// progress" — nothing was missing from the shell, and the host had silently drawn it in the
+    /// wrong place.
+    func testASecondTurnDoesNotWriteIntoTheFirstTurnsBlocks() {
+        let conversation = run([
+            #"{"kind":"user","text":"first"}"#,
+            #"{"kind":"thinking","id":"thinking-1","delta":"turn one reasoning"}"#,
+            #"{"kind":"tool","id":"tool-1","name":"bash","detail":"ls","done":true,"output":"a","error":false}"#,
+            #"{"kind":"reply","id":"reply-1","delta":"first answer"}"#,
+            #"{"kind":"end","text":"","calls":1,"tools":1,"cost":"0.001"}"#,
+            #"{"kind":"user","text":"second"}"#,
+            #"{"kind":"thinking","id":"thinking-1","delta":"turn two reasoning"}"#,
+            #"{"kind":"tool","id":"tool-1","name":"bash","detail":"pwd","done":true,"output":"b","error":false}"#,
+            #"{"kind":"reply","id":"reply-1","delta":"second answer"}"#,
+        ])
+        XCTAssertEqual(
+            conversation.rows.map(\.text),
+            [
+                "first",
+                "turn one reasoning",
+                "",
+                "first answer",
+                "1 model call · 1 tool call · $0.001",
+                "second",
+                "turn two reasoning",
+                "",
+                "second answer",
+            ]
+        )
+        // The first turn's tool row is still its own: the second turn's `tool-1` is a second row.
+        XCTAssertEqual(conversation.rows.filter { $0.kind == .tool }.map(\.output), ["a", "b"])
+        // And the rows are distinct identities, which is what makes SwiftUI draw two of them.
+        XCTAssertEqual(Set(conversation.rows.map(\.id)).count, conversation.rows.count)
+    }
+
+    /// A `blocks` parse lands on its own turn's row, not on the one before it.
+    ///
+    /// The same repeated name, one event later: the shell sends the parse for `reply-1` when the
+    /// block stops growing, and a host that patched by that name alone would put the second turn's
+    /// markdown on the first turn's text.
+    func testAParseIsPatchedIntoTheTurnItBelongsTo() {
+        let conversation = run([
+            #"{"kind":"user","text":"first"}"#,
+            #"{"kind":"reply","id":"reply-1","delta":"one"}"#,
+            #"{"kind":"end","text":"","calls":1,"tools":0,"cost":"0"}"#,
+            #"{"kind":"user","text":"second"}"#,
+            #"{"kind":"reply","id":"reply-1","delta":"two"}"#,
+            #"{"kind":"blocks","id":"reply-1","blocks":[{"t":"p","spans":[{"t":"text","text":"two"}]}]}"#,
+        ])
+        let replies = conversation.rows.filter { $0.kind == .reply }
+        XCTAssertEqual(replies.count, 2)
+        XCTAssertNil(replies[0].blocks, "the second turn's parse landed on the first turn's row")
+        XCTAssertEqual(replies[1].blocks?.count, 1)
     }
 }

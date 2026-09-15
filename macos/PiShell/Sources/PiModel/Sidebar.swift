@@ -23,8 +23,11 @@ public struct SessionRow: Identifiable, Equatable, Decodable {
     public let modified: Int64
     /// Whether this is the session on screen.
     public let current: Bool
-    /// Whether a turn is running in it. Only ever true for `current`, since there is one turn at a
-    /// time — but read per row rather than inferred, because that is the shape the shell sends.
+    /// Whether a turn is running *in this session*.
+    ///
+    /// Per row rather than per window, because more than one can be true at once: two conversations can
+    /// each have a turn in flight, and the spinner is the only thing on the sidebar that says a
+    /// background one is still going.
     public let running: Bool
 
     public var id: String { path }
@@ -37,10 +40,43 @@ public struct SessionRow: Identifiable, Equatable, Decodable {
     }
 }
 
+/// The session the two move-between-sessions commands should show next, or `nil` when there is no
+/// other one to move to.
+///
+/// `step` is 1 for the row below and −1 for the one above, and it wraps at both ends: a reader
+/// holding the shortcut down is cycling, and a list that stops at the last row is a list that looks
+/// like the shortcut broke.
+///
+/// `rows` is the list in the order the sidebar draws it, and `path` the session on screen. A
+/// `current` that is not in `rows` — a session created in this process and not yet written, or one
+/// the store has since lost — has no neighbour, which is a refusal rather than a move to the top of
+/// the list: nothing was asked for that a jump to an arbitrary row would satisfy.
+///
+/// Pure, and here rather than in the client, for the reason this whole module is apart from the
+/// runtime: the ordering rule is the part that can be wrong in a way a test can see.
+public func neighbourSession(rows: [SessionRow], from path: String, step: Int) -> SessionRow? {
+    guard rows.count > 1, let here = rows.firstIndex(where: { $0.path == path }) else { return nil }
+    let count = rows.count
+    // `%` on a negative index stays negative in Swift, hence the second correction.
+    let next = (((here + step) % count) + count) % count
+    return rows[next]
+}
+
 /// One working directory's sessions, most recently used first.
 public struct SessionGroup: Identifiable, Equatable, Decodable {
     /// Where the tools run. The identity of a group, and `pi`'s own name for a workspace.
     public let cwd: String
+
+    /// A memberwise initializer, for building a group outside the wire: the tests, and the search —
+    /// which narrows a group's sessions without the shell knowing, and a filtered group is still a
+    /// group. Same directory, same title, fewer rows.
+    public init(cwd: String, label: String, current: Bool, sessions: [SessionRow]) {
+        self.cwd = cwd
+        self.label = label
+        self.current = current
+        self.sessions = sessions
+    }
+
     /// What to call it: the reader's title for the workspace, else the last path component.
     public let label: String
     /// Whether the session on screen lives here.

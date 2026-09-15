@@ -1,19 +1,26 @@
 // The app icon, drawn rather than committed.
 //
-// A repository with a `.icns` in it has a binary nobody can review and nobody can edit: the next
-// person who wants a different colour opens a design tool, and the diff is "different file". So the
-// icon is this program, and `make-app.sh` runs it. What it costs is `swift` at packaging time, which
-// the packaging step already needs.
+// A repository with a `.icns` in it has a binary nobody can review and nobody can edit: the next person who
+// wants a different colour opens a design tool, and the diff is "different file". So the icon is this program,
+// and `make-app.sh` runs it. What it costs is `swift` at packaging time, which the packaging step already
+// needs.
 //
-// The shape is the platform's: a rounded square inset from the canvas, the way every Mac app is drawn
-// since Big Sur. The glyph is pi, in white, on a gradient — the name of the thing, and nothing else
-// competing for it.
+// The mark is `wei-logo.svg`, **drawn**: the same file the design system names, read at packaging time. Before
+// this, the SVG's path commands were copied into this file as `CGPoint` arithmetic — the icon is made *before*
+// the app is built and cannot import `Wei.Mark` — and the copy drifted. A pair of rounded rectangles that the
+// SVG does not contain ended up filling the space between the two strokes, so the Dock icon was a *different
+// mark* from the one the window draws and from the one the file describes. Nothing caught it, because the two
+// were only ever compared by eye, at 16 pixels. Reading the file removes the class of bug, not the instance.
+//
+// One thing about drawing an SVG with AppKit, and it cost an attempt: `NSImage.cgImage(forProposedRect:)`
+// hands back a **cached bitmap**. The mark came out with 9-pixel soft edges at 1024, because that bitmap had
+// been rasterised at the SVG's own 52×32 and scaled up from there. `NSGraphicsContext` is what asks the rep
+// to draw itself *at the destination size*; the same edge is one pixel wide, at 1024 and at 16.
 //
 //     swift macos/make-icon.swift <output.iconset>
 
 import AppKit
 import CoreGraphics
-import CoreText
 import Foundation
 
 /// One file of the `.iconset`: the pixels, and the name macOS looks for them under.
@@ -34,9 +41,16 @@ let sizes: [(name: String, pixels: Int)] = [
     ("icon_512x512@2x.png", 1024),
 ]
 
-func drawIcon(pixels: Int) -> CGImage? {
+/// `wei-logo.svg`, at the repository root. From `#filePath` rather than the working directory, so the script
+/// can be run from anywhere — `make-app.sh` is the caller, but `swift macos/make-icon.swift /tmp/x.iconset`
+/// by hand is the way to look at a change to the icon.
+let logo = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .appendingPathComponent("wei-logo.svg")
+
+func drawIcon(pixels: Int, mark: NSImage) -> CGImage? {
     let size = CGFloat(pixels)
-    let space = CGColorSpaceCreateDeviceRGB()
     // Premultiplied, because that is what an icon needs when it is drawn over a wallpaper and what
     // `CGImageDestination` writes PNG from without a second pass.
     guard
@@ -46,7 +60,7 @@ func drawIcon(pixels: Int) -> CGImage? {
             height: pixels,
             bitsPerComponent: 8,
             bytesPerRow: 0,
-            space: space,
+            space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         )
     else { return nil }
@@ -57,45 +71,38 @@ func drawIcon(pixels: Int) -> CGImage? {
     let tile = CGRect(x: inset, y: inset, width: size - inset * 2, height: size - inset * 2)
     let radius = tile.width * 0.225
 
-    // A vertical gradient rather than a flat fill: at 32 pixels a flat square reads as a placeholder,
-    // and this is the cheapest thing that reads as a drawing.
-    let path = CGPath(roundedRect: tile, cornerWidth: radius, cornerHeight: radius, transform: nil)
-    context.saveGState()
-    context.addPath(path)
-    context.clip()
-    let colors = [
-        CGColor(red: 0.20, green: 0.22, blue: 0.42, alpha: 1.0),
-        CGColor(red: 0.36, green: 0.42, blue: 0.78, alpha: 1.0),
-    ] as CFArray
-    if let gradient = CGGradient(
-        colorsSpace: space,
-        colors: colors,
-        locations: [0.0, 1.0]
-    ) {
-        context.drawLinearGradient(
-            gradient,
-            start: CGPoint(x: tile.minX, y: tile.maxY),
-            end: CGPoint(x: tile.maxX, y: tile.minY),
-            options: []
-        )
-    }
-    context.restoreGState()
-
-    // The glyph: "π" in the system font, centred on its own ink rather than on its line box, which is
-    // what keeps it looking centred in a rounded square.
-    let font = CTFontCreateWithName("SFProRounded-Bold" as CFString, tile.width * 0.56, nil)
-    let attributes: [NSAttributedString.Key: Any] = [
-        .font: font,
-        .foregroundColor: NSColor.white,
-    ]
-    let glyph = NSAttributedString(string: "π", attributes: attributes)
-    let line = CTLineCreateWithAttributedString(glyph)
-    let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
-    context.textPosition = CGPoint(
-        x: tile.midX - bounds.width / 2 - bounds.origin.x,
-        y: tile.midY - bounds.height / 2 - bounds.origin.y
+    // The tile: the platform's rounded square, filled with the brand's container colour. This is the only
+    // colour the file knows — the mark brings its own two (`#78E5A4` container, `#30714A` strokes, both in the
+    // SVG). Mint rather than white because that *is* the mark's ground: the logo's own container is the same
+    // mint, so tile and container merge and the two strokes stand on it. `WEI_ICON_TILE=white` draws the mark
+    // on paper instead, which is how it reads in a document.
+    let tileIsMint = ProcessInfo.processInfo.environment["WEI_ICON_TILE"] != "white"
+    context.addPath(CGPath(roundedRect: tile, cornerWidth: radius, cornerHeight: radius, transform: nil))
+    context.setFillColor(
+        tileIsMint
+            ? CGColor(srgbRed: 0x78 / 255, green: 0xE5 / 255, blue: 0xA4 / 255, alpha: 1)
+            : CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
     )
-    CTLineDraw(line, context)
+    context.fillPath()
+
+    // The mark, sized to the tile: 78% of the tile's width, the margin being a fraction of the *tile* — which
+    // is what keeps the mark's optical size the same at 16 pixels and at 1024. The height comes from the SVG's
+    // own aspect ratio rather than a second number here, so the file is the only thing that says how tall the
+    // mark is.
+    let markWidth = tile.width * 0.78
+    let markHeight = markWidth * mark.size.height / mark.size.width
+    let destination = CGRect(
+        x: tile.midX - markWidth / 2,
+        y: tile.midY - markHeight / 2,
+        width: markWidth,
+        height: markHeight
+    )
+    // No flip: the SVG's y axis grows downwards and `NSImage` draws it that way. An earlier version replayed
+    // the paths through CoreGraphics, which grows upwards, and needed one.
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+    mark.draw(in: destination, from: .zero, operation: .sourceOver, fraction: 1)
+    NSGraphicsContext.restoreGraphicsState()
 
     return context.makeImage()
 }
@@ -105,12 +112,16 @@ guard arguments.count == 2 else {
     FileHandle.standardError.write(Data("usage: make-icon.swift <output.iconset>\n".utf8))
     exit(2)
 }
+guard let mark = NSImage(contentsOf: logo) else {
+    FileHandle.standardError.write(Data("could not read \(logo.path)\n".utf8))
+    exit(1)
+}
 let directory = URL(fileURLWithPath: arguments[1])
 try? FileManager.default.removeItem(at: directory)
 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
 for entry in sizes {
-    guard let image = drawIcon(pixels: entry.pixels) else {
+    guard let image = drawIcon(pixels: entry.pixels, mark: mark) else {
         FileHandle.standardError.write(Data("could not draw \(entry.name)\n".utf8))
         exit(1)
     }

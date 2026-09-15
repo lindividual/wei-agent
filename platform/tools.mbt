@@ -481,6 +481,53 @@ async fn read_image(
 }
 
 ///|
+/// An image file, read and encoded for the wire.
+pub(all) struct LoadedImage {
+  /// Base64 of the file's bytes, which is how an image travels.
+  data : String
+  mime_type : String
+} derive(Eq, Debug)
+
+///|
+/// Read a file as an image the model can be shown, or say why it is not one.
+///
+/// The same question the read tool answers — by the bytes rather than by the file name, and against
+/// the same size cap — asked by the one other caller there is. A host that lets a reader attach a
+/// screenshot has to answer "is this an image" before it sends anything, and answering it a second
+/// way here would be a second limit and a second list of formats to keep in step.
+///
+/// The difference is who is being told. A tool result is addressed to the model, so it comes back as
+/// a tool result; this is addressed to the reader at the moment they pick a file, so it comes back as
+/// a reason they can act on — too big, not a picture, or not there.
+pub async fn load_image(path : String) -> Result[LoadedImage, String] {
+  if !path_exists(path) {
+    return Err("no file at \{path}")
+  }
+  let head = match read_bytes_prefix(path, @core.image_signature_bytes()) {
+    Some(head) => head
+    None => b""
+  }
+  let kind = match @core.sniff_image(head) {
+    Some(kind) => kind
+    None => return Err("not an image (png, jpeg, gif or webp): \{path}")
+  }
+  let size = match size_of(path) {
+    Some(size) => size
+    None => return Err("could not read \{path}")
+  }
+  if size > max_image_bytes().to_int64() {
+    return Err(
+      "\{size / 1024L}KB is past the \{max_image_bytes() / 1024 / 1024}MB image limit",
+    )
+  }
+  let bytes = match read_bytes_prefix(path, max_image_bytes()) {
+    Some(bytes) => bytes
+    None => return Err("could not read \{path}")
+  }
+  Ok({ data: @base64.encode(bytes), mime_type: kind.mime_type(), })
+}
+
+///|
 async fn run_read(arguments : Json, cwd : String) -> @core.ToolOutput {
   let path = @core.arg_required_string(arguments, "path")
   let full = resolve_path(cwd, path)

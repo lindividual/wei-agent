@@ -259,3 +259,32 @@ test "tool_summary collapses whitespace and clips" {
   assert_true(summary.has_suffix("…"), msg=summary)
   assert_eq(tool_summary(@json.parse("{\"command\":\"a\\n\\n  b\"}")), "a b")
 }
+
+///|
+/// Characters outside the BMP — emoji, and most CJK extensions — are two code
+/// units wide, so a search window can begin or end between the halves of one.
+/// That used to abort the process; such a window must simply not count as a match.
+test "edits work on non-BMP text" {
+  assert_eq(applied("a😀b", [repl("b", "c")]), "a😀c")
+  assert_eq(applied("say 😀 now", [repl("😀", "🙂")]), "say 🙂 now")
+  // The character after a pair is still found at its own offset.
+  assert_eq(applied("😀x", [repl("x", "y")]), "😀y")
+}
+
+///|
+/// A miss in text containing a pair is reported, not crashed on: every window in
+/// the scan has to be rejected before the result is known.
+test "a miss in non-BMP text is not found rather than fatal" {
+  let error = edit_error("😀", [repl("nope", "x")])
+  assert_true(error is NotFound(index=0, ..), msg="\{error}")
+}
+
+///|
+/// An error message summarising a line of emoji clips at a character boundary:
+/// the fixed offset of 60 lands inside a pair, and slicing there would abort
+/// while reporting a failure.
+test "summarizing a non-BMP line does not split a character" {
+  let error = edit_error("x", [repl("a" + "😀".repeat(40) + "absent", "y")])
+  let message = error.to_string()
+  assert_true(message.contains("😀…"), msg=message)
+}

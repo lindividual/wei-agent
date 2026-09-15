@@ -5,12 +5,12 @@ import PiKit
 
 /// The app.
 ///
-/// A window with a session list beside a transcript, and a box to type in. What it deliberately does
-/// not have is a workspace picker, attachments, a cost meter or a model picker — each of those is a
-/// working feature in the web UI, and every one of them would have to be rebuilt here or left
-/// behind. What it does have is the two things without which the rest is unreachable: the sidebar,
-/// because one session at a time was the MVP's question and this is the answer; and a settings panel,
-/// because a machine with no key in its environment has no way in at all.
+/// A window with a session list beside a transcript, and a composer that floats over it: the text, the
+/// pictures attached to it, the model that will answer it, and the figures for what the last turn cost
+/// — all of it in the place the message is being written, because every one of those changes what the
+/// message will be. What it deliberately does not have is a workspace picker, a background-task panel
+/// or a skills panel; each of those is a working feature in the web UI, and every one of them would
+/// have to be rebuilt here or left behind.
 ///
 /// `macos/README.md` lists what is missing and in what order it should be added.
 
@@ -18,10 +18,13 @@ import PiKit
 struct PiShellApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var client = PiClient()
+    /// What the window is in the middle of: shared with the view tree so this menu can open the
+    /// folder chooser that `RootView` draws.
+    @StateObject private var actions = WindowActions()
 
     var body: some Scene {
-        WindowGroup("pi") {
-            RootView(client: client)
+        WindowGroup("wei Agent") {
+            RootView(client: client, actions: actions)
                 .frame(minWidth: 720, minHeight: 420)
                 .onAppear { client.start() }
         }
@@ -33,7 +36,54 @@ struct PiShellApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Session") { client.newSession() }
                     .keyboardShortcut("n", modifiers: .command)
+                // The second answer to "new session", where a Mac user looks for it. The shortcut is
+                // on this item rather than on the toolbar's copy of it: one shortcut belongs to one
+                // command, and the menu bar is the one that owns it.
+                Button("New Session in Folder…") { actions.choosingFolder = true }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
             }
+            // A second way to get a picture from the clipboard onto the next prompt. The composer
+            // offers ⌘V on the card, but a text field claims ⌘V for itself and the argument about who
+            // wins it is not one a reader should have to care about — so the feature is also here,
+            // where it is discoverable and where nothing competes for it.
+            CommandGroup(after: .pasteboard) {
+                Button("Attach Image from Clipboard") {
+                    if let path = PastedImage.write() { client.attachTemporary(path) }
+                }
+                .keyboardShortcut("v", modifiers: [.command, .shift])
+                .disabled(!PastedImage.available)
+            }
+            // What the reader does *to* the session they are in: move to another one, or stop the work
+            // in this one. Both had a way in already — the sidebar row, and the button in the composer
+            // — and both ways are things you have to already know are there. A menu is where a Mac
+            // user looks when they do not.
+            //
+            // A menu of its own rather than items under View or Window, because the app's own word for
+            // the thing is "session" and there is no menu called that yet: a reader looking for
+            // "switch session" finds it by name instead of by guessing which of Apple's categories it
+            // was filed under.
+            CommandMenu("Session") {
+                Button("Next Session") { client.moveSession(by: 1) }
+                    .keyboardShortcut("\t", modifiers: [.control])
+                    .disabled(!client.canMoveSession)
+                Button("Previous Session") { client.moveSession(by: -1) }
+                    .keyboardShortcut("\t", modifiers: [.control, .shift])
+                    .disabled(!client.canMoveSession)
+                Divider()
+                // ⌘. is what this key means on this platform — Xcode stops, Terminal interrupts — and
+                // it is what a reader will try first when something is running too long.
+                //
+                // Disabled rather than hidden when nothing is running: a command that appears and
+                // disappears is a command nobody learns.
+                Button("Stop Turn") { client.stop() }
+                    .keyboardShortcut(".", modifiers: [.command])
+                    .disabled(!client.conversation.running)
+            }
+            // The sidebar collapses on the platform's own keystroke and the toolbar draws its own
+            // toggle; this is the menu item that says so. Without it the sidebar can be hidden and
+            // only a mouse can bring it back — which for a window whose whole left half is the session
+            // list is the one gesture that should not require the pointer.
+            SidebarCommands()
         }
 
         // The standard Settings item: ⌘, and the menu entry a Mac user looks in. A separate scene

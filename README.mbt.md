@@ -15,7 +15,7 @@ pi/ cli/   可执行：命令行跑一次完整 turn / 打一次真实 API
 verify/    可执行：拿真实会话全量跑往返验证
 scriptcheck/ 可执行：编译并运行内置的 script 程序
 harness/   Node 脚本：用 pi 当 oracle 生成 fixture、真实浏览器验收
-macos/     原生 macOS 壳：MoonBit 事件出口 + SwiftUI 宿主（第二个前端，见 macos/README.md）
+macos/     原生 macOS 壳：MoonBit 事件出口 + SwiftUI 宿主（**主线前端**，见 macos/README.md）
 docs/adr/  架构决策记录：被否决过的方案与理由是承重的，不该被重新讨论
 ```
 
@@ -37,7 +37,7 @@ moon run pi -- "prompt"              # 命令行跑一次完整 turn
 moon run verify                      # 全量会话往返验证
 moon run scriptcheck                 # 编译并运行内置 script
 
-macos/make-app.sh && open macos/dist/pi.app   # 原生 macOS 壳：打包成 .app
+macos/make-app.sh && open "macos/dist/wei Agent.app"   # 原生 macOS 壳：打包成 .app
 # 开发循环（不打包）和终端形态见 macos/README.md
 ```
 
@@ -510,11 +510,27 @@ node harness/ui-browser-check.mjs   # 真实浏览器验收（自己起 headless
 DSL 在包外不可用**（`server_side_render` 在 `internal/` 里），**SSE 逐块到达是可依赖的**
 （预期间隔 120ms，实测 120/121/121/121/121ms）。
 
-## 原生的第二个前端
+## 原生前端（主线）
 
-`macos/` 是一个原生 macOS 壳（SwiftUI + AppKit），驱动同一套 `core` / `platform` / `agent`：
-左边是会话列表（切换 / 新建 / 删除），右边是对话，`⌘,` 是设置（key、工具模式）。
-`macos/make-app.sh` 把它打成 `macos/dist/pi.app`。看 `macos/README.md`。
+`macos/` 是原生 macOS 壳（SwiftUI + AppKit），驱动同一套 `core` / `platform` / `agent`。它起先是
+「界面重写、内核复用」的验证物，**现在是主线**，`ui/`（Web UI）暂停投入 —— 理由与代价见
+`docs/adr/0007-macos-is-the-main-front-end.md`，踩坑清单见 `docs/macos-pitfalls.md`：
+三栏，学备忘录：**Projects**（工作目录 + 文件夹图标 + 会话数，正在看的带绿点）→ **Sessions**（只列
+当前浏览的那个目录的会话，按时间分组：今天 / 过去 30 天 / 八月…；搜索框在这一栏里，一搜就跨所有项目、
+标题改成项目名）→ **对话**。浏览一个项目**不等于**打开它的会话 —— 前者是窗口的事实，不会横切正在跑
+的 turn。会话行可以重命名、删除后 12 秒内可撤销；`⇧⌘N` 可以选一个文件夹在其中开新会话。窗口标题在
+工具栏里（会话名 + 模型/目录副标题），下面是一张浮在对话上的 Liquid Glass 输入卡片（附件可以
+从选择器、拖拽、⌘V 三种方式进来，还有模型切换和发送）和它下面的一行账（本轮用量、上下文占用、
+花费）。`⌘,` 是设置，五个面板：key、工具模式、技能开关、fallback 指令、回合上限。`⌘.` 停止正在跑的
+那一轮，`⌃⇥` / `⌃⇧⇥` 在会话之间前后切换（Session 菜单里也有），`⌃⌘S` 收起侧边栏。
+**一个进程里可以同时跑多个会话**（Web 版的
+能力，这一端后补的）：每个会话一份 turn 槽位、一把锁、一个停止标志，线上每条事件带 `session` 说明
+它属于谁，切走不打断任何人、半截答案留在原处接着长，侧边栏给在后台跑的那一行打点。中断的回合会在
+转录上方给出 Continue / Start Fresh 两条出路；有后台进程在跑时工具栏会多出一个计数按钮，点开是
+每个 job 的 pid、存活时长和 Kill —— 杀的是这个 job 记录过的所有 pid，不是最后一个。转录只在读者
+本来就在底部时才跟随。
+`macos/make-app.sh` 把它打成 `macos/dist/wei Agent.app`（名字、图标、颜色见 `docs/design-system.md`）。
+看 `macos/README.md`。
 
 它的意义不只是一个新界面，而是把上面那句「服务器是文档唯一的写者」的边界**再切一刀**：
 
@@ -524,12 +540,36 @@ macos/appffi/  host 拥有视图 → 线上跑事实（这段文本来了、这�
 ```
 
 `ffi.mbt` 导出的是一份不长的事件表：`ready` / `sessions` / `session` / `history` / `settings` /
-`user` / `reply` / `thinking` / `tool` / `status` / `end` / `error`。它们是事实而不是绘制指令 ——
-说发生了什么，不说该怎么画。
+`models` / `images` / `usage` / `user` / `reply` / `thinking` / `tool` / `status` / `end` / `error`。
+它们是事实而不是绘制指令 —— 说发生了什么，不说该怎么画。**每条属于某个会话的事件都带一个 `session`**
+（空 = 屏幕上那个），因为一个进程里可以同时有几轮 turn 在跑，主人得知道一条 delta 该写进哪份转录。
 
 后三个是侧边栏带来的：`sessions` 是整份会话列表，`session` 说换到了哪一份，`history` 把一份宿主
 **没看过**的会话整段发过去（行，不是 delta —— 见 `macos/README.md`）。自己开的会话仍然是靠
 `reply` / `tool` 这种 delta 长出来的，两条路并存，因为「我看到过」和「我没看到过」本来就是两件事。
+
+`models` / `images` / `usage` 是输入区带来的，形状都是「整份事实」：模型清单（含能不能看图）、
+待发附件（含缩略图要用的 base64）、本会话用量与上一轮的花费。`settings` 也从「key + 模式」长成了
+面板真正需要的东西：技能清单（含已被关掉、文件已不在的那些）、在生效的 fallback 指令及其来源、
+三个回合上限各自的值与来源。附件只传**路径**，读文件、判格式、判大小都在 shell 里，和 `read`
+工具共用同一套判断。
+
+`jobs` 是后台任务面板的那条：还在跑的 job（id、标签、状态、活了多久、仍活着的 pid、属于哪个
+会话），shell 每两秒读一次进程表，一次读同时服务「面板显示什么」和「哪个 job 的进程都没了」。
+
+`note` 是压缩那一行：一个 `Compaction` 条目替换掉读者自己说过的话，而线上别的东西都不会说这件事，
+所以它是一行（发生在对话里的那个位置），不是一个状态行。`name` 是它的标签（「context compacted」）——
+没有标签的 note 就是一段被当成回答读的正文；历史上（`history`）的压缩也补上了同一个标签。
+
+技能那条路（`/skill:<name>` 展开、裸 `/skill` 列清单）在 shell 里闭环，用的是 `core` / `platform`
+里 Web 版一直在用的同一份实现，没有新增线上字段。
+
+命令方向是 `/model` / `/attach` / `/attach-temp` / `/detach` / `/attach-clear` / `/usage` /
+`/jobs` / `/job-kill` / `/rename` / `/restore` / `/skill` / `/instructions` / `/limits`，加上两个
+裸词 `continue` / `dismiss` —— 中断的回合的两条出路。`attach-temp` 是粘贴板那条：剪贴板里只有
+字节没有路径，宿主写一个临时文件，shell 读完删掉（宿主删会和读抢，读发生在 agent 线程上）。这里有一条硬规则：**认不出的命令词一律当 prompt，但「命令词少了参数」不行**。`/restore`
+曾经落进最后那个分支被当成问题发给模型，所以每个带路径的命令都有一个「光秃秃」的形式，走和参数
+不合法同一个分支。
 
 这条边界的验证方式是**两侧钉住同一批 JSON 字面量**：`macos/appffi/app_wbtest.mbt` 从生产侧断言，
 `macos/PiShell/Tests/PiModelTests/` 从消费侧断言。改一个字段名而不改另一边，挂的是一个构建。

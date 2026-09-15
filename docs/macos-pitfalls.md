@@ -1,0 +1,134 @@
+# macOS 端踩坑清单
+
+**什么时候读这份**：动 `macos/` 之前扫一眼。它不是教程，是一张 `症状 → 原因 → 修法` 的表 ——
+坑的价值在于**开工前**扫一遍，而不是撞上之后再读懂一段散文。
+
+理由很直接：这份清单里已经写进 `macos/README.md` 的那些条目，**我自己照样踩了其中一条的变体**
+（只跑了 `swift build` 没重新打包，于是宿主打开了旧二进制，而构建是「成功」的）。散文挡不住手快，
+表格可以。
+
+分六组。每条都是这次开发中**实际撞到**的，不是预想的。
+
+**开发循环，从头到尾（这三条必须一起做）**：
+
+```bash
+# 1. 改了 macos/appffi/（MoonBit 侧）→ 重建归档
+macos/build-moonbit.sh release          # → macos/vendor/libpiweb.a
+
+# 2. 改了任何一侧 → 重新打包（会顺带 rm 掉旧的宿主可执行文件，见第一组）
+macos/make-app.sh release               # → macos/dist/wei Agent.app
+
+# 3. 只想跑测试，不需要打包
+moon test macos/appffi --target native  # MoonBit 侧
+cd macos/PiShell && swift test          # 线格式 + 边界（真 boot runtime）
+```
+
+```bash
+# 排查线上问题（会记录 prompt，附件字节已 elide）
+PI_SHELL_DEBUG=/tmp/pi-wire.log open "macos/dist/wei Agent.app"
+```
+
+---
+
+## 一、构建与打包
+
+| 症状 | 原因 | 修法 |
+|---|---|---|
+| MoonBit 侧改了，线上没变 | SwiftPM **不知道** `vendor/libpiweb.a` 变了（那个归档不在依赖图里），于是「构建成功」+ 旧二进制 | 改完 `macos/appffi/` 一定要 `macos/build-moonbit.sh` |
+| 重建了 `libpiweb.a`，症状还是旧的 | SwiftPM 也不会因为归档变了而重链**别的产品**：`touch` Swift 源码多不做用，`pi-shell-cli` 和 `PiShellPackageTests.xctest` 都照样跑旧二进制。最坏的表现不是报错，而是**旧 shell 用旧线格式回答**：新加的字段在日志里根本不存在，于是一个正确的消费侧看起来像写错了 | `rm -f` 掉那个产品再 build（`.xctest` 要 `rm -rf` 整个目录）。`swift test` 里那条真启 runtime 的测试就是抓这一类的 |
+| 改了 MoonBit 侧、`swift test` / `pi-shell-cli` 还是旧行为 | 归档重建了，但**那两个产品没有重链**（见上一条）。这次是 `NewSession` 的 gate 明明删了、CLI 仍然回「a turn is running here — stop it first」 | `rm -f .build/arm64-apple-macosx/debug/pi-shell-cli` 再 build。**验证一个 shell 侧的改动，永远要先把跑它的那个产品删掉重建** |
+| 同上，而且你已经 build 过了 | 同上，但更隐蔽：跑的是 `swift build`（debug 可执行文件），**根本没重新打包** —— 用户打开的还是几天前那个 `.app` | 给人用的东西一律 `macos/make-app.sh`；`make-app.sh` 会先 `rm` 掉旧的宿主可执行文件再重建，这是它对这条的补偿 |
+| 一屏 `was built for newer 'macOS' version` 警告 | MoonBit 用本机 SDK 编译，Swift package 的 target 是 14 | 忽略。不是错误，也修不掉（除非把 deployment target 提到本机版本） |
+| `swift run PiShell` 有窗口、没菜单栏、不聚焦 | 裸可执行文件不是 `.app` | `AppDelegate` 里的 `setActivationPolicy(.regular)`；打包后是 no-op |
+| 窗口起来什么都没发生 | 宿主装了 reader 但没在 C 侧注册回调（`pi_shell_set_emit`），`emit_sink` 是 NULL，**每一行都被丢掉且不报错** | `Emit.install` 同时做这两件事；`PiShellTests` 里有一条真启 runtime 的测试守着 |
+
+## 二、SwiftUI / 编译期摩擦
+
+每一条都让人原地卡过一次，而且**错误信息基本指不到问题**。
+
+| 症状 | 原因 | 修法 |
+|---|---|---|
+| 泛型参数推导失败，错误里出现 `TableColumnBuilder` | 在 `Form` 里用 `Group { Section(…) }` 分组：`Group` 的 builder 泛型是给表格列的，推不出来 | 自己写一个 `@ViewBuilder` 容器（我们叫 `rebuild`），别用 `Group` 装 Section |
+| 每个 `Section("…")` 突然都不是 view 了 | 文件里嵌套了一个叫 `Section` 的类型，**遮蔽** `SwiftUI.Section`（只在文件内，但整个文件） | 别用会撞的平台类型名。我们把 `SettingsView.Section` 改成了 `Pane` |
+| `incorrect argument label` | `.dropDestination(for:action:isTargeted:)` —— 我猜的是 `isTarget:` | 以 SDK 为准；这类标签猜不中 |
+| `contextual closure type '() -> KeyPress.Result' expects 0 arguments` | `.onKeyPress(.return) { }` 这个单参重载**不给闭包传参数** | 要拿到 `KeyPress`（进而读**事件自己**的 modifiers）必须写 `phases:`：`.onKeyPress(.return, phases: .down) { press in … }` |
+| ⇧Return 的行为和代码不符 | `NSEvent.modifierFlags` 读的是**此刻硬件**的状态，不是被处理那个事件的状态；合成/重放的事件更是完全无关 | 用事件自己的 `press.modifiers` |
+| `NSImage` 上没有 `pngData` | 它确实没有 | 过 `NSBitmapImageRep`（扩展在 `macos/PiShell/Sources/PiShell/Composer.swift`） |
+| 粘贴图片的回调从来不触发 | `onPasteCommand(of:)` 只在剪贴板**能提供**所列类型时才提供该命令（**这条是 API 语义，我没有逐个场景验证**） | 它意味着这条路径无法保证可达 —— 所以另给了一个菜单项（⌘⇧V），不赌谁能拿到 ⌘V |
+
+## 三、文本输入 / 输入法（**中文用户必踩**）
+
+这一组是「发送没反应」那个 bug 的现场。它只在输入法下复现，纯英文和自动化测试都测不出来。
+
+| 症状 | 原因 | 修法 |
+|---|---|---|
+| 用输入法打完字，按回车**什么都没发出去**，输入框清空了 | `.onKeyPress(.return)` 把合成中的回车吃掉了：输入法要靠这个键**提交候选词**，而合成中的文字还不在 `@Binding` 里，`draft` 是空的 → `send("")` 什么也不做 | 交给输入法：`hasMarkedText()` 为真时返回 `.ignored` |
+| 修完上面之后，第一条消息变成了原始拼音（`nihao`） | 同一个原因的另一面：`draft` 里是拼音串，汉字还没提交 | 同上——**让出这个键**，而不是想办法读汉字 |
+| 加了「编辑器比 binding 长就是在合成」的判断后，**第一个字**被吞 | 这个判断是**假阳性**：SwiftUI 的 binding 天然慢一拍，刚敲下的第一个字符正好是「编辑器有字、binding 没有」 | 只用 `hasMarkedText()` 这一个信号；不要自己造第二个 |
+| 想知道输入法装没装 / 是哪个 | —— | `TISCreateInputSourceList` / `TISCopyCurrentKeyboardInputSource`；本机是 `com.apple.inputmethod.SCIM.ITABC`（简体拼音）和 `com.apple.keylayout.ABC` |
+
+**一般化的教训**：任何「替用户决定某个键是什么意思」的处理器（`.onKeyPress`、快捷键、全局热键），
+都要先问**输入法要不要这个键**。中文、日文、韩文、以及 emoji 选择器都走同一条路。
+
+## 四、平台 API 的发现（尤其 macOS 26 的新东西）
+
+| 症状 | 原因 | 修法 |
+|---|---|---|
+| 不知道 Liquid Glass 怎么写、能不能用 | 凭记忆猜 API 不可靠 | **读 SDK 的 `.swiftinterface`**：`…/MacOSX.sdk/System/Library/Frameworks/SwiftUI.framework/…/arm64e-apple-macos.swiftinterface`。这次就是这么找到 `glassEffect` 的完整签名与可用性标注的 |
+| 同上，而且它不在 `SwiftUI` 里 | `glassEffect`、`Glass` 定义在 **SwiftUICore**（`@_originallyDefinedIn(module: "SwiftUI", macOS: 15.0)` 那套写法） | 按框架名找文件，别只 grep SwiftUI |
+| 用了 macOS 26 的 API，但 package 的 target 是 14 —— 会不会崩在旧系统上 | —— | 用 `swift build` 后 `nm -m <binary> \| grep glassEffect` 看是不是 **weak external**，再 `otool -l \| grep minos` 看部署目标。weak 链接 + `if #available` 就是安全的 |
+
+## 五、验证与自动化（这次最费时间的一块）
+
+手动验证 macOS UI 很贵，而**便宜的验证方式是存在的**，只是要走对路。
+
+| 症状 | 原因 | 修法 |
+|---|---|---|
+| AppleScript 读 UI 崩掉（`-2741` 语法错 / `-1700` 类型转换失败） | 这个 app 的 AX 树很深，`entire contents` 会把整棵树物化成列表再逐项类型转换，量一大就崩 | 写一个 **Swift AX 工具**：`AXUIElementCreateApplication` + 递归 `kAXChildrenAttribute`，一棵树几十个节点一次读完 |
+| 用 AX 设了 text field 的 `value`，界面没反应 | AX 的 `set value` **驱动不了 SwiftUI 的 binding** | 必须发**真事件**（`CGEvent`）或真按键（`osascript keystroke`） |
+| 想断言「发送按钮现在可用吗」 | —— | AX 的 `kAXEnabledAttribute` 是读得出来的，这对验证状态机很省事 |
+| 用 `strings` 在 release 二进制里找菜单项标题，找不到，以为菜单没编进去 | `-O` 会做字符串池化 / 后缀合并：一条字面量可能只是另一条里的一段偏移，于是那串字节根本不存在。**最小复现：**一个只有 `CommandMenu` 的 30 行 app，`-O` 编完后 `Next Session` / `Stop Turn` / `New Session` 全为 0，而同文件里的 `Previous Session` 还在 —— 连**早就正常工作的** `⌘N` 的 `New Session` 也不见了 | `strings` 不是验证菜单的方法。要么加个 AX 工具读 `AXMenuBar`，要么真启动一个、看一眼 |
+| `osascript` 里找不到输入框 | 表单里有两个 `AXTextField`（设置面板的搜索框、输入框），按顺序取会取错 | 按 **position.y** 取最靠下的那个 |
+| 启动后拿到的 PID 不对 | `( … & )` 拿到的是**子 shell** 的 PID，不是 app 的 | 子 shell 里用 `exec env … /path/to/pi`，再 `echo $!` |
+| `pkill -f "Macos/pi"` 把自己也匹配上了（现在可执行文件叫 `wei`，但坑的形状一样） | `-f` 匹配整条命令行，而你的 `bash -c` 里就写着这个字符串 | 用锚定：`pkill -9 -f "Macos/pi$"`。**这条我照着写了又踩了**：`pkill -9 -f "MacOS/pi"` 没杀掉任何一个 app（用户那个进程活得好好的），因为模式先匹配上了**它自己所在的 `bash -c`**，命令根本没走到那一步。教训是锚定要落在**参数的位置**上，`$` 放在路径后面；光把模式写短不算锚定 |
+| 反复启动后测到的行为不对 | **多个实例在跑**，你连的是上一个 | 每次测完按 PID 确认存活；断言时带上 PID / 窗口标题 |
+| 改了「换会话」相关的代码，测完用户说他打了一半的字跟着跑 | 我**拿用户正在用的会话做了测试**，进程真的把新 turn 写进了他的日志 | **纪律**：测试先 `cp` 一份会话到临时目录，用 `PI_SHELL_SESSION` 指过去。永远不碰 `~/.pi-mb/sessions/` |
+| AX 树太大，AppleScript 直接放弃 | 1500 行的转录 + 长会话 | 也是上面那条：用 Swift AX 工具，或者拿小的会话测 |
+
+## 六、调试手法（正面清单，别丢）
+
+这些是**找到** bug 的东西，比任何一条坑都值钱。
+
+- **`PI_SHELL_DEBUG=/tmp/pi-wire.log` 抓整条线上**：两个方向、一行一条。发送那个 bug 就是这样定性的
+  —— 日志里 `PiClient.send text=[]` 直接指出「处理器被调用了，但拿到的是空串」，比在 SwiftUI 里猜快得多。
+  注意它**会**包含 prompt（附件字节已做 elide：`WireLog.elided`）。
+- **需要知道「视图内部此刻是什么」时，直接 `FileHandle.standardError.write`**：app 的 stderr 重定向到
+  文件即可。这次靠它在 `onKeyPress`、`submit()`、`PiClient.send` 三处打点，一次就分清了「没触发」
+  和「触发了但值是旧的」。
+- **`pi-shell-cli` 是同一套 agent 的终端形态**：怀疑是 shell 侧还是宿主侧时，先在终端复现 —— 这次
+  shell 侧一次就通过了，问题定位在宿主，省掉大量窗口里的瞎试。
+- **假模型比真 API 好用**：一个几十行的 python SSE server（`/tmp` 里现写）能构造工具调用、思考流、
+  用量字段，而且是确定的。真 API 既慢又花钱，还不一定能复现你要的那次形状。注意它有个坑：请求体
+  可能是 chunked 编码的（`curl` 那种），只按 `Content-Length` 读会拿到空 body —— 我第一次就是这么
+  被骗了一轮，以为模型没被调用。
+- **拖动分隔栏卡顿 → 先量格式化，不是先量布局。** 症状是拖左栏时整窗掉帧。原因是 `sessionAgeText` **每行每帧**
+  创建一个 `DateFormatter`（实测 0.13 ms/个），而拖分隔栏会 resize 整个 split、于是每行每帧重画：
+  30 行 ≈ 4 ms/帧，占掉 60 Hz 预算的四分之一，还没画任何东西。修法是按日历/locale/模板缓存 —— 一帧从
+  **4 ms 降到 0.26 ms**。教训：进入渲染路径的**构造**（formatter、number formatter、正则、字体）都要缓存，
+  而且这类开销单看一行是量不出来的，要对「一帧有多少行」做乘法。
+- **截图能看见测试看不见的东西**：`screencapture -x` 全屏，`screencapture -x -l <windowid>` 一个窗口
+  （不给窗口 id 就用 `CGWindowListCopyWindowInfo`：`onScreenOnly` + `layer == 0` + 尺寸够大）。
+  一次就定出两个 bug，两个都是**只有眼睛能发现**的：中断回合那条提示被放进 `ScrollView` 里了，
+  于是长会话里它滚出屏幕、两个按钮在最需要的时候够不着；侧边栏的 spinner 在 turn 开始时根本没刷新
+  （`say_sessions` 只在 turn 结束时调），看起来像功能不存在。两者单测、wire log、终端复现全都看不出来。
+
+  三条边界，都很硬：
+
+  | | 权限 | 说明 |
+  |---|---|---|
+  | 看（截图） | 屏幕录制 | `CGPreflightScreenCaptureAccess()`；**会掉** —— 我这一轮里它先是 `true`，几分钟后变 `false`，之后的截图全部 `could not create image from display` |
+  | 点（合成事件） | 辅助功能 | `CGPreflightPostEventAccess()` / `AXIsProcessTrusted()`；**和屏幕录制是两个权限**，所以「我能看」完全不代表「我能点」 |
+  | 读菜单 | 辅助功能 | 同上。菜单项标题也因此验不了 |
+
+  所以截图是**只读**的：能看状态，不能驱动。要驱动得靠键盘/鼠标，而那就需要辅助功能。
+  截图前先查一次权限，别把 TCC 拒绝当成 app 的问题。

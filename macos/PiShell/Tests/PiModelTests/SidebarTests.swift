@@ -10,7 +10,7 @@ import XCTest
 final class SidebarTests: XCTestCase {
     /// A session list, exactly as `sessions_event` writes it.
     private let sessionsLine = #"""
-    {"kind":"sessions","workspaces":[{"cwd":"/home/me/project","label":"project","current":true,"sessions":[{"path":"/store/--home-me-project--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl","id":"01a02d4c","label":"set up the project","modified":1787466378656,"current":true,"running":false}]}]}
+    {"kind":"sessions","workspaces":[{"cwd":"/home/me/project","label":"project","current":true,"sessions":[{"path":"/store/--home-me-project--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl","id":"01a02d4c","label":"set up the project","modified":1787466378656,"current":true,"running":false,"pending":false}]}]}
     """#
 
     func testSessionsCarryTheirWorkspacesAndTheirRows() throws {
@@ -35,6 +35,40 @@ final class SidebarTests: XCTestCase {
         XCTAssertEqual(row.modified, 1_787_466_378_656)
         XCTAssertTrue(row.current)
         XCTAssertFalse(row.running)
+    }
+
+    /// Moving between sessions without the pointer: the row below, the row above, and the ends of the
+    /// list.
+    ///
+    /// Wrapping is the case worth pinning: a reader holding `⌃⇥` down is cycling, and a shortcut that
+    /// stops at the last row is one that looks broken rather than finished.
+    func testTheNextAndPreviousSession() {
+        let rows = [row("a"), row("b"), row("c")]
+        XCTAssertEqual(neighbourSession(rows: rows, from: "a", step: 1)?.path, "b")
+        XCTAssertEqual(neighbourSession(rows: rows, from: "b", step: -1)?.path, "a")
+        XCTAssertEqual(neighbourSession(rows: rows, from: "c", step: 1)?.path, "a")
+        XCTAssertEqual(neighbourSession(rows: rows, from: "a", step: -1)?.path, "c")
+        // Two rows: both directions lead to the other one, which is not a special case to write.
+        XCTAssertEqual(neighbourSession(rows: [row("a"), row("b")], from: "a", step: 1)?.path, "b")
+        XCTAssertEqual(neighbourSession(rows: [row("a"), row("b")], from: "a", step: -1)?.path, "b")
+    }
+
+    /// No neighbour is a refusal, not a move to the top of the list: one session is not a choice, and
+    /// a session the store has lost has no row to be next to.
+    func testThereIsNowhereToGoFrom() {
+        XCTAssertNil(neighbourSession(rows: [], from: "a", step: 1))
+        XCTAssertNil(neighbourSession(rows: [row("a")], from: "a", step: 1))
+        // A session created in this process and not yet in the list, or one since deleted.
+        XCTAssertNil(neighbourSession(rows: [row("a"), row("b")], from: "z", step: 1))
+    }
+
+    /// A row with nothing but a path: the fields these tests are not about are the ones the shell
+    /// fills in, and a default here keeps each test about the thing it names.
+    private func row(_ path: String) -> SessionRow {
+        SessionRow(
+            path: path, shortID: path, label: path, modified: 0,
+            current: false, running: false
+        )
     }
 
     /// A row's identity is its path: the label can change under a rename and a list must not then
@@ -67,24 +101,28 @@ final class SidebarTests: XCTestCase {
         XCTAssertTrue(rows.allSatisfy(\.complete))
     }
 
-    /// A switch says which session is open. It does not say what is in it — that is the history that
-    /// follows — and it does not disturb the transcript in between.
+    /// A switch says which session is open — as the routing field — and does not disturb the transcript
+    /// in between. What is in the session arrives after, as either a history or nothing at all.
     func testASwitchNamesTheSessionWithoutTouchingTheTranscript() throws {
-        let event = try XCTUnwrap(
-            PiEvent.decode(
-                line: #"{"kind":"session","path":"/store/s2.jsonl","cwd":"/tmp","model":"DeepSeek V4 Flash"}"#
+        let envelope = try XCTUnwrap(
+            Envelope.decode(
+                line: #"{"kind":"session","session":"/store/s2.jsonl","cwd":"/tmp","model":"DeepSeek V4 Flash"}"#
             )
         )
-        guard case let .session(path, cwd, model) = event else {
-            return XCTFail("expected session, got \(event)")
+        XCTAssertEqual(envelope.session, "/store/s2.jsonl")
+        guard case let .session(cwd, model, interrupted, prompt) = envelope.event else {
+            return XCTFail("expected session, got \(envelope.event)")
         }
-        XCTAssertEqual(path, "/store/s2.jsonl")
         XCTAssertEqual(cwd, "/tmp")
         XCTAssertEqual(model, "DeepSeek V4 Flash")
+        // Absent on the wire means false, which is what an older shell's event decodes to: the
+        // interruption notice is simply not drawn rather than the whole event being refused.
+        XCTAssertFalse(interrupted)
+        XCTAssertEqual(prompt, "")
 
         var conversation = Conversation()
-        conversation.apply(.user(text: "the old session's question"))
-        conversation.apply(event)
+        conversation.apply(.user(text: "the old session's question", continued: false))
+        conversation.apply(envelope.event)
         XCTAssertEqual(conversation.rows.count, 1)
     }
 }
@@ -95,8 +133,13 @@ final class SidebarTests: XCTestCase {
 /// because they are the ones a reader is affected by: a key from the environment overruling a saved
 /// one, and the path of the file to edit by hand.
 final class SettingsTests: XCTestCase {
+    /// The whole event, as `Shell::say_settings` writes it: the five settings kinds a running process
+    /// can honour, and the file they live in.
+    ///
+    /// The two skills are deliberately one of each: a skill with a file behind it and one whose file
+    /// is gone, which is the row that exists only so its switch can be undone.
     private let settingsLine = #"""
-    {"kind":"settings","key":"environment","env":true,"saved":true,"mode":"code","path":"/Users/me/.pi-mb/settings.json"}
+    {"kind":"settings","key":"environment","env":true,"saved":true,"mode":"code","path":"/Users/me/.pi-mb/settings.json","skills":[{"name":"moonbit","description":"How to build and test this project","path":"/Users/me/.pi/skills/moonbit/SKILL.md","enabled":true},{"name":"gone","description":"","path":"","enabled":false}],"instructions":"Run the tests with moon test.","instructions_source":"saved","limits":{"rounds":{"value":"200","source":"default"},"cost":{"value":"0.05","source":"saved"},"seconds":{"value":"1800","source":"flag"}}}
     """#
 
     func testSettingsNameTheKeySourceAndTheMode() throws {
@@ -111,12 +154,28 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(settings.path, "/Users/me/.pi-mb/settings.json")
         XCTAssertTrue(settings.savedKeyIsOverruled)
         XCTAssertEqual(settings.keySummary, "In use, from DEEPSEEK_API_KEY")
+        // The skills list carries a switched-off name with no file, because that is the row a reader
+        // needs in order to turn it back on.
+        XCTAssertEqual(settings.skills.map(\.name), ["moonbit", "gone"])
+        XCTAssertTrue(settings.skills[0].enabled)
+        XCTAssertFalse(settings.skills[1].enabled)
+        XCTAssertTrue(settings.skills[1].path.isEmpty)
+        // The instructions and where they came from: the two disagreeing is the case the panel has to
+        // explain, and it cannot explain what it was not told.
+        XCTAssertEqual(settings.instructions, "Run the tests with moon test.")
+        XCTAssertEqual(settings.instructionsSource, "saved")
+        // Each limit carries its own source, because one flag can set one of the three.
+        XCTAssertEqual(settings.limits.rounds.value, "200")
+        XCTAssertEqual(settings.limits.cost.value, "0.05")
+        XCTAssertFalse(settings.limits.rounds.isFromFlag)
+        XCTAssertTrue(settings.limits.seconds.isFromFlag)
+        XCTAssertEqual(settings.limits.seconds.source, "flag")
     }
 
     /// A machine with nothing saved and nothing in the environment: the state the panel exists to get
     /// a person out of, and the one that has to be legible rather than empty.
     func testNoKeyIsAStateAndNotAnAbsence() throws {
-        let line = #"{"kind":"settings","key":"none","env":false,"saved":false,"mode":"tools","path":"/tmp/settings.json"}"#
+        let line = #"{"kind":"settings","key":"none","env":false,"saved":false,"mode":"tools","path":"/tmp/settings.json","skills":[],"instructions":"","instructions_source":"none","limits":{"rounds":{"value":"200","source":"default"},"cost":{"value":"1","source":"default"},"seconds":{"value":"1800","source":"default"}}}"#
         let event = try XCTUnwrap(PiEvent.decode(line: line))
         guard case let .settings(settings) = event else {
             return XCTFail("expected settings, got \(event)")
@@ -124,13 +183,17 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(settings.key, "none")
         XCTAssertEqual(settings.keySummary, "No key: the first turn will fail")
         XCTAssertFalse(settings.savedKeyIsOverruled)
+        // Nothing discovered and nothing saved is a state, not an absence: the panel says so rather
+        // than drawing an empty box where a list should be.
+        XCTAssertTrue(settings.skills.isEmpty)
+        XCTAssertEqual(settings.instructionsSource, "none")
     }
 
     /// The panel's facts do not disturb the transcript, for the same reason the sidebar's do not.
     func testSettingsDoNotTouchTheTranscript() throws {
         let event = try XCTUnwrap(PiEvent.decode(line: settingsLine))
         var conversation = Conversation()
-        conversation.apply(.user(text: "hi"))
+        conversation.apply(.user(text: "hi", continued: false))
         conversation.apply(event)
         XCTAssertEqual(conversation.rows.count, 1)
     }

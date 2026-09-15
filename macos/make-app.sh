@@ -2,7 +2,7 @@
 #
 # Package the native shell as a `.app`.
 #
-#     macos/make-app.sh [debug|release]        → macos/dist/pi.app        (default: release)
+#     macos/make-app.sh [debug|release]        → macos/dist/wei Agent.app   (default: release)
 #
 # What this does that `swift run PiShell` does not:
 #
@@ -32,7 +32,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MACOS="$ROOT/macos"
 SHELL_DIR="$MACOS/PiShell"
 DIST="$MACOS/dist"
-APP="$DIST/pi.app"
+# The bundle is named for what Finder shows: an app's name in the Dock and in the Finder is its *file*
+# name, so `CFBundleDisplayName` alone would leave a file called `pi.app` behind a window titled
+# "wei Agent". The product is one name everywhere or it is two names.
+NAME="wei Agent"
+APP="$DIST/$NAME.app"
+# Inside the bundle the executable is one word: it is what `ps` shows, what a `pkill` pattern has to
+# match, and the thing that ends up in a crash report's path.
+EXECUTABLE="wei"
 
 # The version is the module's, so there is one place that says what this is. A packaging script with
 # its own version constant is a number nobody remembers to change.
@@ -41,7 +48,7 @@ VERSION="${VERSION:-0.0.0}"
 # The identifier is reversed-DNS by convention and this one is a placeholder: a real release sets it
 # to a domain the project controls, because changing it later is what makes macOS forget which app a
 # document or a saved window belongs to.
-BUNDLE_ID="${PI_SHELL_BUNDLE_ID:-io.github.lindividual.pi-shell}"
+BUNDLE_ID="${PI_SHELL_BUNDLE_ID:-io.github.lindividual.wei-agent}"
 
 echo "==> MoonBit side ($PROFILE)"
 "$MACOS/build-moonbit.sh" "$PROFILE"
@@ -82,7 +89,7 @@ fi
 echo "==> bundle"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BINARY" "$APP/Contents/MacOS/pi"
+cp "$BINARY" "$APP/Contents/MacOS/$EXECUTABLE"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -90,11 +97,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>pi</string>
+  <string>$NAME</string>
   <key>CFBundleDisplayName</key>
-  <string>pi</string>
+  <string>$NAME</string>
   <key>CFBundleExecutable</key>
-  <string>pi</string>
+  <string>$EXECUTABLE</string>
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
   <key>CFBundleInfoDictionaryVersion</key>
@@ -137,7 +144,7 @@ echo "$APP"
 echo "  version   $VERSION"
 echo "  bundle id $BUNDLE_ID"
 echo
-echo "open $APP        # or double-click it in Finder"
+echo "open \"$APP\"        # or double-click it in Finder"
 echo
 echo "Note: ad-hoc signed, so a copy that arrives over the network is refused by Gatekeeper. A"
 echo "release wants a Developer ID signature and notarization; this is enough for the machine that"

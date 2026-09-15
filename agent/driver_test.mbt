@@ -259,6 +259,7 @@ async fn context_for(
   base_url : String,
   entries : Array[@core.Entry],
   window? : Int,
+  jobs? : @core.JobStore,
 ) -> @agent.AgentContext {
   let path = "\{dir}/session.jsonl"
   let header : @core.SessionHeader = {
@@ -280,6 +281,7 @@ async fn context_for(
     tools~,
     base_url~,
     context_window=window.unwrap_or(@core.deepseek_v4_flash_context_window()),
+    jobs=jobs.unwrap_or(@core.JobStore::new()),
   )
 }
 
@@ -2406,4 +2408,98 @@ async test "opening a session repairs it but leaves the interrupted turn open" {
   assert_true(ids.contains("u1"))
   assert_true(ids.contains("a1"))
   assert_true(ids.contains("t1"))
+}
+
+///|
+/// Pictures attached to a prompt travel inside it, and the provider is sent them.
+///
+/// The whole feature is this one thing: an image is part of the question, so it is committed in the
+/// same entry as the text. Appending it as its own message would leave a replayed session with the
+/// picture after the answer to the question it belonged to — and the request would be a message the
+/// provider reads as a new turn.
+async test "an attached image is committed with its prompt and sent" {
+  let dir = scratch("prompt-image")
+  let seen : Array[String] = []
+  with_fake_model([text_sse("looked at it")], seen, async fn(base_url) {
+    let ctx = context_for(dir, base_url, [])
+    let png = @core.Content::Image(data="aGVsbG8=", mime_type="image/png")
+    let result = @agent.run_turn(
+      ctx,
+      "what is this?",
+      FIXED_TIME,
+      thinking_level="high",
+      prompt_images=[png],
+    )
+    assert_eq(result.replies, ["looked at it"])
+    // One request, and the picture is in it as the data URL the wire wants.
+    assert_eq(seen.length(), 1)
+    assert_true(seen[0].contains("data:image/png;base64,aGVsbG8="), msg=seen[0])
+
+    let session = logged(ctx.session_path)
+    let mut user_content : Array[@core.Content] = []
+    for entry in session.entries {
+      match entry.kind {
+        @core.Message(message=@core.User(user)) => user_content = user.content
+        _ => ()
+      }
+    }
+    // The text, then the picture, in one message rather than two.
+    assert_eq(user_content.length(), 2)
+    assert_true(user_content[0] is @core.Text("what is this?"))
+    assert_true(user_content[1] is @core.Image(..))
+  })
+}
+
+///|
+/// A prompt with no pictures is the message it always was.
+///
+/// The default has to be exactly this, because `prompt_images` is optional and four front ends pass
+/// none: a stray empty block would be a change to every request this project has ever recorded.
+async test "a prompt with no images is just its text" {
+  let dir = scratch("prompt-no-image")
+  let seen : Array[String] = []
+  with_fake_model([text_sse("hello")], seen, async fn(base_url) {
+    let ctx = context_for(dir, base_url, [])
+    ignore(@agent.run_turn(ctx, "hi", FIXED_TIME, thinking_level="high"))
+    let session = logged(ctx.session_path)
+    for entry in session.entries {
+      match entry.kind {
+        @core.Message(message=@core.User(user)) =>
+          assert_eq(user.content.length(), 1)
+        _ => ()
+      }
+    }
+  })
+}
+
+///|
+/// A call that never ran leaves no job behind.
+///
+/// The bug: a job record is created as soon as a call is seen to be the kind that leaves a process,
+/// and the record is normally settled by the tool reporting its pids. A tool that refuses *before*
+/// executing — an empty command, a dialect the tool does not take — never reports, so the record sat
+/// in the store claiming to be running forever: a row in the background panel with no process behind
+/// it, a Kill that reaches nothing, and one of the session's ten slots spent.
+///
+/// `call_open` is the flag that says "the call has not reported yet". A call that has *returned*
+/// with it still set is a call that never will.
+async test "a tool call that refuses before running leaves no job" {
+  let dir = scratch("empty-command-job")
+  let seen : Array[String] = []
+  with_fake_model([bash_tool_call_sse(""), text_sse("ok then")], seen, async fn(
+    base_url,
+  ) {
+    let jobs = @core.JobStore::new()
+    let ctx = context_for(dir, base_url, [], jobs~)
+    let result = @agent.run_turn(
+      ctx,
+      "run nothing",
+      FIXED_TIME,
+      thinking_level="high",
+    )
+    // The turn is unaffected: the refusal is a tool result like any other.
+    assert_eq(result.replies, ["ok then"])
+    // And nothing is left claiming to be running.
+    assert_eq(jobs.list().length(), 0, msg="a phantom job outlived its call")
+  })
 }

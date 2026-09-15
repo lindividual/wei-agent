@@ -1059,6 +1059,24 @@ async fn run_tools(
       )
       let finished = task.wait()
       publish(None)
+      // A call that registered a job but never got as far as reporting its processes is a record of
+      // something that never ran — an empty command, a dialect the tool refused, a parse that failed
+      // before `exec`. Nothing will ever report for it, so `call_open` is still true and the record
+      // would sit in the store claiming to be running for as long as the file survives: a row in the
+      // panel with no process behind it, no kill that can reach anything, and one of the session's
+      // ten slots gone.
+      //
+      // `note_execution` is the only thing that reports, and it does this itself for the case where
+      // the command *did* run — it forgets a job that left nothing behind. This is the same
+      // conclusion for the case where it never started.
+      match job_id {
+        Some(id) =>
+          match ctx.jobs.get(id) {
+            Some(job) => if job.call_open { ctx.jobs.forget(id) }
+            None => ()
+          }
+        None => ()
+      }
       finished
     })
     report({
@@ -1154,6 +1172,13 @@ pub async fn run_turn(
   /// the tool results that *were* recorded stay as they are, so the work already done is not done
   /// twice — the same property DBOS gets from checkpointing steps, which we get from the log.
   continuing? : Bool = false,
+  /// Blocks that travel with the prompt in the same user message. Images, in practice.
+  ///
+  /// They belong to the prompt rather than to the context, which is why they are here and not on
+  /// `AgentContext`: a picture the reader attached to a question is part of the question, and it
+  /// has to be committed in the same entry as the text or a resumed session would replay the
+  /// question without it. Empty for every caller that sends text, which is all of them but one.
+  prompt_images? : Array[@core.Content] = [],
   on_delta? : async (@core.StreamEvent) -> Unit,
   should_stop? : () -> Bool,
   /// Called after each tool finishes, for a caller rendering the turn live.
@@ -1264,12 +1289,15 @@ pub async fn run_turn(
   // A continued turn appends nothing here: the prompt it is carrying is already the last user
   // message in the log, and appending it again would put the question to the model twice.
   if !continuing {
+    // The text first, then the pictures: a reader's order, and the one the model reads.
+    let content : Array[@core.Content] = [@core.Text(prompt)]
+    for block in prompt_images {
+      content.push(block)
+    }
     session = commit(
       session,
       ctx.session_path,
-      @core.Message(
-        message=@core.User({ content: [@core.Text(prompt)], timestamp, }),
-      ),
+      @core.Message(message=@core.User({ content, timestamp, })),
       timestamp,
     )
     // The prompt is already part of what the next request carries, so the window has moved

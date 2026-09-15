@@ -449,3 +449,36 @@ async test "a non-image binary still reads as not text" {
     msg=output_text(output),
   )
 }
+
+///|
+/// The composer's own image reader answers the same questions the `read` tool does.
+///
+/// It exists so that a host attaching a screenshot gets the answer while the reader is still looking
+/// at the picker: the format is decided by the bytes and the size cap is the same one, which is the
+/// point of routing both through `load_image` rather than growing a second list of formats.
+async test "an image can be loaded for a reader, and a non-image is refused with a reason" {
+  let dir = scratch("load-image")
+  let bytes = Bytes::from_array([
+    b'\x89', b'\x50', b'\x4e', b'\x47', b'\x0d', b'\x0a', b'\x1a', b'\x0a', b'\x00',
+  ])
+  // No extension: the bytes are the evidence, here as much as in the read tool.
+  @fs.write_file("\{dir}/shot", bytes)
+  let loaded = match load_image("\{dir}/shot") {
+    Ok(image) => image
+    Err(reason) => fail("expected an image, got \{reason}")
+  }
+  assert_eq(loaded.mime_type, "image/png")
+  assert_eq(@base64.decode(loaded.data), bytes)
+
+  // A text file is not one, and the reader is told what the format list is rather than merely "no".
+  @fs.write_file("\{dir}/notes.txt", "hello\n")
+  match load_image("\{dir}/notes.txt") {
+    Ok(_) => fail("text is not an image")
+    Err(reason) => assert_true(reason.contains("not an image"), msg=reason)
+  }
+  // And a file that is not there says so, which is the other thing a picker can hand over.
+  match load_image("\{dir}/gone.png") {
+    Ok(_) => fail("a missing file is not an image")
+    Err(reason) => assert_true(reason.contains("no file at"), msg=reason)
+  }
+}

@@ -373,3 +373,20 @@ pub fn current_dir() -> String {
     None => "/"
   }
 }
+
+///|
+/// Remove a file, silently.
+///
+/// Silent because every caller is cleaning up after itself: a file it minted, a path it was told was
+/// temporary, or the output of a job it has already read. "It was already gone" is the outcome they
+/// wanted either way, and a cleanup that can fail a turn is worse than a file left behind.
+///
+/// Only for files. A directory needs `rmdir` and a recursive walk, and nothing here has a reason to
+/// do either — a caller that does is a caller that should be telling the reader what it is deleting.
+pub async fn delete_file(path : String) -> Unit {
+  try @fs.remove(path) catch {
+    _ => ()
+  } noraise {
+    _ => ()
+  }
+}

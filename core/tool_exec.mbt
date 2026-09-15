@@ -241,17 +241,23 @@ fn summarize(text : String) -> String {
   let flat = text.replace(old="\n", new="\\n")
   let flat = truncate_line(flat)
   if flat.length() > 60 {
-    "\{flat[:60]}…"
+    // Clamped rather than sliced: a summary of a line containing an emoji can
+    // land its cut inside a surrogate pair, which would abort while reporting
+    // an error.
+    "\{flat.clamped_view(end=60).to_owned()}…"
   } else {
     flat
   }
 }
 
 ///|
-/// Find every occurrence of `needle` in `haystack`, as byte offsets.
+/// Find every occurrence of `needle` in `haystack`, as code-unit offsets.
 ///
-/// A byte search is correct here because both strings come from the same file, so
-/// a match always begins and ends on a character boundary.
+/// Windows are compared through `get_view` rather than sliced, because a window
+/// boundary can land inside a surrogate pair — every non-BMP character is one —
+/// and slicing there aborts the whole program. `None` then simply means "this
+/// window is not a well-formed match", and every offset that is returned is one
+/// the caller can safely slice at.
 fn find_all(haystack : StringView, needle : StringView) -> Array[Int] {
   let found : Array[Int] = []
   if needle.length() == 0 || needle.length() > haystack.length() {
@@ -260,8 +266,9 @@ fn find_all(haystack : StringView, needle : StringView) -> Array[Int] {
   let last = haystack.length() - needle.length()
   let limit = last + 1
   for start in 0..<limit {
-    if haystack[start:start + needle.length()] == needle {
-      found.push(start)
+    match haystack.get_view(start~, end=start + needle.length()) {
+      Some(window) => if window == needle { found.push(start) }
+      None => ()
     }
   }
   found

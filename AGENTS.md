@@ -15,6 +15,20 @@ You can browse and install extra skills here:
 - In the toplevel directory, there is a `moon.mod` file listing module
   metadata.
 
+- **The native macOS shell is the main front end**; `ui/` (the web UI) is paused
+  (see `docs/adr/0007-macos-is-the-main-front-end.md`). Work in `macos/` splits
+  into a MoonBit side (`macos/appffi/`, built into `macos/vendor/libpiweb.a` by
+  `macos/build-moonbit.sh`) and a Swift side (`macos/PiShell/`). Facts about the
+  conversation belong in the MoonBit side; facts about the window belong in the
+  Swift side.
+
+- **Before touching `macos/`, skim `docs/macos-pitfalls.md`.** It is a
+  symptom/cause/fix table covering the build loop, SwiftUI, input methods,
+  platform-API discovery, and how to drive and test the app. Its most expensive
+  entry is a process one: a MoonBit-side change needs
+  `macos/build-moonbit.sh` *and* a fresh `macos/make-app.sh` before the app you
+  open contains it.
+
 ## Coding convention
 
 - MoonBit code is organized in block style, each block is separated by `///|`,

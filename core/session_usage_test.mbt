@@ -159,3 +159,26 @@ test "a cache-hit share never rounds a partial hit up to a full one" {
   assert_eq(format_cache_hit_percent(0, 100), Some("0"))
   assert_eq(format_cache_hit_percent(0, 0), None)
 }
+
+///|
+/// The context figure is the newest prompt the provider measured, not the sum of them.
+///
+/// The distinction is the whole point of the number: a reader wants to know how big the *next*
+/// request will be, and adding the prompts of twenty calls together answers a question nobody asked.
+test "the last prompt size is the newest one the provider reported" {
+  let header : SessionHeader = {
+    id: "s",
+    timestamp: format_iso_utc(0L),
+    cwd: "/tmp",
+    parent_session: None,
+    version: None,
+  }
+  assert_eq(Session::new(header, []).last_prompt_tokens(), 0)
+  let session = Session::new(header, [
+    usage_entry("a", None, 100, 20, 40, None),
+    // The second call's prompt is the first one's plus what it added, which is why the last
+    // measurement is the one that describes the conversation now.
+    usage_entry("b", Some("a"), 300, 30, 50, None),
+  ])
+  assert_eq(session.last_prompt_tokens(), 350)
+}

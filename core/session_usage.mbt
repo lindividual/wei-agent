@@ -89,6 +89,36 @@ pub fn Session::usage(self : Session) -> SessionUsage {
 }
 
 ///|
+/// The size of the most recent request, as the provider measured it.
+///
+/// The billed input of the last assistant message that reported one. The provider is the only thing
+/// that knows how big a prompt really was, and this is what it said about the request it answered —
+/// which is why the figure is a measurement rather than an estimate, and why it is the *newest* one:
+/// what a reader wants from a context figure is how close the conversation is to the model's window.
+///
+/// Zero for a conversation nothing has answered yet, which a reader can read as "nothing sent",
+/// and which is exactly what it means.
+pub fn Session::last_prompt_tokens(self : Session) -> Int {
+  let mut measured = 0
+  for entry in self.path() {
+    match entry.kind {
+      Message(message~) =>
+        match message {
+          Assistant(assistant) =>
+            // Compactions are skipped on purpose: a summarization call's prompt is the history it
+            // is replacing, not the conversation the next request will carry.
+            if assistant.usage.billed_input() > 0 {
+              measured = assistant.usage.billed_input()
+            }
+          _ => ()
+        }
+      _ => ()
+    }
+  }
+  measured
+}
+
+///|
 fn add(total : SessionUsage, usage : Usage) -> SessionUsage {
   // A `match` inside an arithmetic expression needs its own parentheses; binding it first reads
   // better anyway, since the field is optional in the log.
