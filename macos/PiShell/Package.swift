@@ -64,5 +64,16 @@ let package = Package(
     // in `macos/appffi/app_wbtest.mbt`. Neither test can see the other, and a rename that only one
     // of them noticed would be two builds that disagree about a field name.
     .testTarget(name: "PiModelTests", dependencies: ["PiModel"]),
+
+    // The boundary itself, with the real runtime behind it. It exists for one bug — the app installed
+    // a reader but never registered the C callback, so it received nothing and looked like a shell
+    // with nothing to say — and it is the only test that can catch that class of failure, because
+    // that failure is in the wiring rather than in any decoding. It links the archive, so `swift test`
+    // needs `macos/build-moonbit.sh` to have run.
+    .testTarget(
+      name: "PiShellTests",
+      dependencies: ["PiKit", "PiShellC"],
+      linkerSettings: linkPiWeb
+    ),
   ]
 )
