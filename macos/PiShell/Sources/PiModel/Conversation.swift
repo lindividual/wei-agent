@@ -30,11 +30,18 @@ public struct Row: Identifiable, Equatable, Decodable {
     public var detail: String = ""
     public var output: String = ""
     public var isError: Bool = false
+    /// The parse of `text`, when the shell has sent one.
+    ///
+    /// `nil` for a row that is still arriving, and for one whose text has nothing to parse — the
+    /// shell sends a parse once, when a block stops growing, because re-parsing a growing block on
+    /// every delta is quadratic (the web UI measured it: 40KB of reasoning in 64-character frames).
+    /// The view's rule is the simple one: draw the parse if it is here, the text otherwise.
+    public var blocks: [Block]?
 
     /// `isError` crosses as `error`, the same name the `tool` event uses for the same fact — one
     /// field, spelled once, so a row from a history and a row from a live stream decode alike.
     private enum CodingKeys: String, CodingKey {
-        case id, kind, text, complete, name, detail, output
+        case id, kind, text, complete, name, detail, output, blocks
         case isError = "error"
     }
 
@@ -46,7 +53,8 @@ public struct Row: Identifiable, Equatable, Decodable {
         name: String = "",
         detail: String = "",
         output: String = "",
-        isError: Bool = false
+        isError: Bool = false,
+        blocks: [Block]? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -56,6 +64,7 @@ public struct Row: Identifiable, Equatable, Decodable {
         self.detail = detail
         self.output = output
         self.isError = isError
+        self.blocks = blocks
     }
 }
 
@@ -90,6 +99,14 @@ public struct Conversation: Equatable {
             openBlock.removeAll()
             nextNote = 0
             return
+        case let .blocks(id, blocks):
+            // The row stopped growing and this is how it should be drawn. Patched in place rather
+            // than appended: the row is already on screen from its deltas, and the parse describes
+            // the text that is already there.
+            if let index = rows.firstIndex(where: { $0.id == id }) {
+                rows[index].blocks = blocks
+            }
+
         case .sessions, .session, .settings:
             // The sidebar's and the panel's own facts. The transcript is unchanged by any of them: a
             // switch says which session is open and only the history that follows says what is in it.

@@ -240,6 +240,30 @@ fn say_piece(kind : String, id : String, delta : String) -> Unit {
 }
 
 ///|
+/// A block that has stopped growing, and how to draw it.
+///
+/// The parse is sent when the block is over rather than with every delta, and the reason is the one
+/// the web UI paid for first: re-parsing a growing block on each frame is quadratic, and 40KB of
+/// reasoning arriving 64 characters at a time is the measurement. A row that is still arriving is
+/// plain text on the host, which is cheap and always right; this is what it becomes when it stops.
+///
+/// The shell does the parsing because the host cannot: `AttributedString(markdown:)` takes the source
+/// rather than a parse, so a table arrives as its own punctuation and a fenced block loses its
+/// language. `md/` is cmark — the same engine the web UI renders with — so both front ends have the
+/// same opinion about the same answer, which is the whole reason it is a shared package.
+fn say_blocks(id : String, text : String) -> Unit {
+  if id == "" || text == "" {
+    return
+  }
+  emit(
+    event("blocks", [
+      ("id", Json::string(id)),
+      ("blocks", @md.blocks_json(text)),
+    ]),
+  )
+}
+
+///|
 /// A tool, running or finished, always under the same id so the finished row replaces the running
 /// one instead of leaving it behind.
 fn say_tool(
@@ -364,6 +388,18 @@ async fn Shell::run_turn(self : Shell, prompt : String) -> Unit {
   let mut piece_id = ""
   let mut piece_seq = 0
   let mut piece_kind = ""
+  // The text of the block that is still arriving, accumulated from the deltas so that its parse can
+  // be sent the moment it stops. A `StringBuilder` rather than `+`: a long answer arrives in hundreds
+  // of frames, and repeated concatenation is the quadratic this path exists to avoid.
+  let piece_text = StringBuilder()
+  // The open block is over: send its parse, and start the next one empty. Called where a block stops
+  // being the newest thing that happened — a tool, the other kind of text, or the end of the turn —
+  // which are exactly the moments the host stops appending to that row.
+  let close_piece = () => {
+    say_blocks(piece_id, piece_text.to_string())
+    piece_text.reset()
+    piece_kind = ""
+  }
   // A tool is one row from start to finish, so the id is chosen when it starts and reused when it
   // reports. The report does not carry the id the start did — it carries the model's `call_id`,
   // which the running handle never had — so the pairing has to be kept here.
@@ -372,6 +408,9 @@ async fn Shell::run_turn(self : Shell, prompt : String) -> Unit {
   // Bumped by a tool, so the answer that follows one is a new block rather than more text on the
   // block from before the tool call.
   let new_piece = (kind : String) => {
+    // Before the id moves: whatever was arriving is finished, and this is the last moment its text is
+    // still here.
+    close_piece()
     piece_seq += 1
     piece_id = "\{kind}-\{piece_seq}"
     piece_kind = kind
@@ -383,6 +422,7 @@ async fn Shell::run_turn(self : Shell, prompt : String) -> Unit {
       @core.Thinking(delta~) => ("thinking", delta)
     }
     let id = if piece_kind == kind { piece_id } else { new_piece(kind) }
+    piece_text.write_string(text)
     say_piece(kind, id, text)
   }
   let on_tool_process : async (@agent.ToolHandle?) -> Unit = handle => {
@@ -392,8 +432,8 @@ async fn Shell::run_turn(self : Shell, prompt : String) -> Unit {
         let id = "tool-\{tool_seq}"
         open_tool = Some(id)
         // The next text belongs to a new block. This is the moment the previous one stopped being
-        // the newest thing that happened.
-        piece_kind = ""
+        // the newest thing that happened, so this is where its parse goes out.
+        close_piece()
         say_tool(id, running.name, running.detail, false, "", false)
       }
       None => ()
@@ -454,12 +494,18 @@ async fn Shell::run_turn(self : Shell, prompt : String) -> Unit {
     on_commit~,
   ) catch {
     err => {
+      // The block that was arriving stopped here, mid-sentence. Its parse still goes out: a turn that
+      // failed partway through is exactly when a reader reads back what the model had said, and
+      // plain text with a table in it is where a half-answer looks broken rather than cut short.
+      close_piece()
       say_error("the turn failed: \{err}")
       say_status("failed")
       return
     }
   }
   self.session = finished.session
+  // The last block of the turn, which no tool and no new block ever closed.
+  close_piece()
   say_end(
     ending_text(finished, self.aborting.val),
     finished.model_calls,

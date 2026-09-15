@@ -1,6 +1,7 @@
 import {
   "lindividual/pi-web-shell/agent",
   "lindividual/pi-web-shell/core",
+  "lindividual/pi-web-shell/md",
   "lindividual/pi-web-shell/platform",
   "moonbitlang/async",
   "moonbitlang/core/encoding/utf8",

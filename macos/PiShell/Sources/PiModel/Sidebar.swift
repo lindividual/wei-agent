@@ -49,3 +49,122 @@ public struct SessionGroup: Identifiable, Equatable, Decodable {
 
     public var id: String { cwd }
 }
+
+/// One finished block of markdown, as the shell parsed it.
+///
+/// The parse happens in the shell — `md/`, which is cmark, the same engine the web UI renders with —
+/// and crosses as data, because a native host has no parser of its own that agrees with it:
+/// `AttributedString(markdown:)` takes the *source* rather than a parse, so a table arrives as its own
+/// punctuation and a fenced block's language is dropped on the floor.
+///
+/// Coarse on purpose. What crosses is what this agent's answers actually use: headings, paragraphs,
+/// code, lists, quotes, rules, tables, and a few inline spans. Anything outside that set is plain text
+/// rather than nothing — a block the host cannot draw is still text it can show.
+public enum Block: Equatable, Decodable {
+    case paragraph([Span])
+    case heading(level: Int, spans: [Span])
+    case code(lang: String, text: String)
+    case bullets([[Block]])
+    case numbers(start: Int, items: [[Block]])
+    case quote([Block])
+    case rule
+    case table(header: [[Span]], rows: [[[Span]]], align: [Align])
+
+    /// How a column's cells line up. The one thing a markdown table says that its cells do not.
+    public enum Align: String, Equatable, Decodable {
+        case left
+        case center
+        case right
+    }
+
+    /// A run of styled text inside a block.
+    ///
+    /// A flat list rather than a tree, which is what makes `**bold and *italic***` one pass on this
+    /// side: the nesting is *accumulated* as the host walks down. `link` is the one case that carries
+    /// its own spans, because the target is a property of the link rather than of the words in it.
+    public indirect enum Span: Equatable, Decodable {
+        case text(String)
+        case code(String)
+        case emph([Span])
+        case strong([Span])
+        case strike([Span])
+        case link(url: String, spans: [Span])
+
+        /// The same tagged shape one level down, and the same reason for it.
+        public init(from decoder: Decoder) throws {
+            let fields = try decoder.container(keyedBy: SpanKeys.self)
+            let kind = try fields.decode(SpanKind.self, forKey: .t)
+            switch kind {
+            case .text:
+                self = .text(try fields.decode(String.self, forKey: .text))
+            case .code:
+                self = .code(try fields.decode(String.self, forKey: .text))
+            case .em:
+                self = .emph(try fields.decode([Span].self, forKey: .spans))
+            case .strong:
+                self = .strong(try fields.decode([Span].self, forKey: .spans))
+            case .del:
+                self = .strike(try fields.decode([Span].self, forKey: .spans))
+            case .link:
+                self = .link(
+                    url: try fields.decode(String.self, forKey: .url),
+                    spans: try fields.decode([Span].self, forKey: .spans)
+                )
+            }
+        }
+
+        private enum SpanKeys: String, CodingKey {
+            case t, text, spans, url
+        }
+
+        private enum SpanKind: String, Decodable {
+            case text, code, em, strong, del, link
+        }
+    }
+
+    /// Tagged objects — `{"t":"heading",…}` — so a field added later cannot shift the meaning of one
+    /// already there. The same reasoning as the events, and the same decoder.
+    private enum CodingKeys: String, CodingKey {
+        case t, level, text, lang, items, start, blocks, header, rows, align, spans
+    }
+
+    private enum Kind: String, Decodable {
+        case p, h, code, ul, ol, quote, hr, table
+    }
+
+    public init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try fields.decode(Kind.self, forKey: .t)
+        switch kind {
+        case .p:
+            self = .paragraph(try fields.decode([Span].self, forKey: .spans))
+        case .h:
+            self = .heading(
+                level: try fields.decode(Int.self, forKey: .level),
+                spans: try fields.decode([Span].self, forKey: .spans)
+            )
+        case .code:
+            self = .code(
+                lang: try fields.decode(String.self, forKey: .lang),
+                text: try fields.decode(String.self, forKey: .text)
+            )
+        case .ul:
+            self = .bullets(try fields.decode([[Block]].self, forKey: .items))
+        case .ol:
+            self = .numbers(
+                start: try fields.decodeIfPresent(Int.self, forKey: .start) ?? 1,
+                items: try fields.decode([[Block]].self, forKey: .items)
+            )
+        case .quote:
+            self = .quote(try fields.decode([Block].self, forKey: .blocks))
+        case .hr:
+            self = .rule
+        case .table:
+            self = .table(
+                header: try fields.decode([[Span]].self, forKey: .header),
+                rows: try fields.decode([[[Span]]].self, forKey: .rows),
+                align: try fields.decode([Align].self, forKey: .align)
+            )
+        }
+    }
+}

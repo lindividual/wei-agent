@@ -235,9 +235,11 @@ private struct RowView: View {
                 .frame(maxWidth: .infinity, alignment: .trailing)
 
         case .reply:
-            Text(rendered(row))
-                .font(.system(size: 13))
-                .textSelection(.enabled)
+            // The parse if the shell has sent one, the raw text if it has not. Either way the words are
+            // the same; what the parse adds is what markdown *means* — a table, a heading, a fence's
+            // language — which is the part `AttributedString(markdown:)` gets wrong and the reason the
+            // shell parses at all.
+            BlockView(blocks: row.blocks, plain: row.text)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
         case .thinking:
@@ -260,15 +262,6 @@ private struct RowView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
         }
-    }
-
-    /// Markdown for a finished block, plain text for one that is still arriving.
-    ///
-    /// The rule is the cost: re-parsing the whole of a growing block on every delta is quadratic,
-    /// and the web UI paid for that lesson with 40KB of reasoning arriving in 64-character frames.
-    private func rendered(_ row: Row) -> AttributedString {
-        guard row.complete else { return AttributedString(row.text) }
-        return (try? AttributedString(markdown: row.text)) ?? AttributedString(row.text)
     }
 }
 
@@ -335,5 +328,272 @@ private struct Composer: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+}
+
+/// A finished block of markdown, drawn from the parse.
+///
+/// The host draws what the shell parsed rather than parsing the source itself. That is not an
+/// optimisation — it is the only way the two front ends agree: `md/` is cmark, the same engine the web
+/// UI renders with, and `AttributedString(markdown:)` is a different markdown implementation that never
+/// sees a table at all and drops a fenced block's language.
+///
+/// Every case is drawn, and the ones that are awkward on purpose — a code fence with no language, a
+/// heading deeper than the font sizes this file has, a table wider than the window — are handled rather
+/// than dropped, because a block the host cannot draw is an answer the reader cannot read.
+private struct BlockView: View {
+    let blocks: [Block]?
+    let plain: String
+
+    var body: some View {
+        if let blocks, !blocks.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                    BlockBody(block: block)
+                }
+            }
+        } else {
+            // Still arriving, or nothing to parse: the text is the answer, and it is shown as it is.
+            Text(plain)
+                .font(.system(size: 13))
+                .textSelection(.enabled)
+        }
+    }
+}
+
+/// One block, drawn.
+private struct BlockBody: View {
+    let block: Block
+
+    var body: some View {
+        switch block {
+        case let .paragraph(spans):
+            Text(Styled.spans(spans))
+                .font(.system(size: 13))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+
+        case let .heading(level, spans):
+            Text(Styled.spans(spans))
+                .font(.system(size: Self.headingSize(level), weight: .semibold))
+                .textSelection(.enabled)
+                .padding(.top, level <= 2 ? 4 : 2)
+
+        case let .code(lang, text):
+            CodeBlock(lang: lang, text: text)
+
+        case let .bullets(items):
+            ListView(items: items, ordered: false)
+
+        case let .numbers(start, items):
+            ListView(items: items, ordered: true, start: start)
+
+        case let .quote(blocks):
+            QuoteView(blocks: blocks)
+
+        case .rule:
+            Rectangle()
+                .fill(.quaternary)
+                .frame(height: 1)
+                .padding(.vertical, 2)
+
+        case let .table(header, rows, align):
+            TableView(header: header, rows: rows, align: align)
+        }
+    }
+
+    /// A heading's size by its level, and a floor under it: `###### deep` is still a heading, and it
+    /// should not come out smaller than the paragraph under it.
+    private static func headingSize(_ level: Int) -> CGFloat {
+        switch level {
+        case 1: return 19
+        case 2: return 16
+        case 3: return 14
+        default: return 13
+        }
+    }
+}
+
+/// A fenced block: its language, and its text.
+///
+/// The language is drawn only when the fence had one, because an empty label is a label that says
+/// nothing. The text is monospaced and scrolls horizontally rather than wrapping: a wrapped line of
+/// code is a line whose indentation no longer means what it says.
+private struct CodeBlock: View {
+    let lang: String
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if !lang.isEmpty {
+                Text(lang)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(text)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(8)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+/// A bulleted or numbered list.
+///
+/// Rendered by the host rather than by markdown, because a list item is a *container*: the parse keeps
+/// an item's second paragraph inside that item, and a host that drew the markdown source would put it
+/// beside the list instead.
+private struct ListView: View {
+    let items: [[Block]]
+    let ordered: Bool
+    var start: Int = 1
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(ordered ? "\(start + index)." : "•")
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 16, alignment: .trailing)
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(item.enumerated()), id: \.offset) { _, block in
+                            BlockBody(block: block)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct QuoteView: View {
+    let blocks: [Block]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                BlockBody(block: block)
+            }
+        }
+        .padding(.leading, 10)
+        .foregroundStyle(.secondary)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(.quaternary).frame(width: 2)
+        }
+    }
+}
+
+/// A markdown table, with the alignments the source asked for.
+///
+/// A grid rather than a `Grid`, because the rows here are data of varying length: a `Grid` wants to be
+/// told its structure up front, and a model's table sometimes has a row with a cell missing. The widths
+/// come from the content, and the whole thing scrolls sideways rather than reflowing — a table narrowed
+/// into a single column is no longer a table.
+private struct TableView: View {
+    let header: [[Block.Span]]
+    let rows: [[[Block.Span]]]
+    let align: [Block.Align]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                row(header, isHeader: true)
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, cells in
+                    Divider()
+                    row(cells, isHeader: false)
+                }
+            }
+        }
+        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func row(_ cells: [[Block.Span]], isHeader: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { index, spans in
+                Text(Styled.spans(spans))
+                    .font(.system(size: 12, weight: isHeader ? .semibold : .regular))
+                    .multilineTextAlignment(textAlignment(index))
+                    .frame(minWidth: 60, alignment: frameAlignment(index))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                if index < cells.count - 1 {
+                    Divider()
+                }
+            }
+        }
+    }
+
+    /// A column's alignment, defaulting to leading for a table that named fewer alignments than it has
+    /// columns — which is a table written by hand rather than by a parser.
+    private func textAlignment(_ column: Int) -> TextAlignment {
+        switch column < align.count ? align[column] : .left {
+        case .left: return .leading
+        case .center: return .center
+        case .right: return .trailing
+        }
+    }
+
+    private func frameAlignment(_ column: Int) -> Alignment {
+        switch column < align.count ? align[column] : .left {
+        case .left: return .leading
+        case .center: return .center
+        case .right: return .trailing
+        }
+    }
+}
+
+/// Spans to text, with the styles accumulated.
+///
+/// Accumulating rather than recursing is what the flat span list is for: `**bold with *italic* in it**`
+/// arrives as `strong` containing `emph`, and the host applies one on top of the other as it descends.
+/// The nesting is bounded by how deeply anyone writes markdown, so the recursion here is in the spirit
+/// of the format rather than a risk.
+private enum Styled {
+    static func spans(_ spans: [Block.Span]) -> AttributedString {
+        var out = AttributedString()
+        for span in spans {
+            out.append(one(span))
+        }
+        return out
+    }
+
+    private static func one(_ span: Block.Span) -> AttributedString {
+        switch span {
+        case let .text(text):
+            return AttributedString(text)
+        case let .code(code):
+            var out = AttributedString(code)
+            out.font = .system(size: 12, design: .monospaced)
+            // A concrete colour rather than `.quaternary`: the attribute takes a `Color`, and the
+            // hierarchical styles are `ShapeStyle`s that only resolve inside a view.
+            out.backgroundColor = Color(nsColor: .quaternaryLabelColor).opacity(0.18)
+            return out
+        case let .emph(inner):
+            var out = spans(inner)
+            out.inlinePresentationIntent = .emphasized
+            return out
+        case let .strong(inner):
+            var out = spans(inner)
+            out.inlinePresentationIntent = .stronglyEmphasized
+            return out
+        case let .strike(inner):
+            var out = spans(inner)
+            out.strikethroughStyle = .single
+            return out
+        case let .link(url, inner):
+            var out = spans(inner)
+            // The scheme is checked rather than trusted: a model can emit `javascript:` in a link, and
+            // a link the platform will not open is better drawn as plain text than as a button that
+            // does nothing.
+            out.link = URL(string: url)
+            out.foregroundColor = .accentColor
+            out.underlineStyle = .single
+            return out
+        }
     }
 }

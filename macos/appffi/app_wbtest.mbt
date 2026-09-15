@@ -177,7 +177,7 @@ test "history keeps one row per tool, with its output attached" {
   let rows = history_rows(@core.parse_session_file(text))
   inspect(
     rows.map(row => row.stringify()).join("\n"),
-    content="{\"kind\":\"user\",\"id\":\"h-1\",\"text\":\"list it\",\"complete\":true,\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false}\n{\"kind\":\"tool\",\"id\":\"h-2\",\"text\":\"\",\"complete\":true,\"name\":\"bash\",\"detail\":\"ls\",\"output\":\"a.txt\",\"error\":false}",
+    content="{\"kind\":\"user\",\"id\":\"h-1\",\"text\":\"list it\",\"complete\":true,\"blocks\":[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"list it\"}]}],\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false}\n{\"kind\":\"tool\",\"id\":\"h-2\",\"text\":\"\",\"complete\":true,\"blocks\":null,\"name\":\"bash\",\"detail\":\"ls\",\"output\":\"a.txt\",\"error\":false}",
   )
 }
 
@@ -283,4 +283,57 @@ test "settings carry the key source, the flags, the mode and the file" {
     json.stringify(),
     content="{\"kind\":\"settings\",\"key\":\"environment\",\"env\":true,\"saved\":true,\"mode\":\"code\",\"path\":\"/Users/me/.pi-mb/settings.json\"}",
   )
+}
+
+///|
+/// A live block's parse is sent when the block stops growing, and only then.
+///
+/// The timing is the whole of the design: a row that is still arriving is plain text on the host,
+/// because re-parsing a growing block on every delta is quadratic — measured, the web UI paid for that
+/// lesson with 40KB of reasoning in 64-character frames. So this event exists for the moment a block
+/// is over, and what is sent is the same parse the `history` event carries, from the same `md` package
+/// the web UI renders with.
+test "a finished block carries its parse, and an empty one carries nothing" {
+  let json = event("blocks", [
+    ("id", Json::string("reply-2")),
+    ("blocks", @md.blocks_json("## Heading\n\nwith `code`\n")),
+  ])
+  inspect(
+    json.stringify(),
+    content="{\"kind\":\"blocks\",\"id\":\"reply-2\",\"blocks\":[{\"t\":\"h\",\"level\":2,\"spans\":[{\"t\":\"text\",\"text\":\"Heading\"}]},{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"with \"},{\"t\":\"code\",\"text\":\"code\"}]}]}",
+  )
+  // The three shapes the host branches on: a table, a fence with a language, and the null a row with
+  // no text carries. All three are cases `AttributedString(markdown:)` gets wrong, which is why the
+  // parse crosses as data rather than as source.
+  inspect(
+    @md.blocks_json("| a | b |\n|:--|--:|\n| 1 | 2 |\n").stringify(),
+    content="[{\"t\":\"table\",\"header\":[[{\"t\":\"text\",\"text\":\"a\"}],[{\"t\":\"text\",\"text\":\"b\"}]],\"rows\":[[[{\"t\":\"text\",\"text\":\"1\"}],[{\"t\":\"text\",\"text\":\"2\"}]]],\"align\":[\"left\",\"right\"]}]",
+  )
+  inspect(
+    @md.blocks_json("```moonbit\nfn main {}\n```\n").stringify(),
+    content="[{\"t\":\"code\",\"lang\":\"moonbit\",\"text\":\"fn main {}\"}]",
+  )
+  // Nothing to parse is the one value the host treats as "draw the text instead". Asserted through
+  // the JSON literal rather than the value's own printer, because it is the literal that crosses.
+  inspect(blocks_of("") is Json::Null, content="true")
+}
+
+///|
+/// A row of a history carries both the fact that it is finished and its parse.
+///
+/// `complete` is what tells the host the row has stopped changing, and the parse is what it draws it
+/// with. Dropping either one breaks the window: without `complete` the row does not decode at all and
+/// the whole transcript goes blank, which is exactly what happened when the parse was added and
+/// `complete` was taken away in its place.
+test "a history row is complete and carries its parse" {
+  let session = @core.parse_session_file(@core.small_session_file)
+  let rows = history_rows(session)
+  for row in rows {
+    let fields = match row {
+      Json::Object(fields) => fields
+      _ => fail("a row is not an object")
+    }
+    inspect(fields.get("complete").unwrap().stringify(), content="true")
+    assert_true(fields.get("blocks") is Some(_), msg="no blocks field")
+  }
 }

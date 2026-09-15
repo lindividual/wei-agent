@@ -135,3 +135,132 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(conversation.rows.count, 1)
     }
 }
+
+/// The markdown the shell parses, from the side that draws it.
+///
+/// The literals here are the ones `macos/appffi/app_wbtest.mbt` asserts, and that is the point of the
+/// package bounds: the shell parses with cmark, the host draws from this shape, and neither can rename
+/// a field without the other's build failing.
+///
+/// These are the cases `AttributedString(markdown:)` — what the app used before `md/` existed — gets
+/// wrong, which is why the parse crosses as data rather than as source.
+final class BlockTests: XCTestCase {
+    private func decode(_ line: String) -> PiEvent? {
+        PiEvent.decode(line: line)
+    }
+
+    /// The three shapes a native markdown implementation gets wrong, and the one it has no answer for.
+    func testTheFourShapesThatMadeThisNecessary() throws {
+        // A fence keeps its language, which is what a host uses to pick a highlight or at least a label.
+        let code = try XCTUnwrap(
+            decode(#"{"kind":"blocks","id":"reply-1","blocks":[{"t":"code","lang":"moonbit","text":"fn main {}"}]}"#)
+        )
+        guard case let .blocks(_, blocks) = code else { return XCTFail("expected blocks") }
+        guard case let .code(lang, text) = blocks[0] else { return XCTFail("expected a fence") }
+        XCTAssertEqual(lang, "moonbit")
+        XCTAssertEqual(text, "fn main {}")
+
+        // A table, with its alignments — a thing `AttributedString` does not parse at all.
+        let table = try XCTUnwrap(
+            decode(
+                #"{"kind":"blocks","id":"reply-2","blocks":[{"t":"table","header":[[{"t":"text","text":"a"}],[{"t":"text","text":"b"}]],"rows":[[[{"t":"text","text":"1"}],[{"t":"text","text":"2"}]]],"align":["left","right"]}]}"#
+            )
+        )
+        guard case let .blocks(_, tableBlocks) = table else { return XCTFail("expected blocks") }
+        guard case let .table(header, rows, align) = tableBlocks[0] else {
+            return XCTFail("expected a table")
+        }
+        XCTAssertEqual(header.count, 2)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(align, [.left, .right])
+
+        // A heading, whose level is a number rather than six font sizes the host has to guess at.
+        let heading = try XCTUnwrap(
+            decode(#"{"kind":"blocks","id":"reply-3","blocks":[{"t":"h","level":3,"spans":[{"t":"text","text":"Title"}]}]}"#)
+        )
+        guard case let .blocks(_, headings) = heading else { return XCTFail("expected blocks") }
+        guard case let .heading(level, spans) = headings[0] else { return XCTFail("expected a heading") }
+        XCTAssertEqual(level, 3)
+        XCTAssertEqual(spans, [.text("Title")])
+
+        // And a nested list item, which the host has to draw as a container: the parse keeps an item's
+        // second block inside that item.
+        let list = try XCTUnwrap(
+            decode(
+                #"{"kind":"blocks","id":"reply-4","blocks":[{"t":"ul","items":[[{"t":"p","spans":[{"t":"text","text":"one"}]}],[{"t":"p","spans":[{"t":"text","text":"two"}]},{"t":"ul","items":[[{"t":"p","spans":[{"t":"text","text":"nested"}]}]]}]]}]}"#
+            )
+        )
+        guard case let .blocks(_, lists) = list else { return XCTFail("expected blocks") }
+        guard case let .bullets(items) = lists[0] else { return XCTFail("expected a list") }
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(items[1].count, 2, "the nested list belongs to the second item")
+    }
+
+    /// The styles, which is the part of markdown that nests.
+    ///
+    /// A flat span list with the nesting *inside* each case: `***both***` arrives as `strong` holding
+    /// `emph`, and the host applies one on top of the other as it descends rather than walking a tree it
+    /// cannot see.
+    func testSpansCarryTheirOwnNesting() throws {
+        let event = try XCTUnwrap(
+            decode(
+                #"{"kind":"blocks","id":"reply-5","blocks":[{"t":"p","spans":[{"t":"text","text":"a "},{"t":"strong","spans":[{"t":"em","spans":[{"t":"text","text":"both"}]}]},{"t":"code","text":"x"},{"t":"link","url":"https://x.y","spans":[{"t":"text","text":"here"}]}]}]}"#
+            )
+        )
+        guard case let .blocks(_, blocks) = event else { return XCTFail("expected blocks") }
+        guard case let .paragraph(spans) = blocks[0] else { return XCTFail("expected a paragraph") }
+        XCTAssertEqual(spans.count, 4)
+        XCTAssertEqual(spans[0], .text("a "))
+        XCTAssertEqual(spans[1], .strong([.emph([.text("both")])]))
+        XCTAssertEqual(spans[2], .code("x"))
+        XCTAssertEqual(spans[3], .link(url: "https://x.y", spans: [.text("here")]))
+    }
+
+    /// A parse lands in the row it names, and the row keeps its text.
+    func testABlockParseIsPatchedIntoTheRowItNames() {
+        var conversation = Conversation()
+        conversation.apply(.reply(id: "reply-1", delta: "| a | b |"))
+        XCTAssertNil(conversation.rows[0].blocks, "a row that is still arriving is drawn as text")
+
+        conversation.apply(
+            .blocks(
+                id: "reply-1",
+                blocks: [.table(header: [[.text("a")], [.text("b")]], rows: [], align: [.left, .right])]
+            )
+        )
+        XCTAssertNotNil(conversation.rows[0].blocks)
+        XCTAssertEqual(conversation.rows[0].text, "| a | b |", "the text is what the parse is of")
+
+        // A parse for a row that is not here is dropped rather than appended: it describes text that
+        // this conversation does not have.
+        conversation.apply(.blocks(id: "reply-99", blocks: [.rule]))
+        XCTAssertEqual(conversation.rows.count, 1)
+    }
+
+    /// A history arrives with its parses already in it, which is the whole point of sending them.
+    func testAHistoryRowCarriesItsParse() throws {
+        let line = #"""
+        {"kind":"history","rows":[{"kind":"reply","id":"h-1","text":"# Title","complete":true,"blocks":[{"t":"h","level":1,"spans":[{"t":"text","text":"Title"}]}],"name":"","detail":"","output":"","error":false}]}
+        """#
+        let event = try XCTUnwrap(decode(line))
+        guard case let .history(rows) = event else { return XCTFail("expected history") }
+        XCTAssertTrue(rows[0].complete)
+        guard case let .heading(level, spans)? = rows[0].blocks?[0] else {
+            return XCTFail("the row's parse did not survive decoding")
+        }
+        XCTAssertEqual(level, 1)
+        XCTAssertEqual(spans, [.text("Title")])
+    }
+
+    /// A row with nothing to parse says so with `null`, and one that is still arriving says nothing —
+    /// both are `nil` here, which is why the view's rule is "blocks if they are here, text otherwise".
+    func testNoParseIsNilRatherThanEmpty() throws {
+        let row = try XCTUnwrap(
+            decode(
+                #"{"kind":"history","rows":[{"kind":"tool","id":"h-1","text":"","complete":true,"blocks":null,"name":"bash","detail":"ls","output":"","error":false}]}"#
+            )
+        )
+        guard case let .history(rows) = row else { return XCTFail("expected history") }
+        XCTAssertNil(rows[0].blocks)
+    }
+}

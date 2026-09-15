@@ -104,6 +104,21 @@ macOS 需要主线程跑自己的事件循环。**两者不能是同一个线程
   「load earlier」窗口 —— 都不在。
 - 设置面板能改的东西，这里一个都改不了。
 
+## markdown：为什么解析在 shell 而不是 host
+
+原生的 `Text` 不能被喂 `<h2>`，而 `AttributedString(markdown:)` 拿的是**源码**不是解析结果 ——
+它看不见表格，围栏的语言标签会被丢掉，标题层级只剩字号。所以解析在 `md/` 里做，结果当数据跨过去：
+
+| 时机 | 线上跑什么 |
+|---|---|
+| 流式期间 | 只有 `reply`/`thinking` 的 delta。半截的 `**bo` 渲染出来是错的，而且每个 delta 重解析累积文本是 O(n²) |
+| 块停止增长 | 一条 `blocks` 事件：这个 id 的解析结果。触发点是「下一段文本属于新块」——工具开始、另一种文本开始、turn 结束 |
+| 打开会话 | `history` 的每一行自带 `blocks`（整段历史一次解析，不是每行一问） |
+
+`md/` 是 cmark —— **和 Web 版渲染用的是同一个引擎**，这是它作为共享包存在的全部理由：两个前端
+对同一段 markdown 要有同一个意见。Swift 侧只负责画：`Block`/`Span` 的 tagged JSON 在
+`PiModel/Sidebar.swift` 里解码，`RootView.swift` 里逐种块画（表格、围栏、列表、引用各自成视图）。
+
 ## 打包
 
 ```bash

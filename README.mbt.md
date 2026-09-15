@@ -7,6 +7,7 @@ agent 内核，加一个服务器渲染的 Web UI，交付形态是单个 native
 core/      纯逻辑：消息模型、DeepSeek 编解码、agent 状态机、会话树、工具、压缩
 platform/  native 实现：HTTP/SSE、文件系统、进程、script
 agent/     驱动：把状态机接到模型与工具
+md/        markdown → 块/span 树（cmark），两个前端共用
 html/      HTML DSL、转义、渲染、Patch
 server/    HTTP 路由 + SSE 广播
 ui/        可执行：agent + server + Web UI 合一（交付形态）
@@ -88,6 +89,11 @@ interface 上唯一编译期查不到的东西：`el("dvi", …)` 曾经编译�
 
 - **流式期间不渲染 markdown**，每个 delta 只更新累积文本，turn 结束时一次性替换成渲染好的
   版本。半截的 `**bo` 渲染出来是错的，而且每来一个 delta 重渲染累积文本是 O(n²)。
+
+  这条规则现在也是两个前端的共同契约，而且是**线格式**的一部分：`blocks` 事件在块停止增长时
+  发一次，`history` 的每一行自带解析结果，中间的流只有文本。原生的 `Text` 不能被喂 `<h2>`，
+  而 `AttributedString(markdown:)` 拿的是**源码**不是解析结果 —— 表格它根本看不见，围栏的语言
+  标签会被丢掉 —— 所以解析在 `md/` 里做一次（cmark，和 Web 版同一个引擎），结果当数据跨过去。
 - **按大小批处理之外还有一个 250ms 冲刷节拍**：容器在第一个 delta 到达时插进 DOM，而文本要
   攒够阈值才发第一帧，于是流式期间点开是**空白**。节拍把「最多滞后」从若干字符改成 250ms。
 - **跑完的工具随手收进折叠**，规则只有一条：最新完成的那个留在外面。一轮的高度否则随工具数

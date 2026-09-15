@@ -571,11 +571,14 @@ fn history_rows(session : @core.Session) -> Array[Json] {
           ("kind", Json::string(draft.kind)),
           ("id", Json::string(draft.id)),
           ("text", Json::string(draft.text)),
-          // Everything in a history is over: nothing here is still arriving, which is what lets the
-          // host render its markdown. The parse comes with it rather than being asked for row by
-          // row — see `say_blocks` for why the shell owns it — and it is paid once per session
-          // opened. A store large enough for that to be felt is the point at which this becomes a
-          // request the host makes for the rows it is about to draw.
+          // Everything in a history is over: nothing here is still arriving. That is what lets the
+          // row's markdown be parsed once, here, rather than on every delta — the cost the web UI
+          // learned about with 40KB of reasoning in 64-character frames.
+          ("complete", Json::boolean(true)),
+          // And the parse, which is the part that cannot be produced by the host: a SwiftUI `Text`
+          // has no markdown parse of its own, and `AttributedString(markdown:)` — what the app used
+          // before this — never sees a table and drops a fenced block's language. `null` for a row
+          // with no text, so the host has one rule: blocks if they are there, plain text otherwise.
           ("blocks", blocks_of(draft.text)),
           ("name", Json::string(draft.name)),
           ("detail", Json::string(draft.detail)),

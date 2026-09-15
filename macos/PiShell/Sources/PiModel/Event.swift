@@ -19,6 +19,8 @@ public enum PiEvent: Decodable, Equatable {
     case history(rows: [Row])
     /// The sidebar's list, in full, whenever it changes by more than a turn's worth.
     case sessions(workspaces: [SessionGroup])
+    /// A block stopped growing: how to draw it. Sent once per block, when the deltas are over.
+    case blocks(id: String, blocks: [Block])
     /// What the settings panel draws. Re-sent whenever one of these facts changes, so the panel never
     /// has to guess about the key in use after saving one.
     case settings(ShellSettings)
@@ -40,7 +42,7 @@ public enum PiEvent: Decodable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case kind, session, model, cwd, key, text, id, delta
         case name, detail, done, output, calls, tools, cost
-        case path, rows, workspaces, env, saved, mode
+        case path, rows, workspaces, env, saved, mode, blocks
         case isError = "error"
     }
 
@@ -71,6 +73,11 @@ public enum PiEvent: Decodable, Equatable {
             )
         case "settings":
             self = .settings(try ShellSettings(from: decoder))
+        case "blocks":
+            self = .blocks(
+                id: try fields.decode(String.self, forKey: .id),
+                blocks: try fields.decode([Block].self, forKey: .blocks)
+            )
         case "reply":
             self = .reply(
                 id: try fields.decode(String.self, forKey: .id),
