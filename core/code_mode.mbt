@@ -82,8 +82,23 @@ pub(all) enum ExecDialect {
 ///|
 /// Which dialect a call is in, with surrounding whitespace ignored: a field holding only a newline
 /// is a field that was not filled.
+///
+/// `command` is accepted as a spelling of `bash`, and that is a correction to the tool rather than a
+/// convenience. The rule the schema states is "name the dialect with the field", and `command` names
+/// it unambiguously — it can only be a shell command — so refusing it teaches nothing and costs a
+/// round trip. Measured, in one session: 28 refusals of `{"command": …}`, every one of them a model
+/// that had `command` in its history from the tools-mode `bash` tool and no way to unlearn it, and
+/// every one of them the model then retrying with the right field. The message that said which
+/// fields to use was read and understood; the calls were already written.
+///
+/// `bash` wins when both are present, because a call that fills both has misunderstood which one
+/// means what, and the one the tool is named for is the safer reading.
 pub fn exec_dialect(arguments : Json) -> ExecDialect {
-  let command = arg_string(arguments, "bash").unwrap_or("").trim().to_owned()
+  let mut text = arg_string(arguments, "bash").unwrap_or("").trim().to_owned()
+  if text == "" {
+    text = arg_string(arguments, "command").unwrap_or("").trim().to_owned()
+  }
+  let command = text
   let program = arg_string(arguments, "moonbit").unwrap_or("").trim().to_owned()
   match (command != "", program != "") {
     (true, true) => Both

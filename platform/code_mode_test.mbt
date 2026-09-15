@@ -38,6 +38,22 @@ async test "exec refuses a call with both dialects, and one with neither" {
   let neither = execute_tool("exec", @json.parse("{}"), ".")
   assert_true(neither.is_error)
   assert_true(output_text(neither).contains("Nothing to run"))
+  // An empty call and a call with the wrong field name are different mistakes, and the second one
+  // can only be corrected by a message that names what arrived.
+  assert_true(
+    output_text(neither).contains("no arguments"),
+    msg=output_text(neither),
+  )
+  let misspelled = execute_tool(
+    "exec",
+    @json.parse("{\"cmd\":\"ls\",\"timeout\":5}"),
+    ".",
+  )
+  assert_true(misspelled.is_error)
+  assert_true(
+    output_text(misspelled).contains("cmd, timeout"),
+    msg=output_text(misspelled),
+  )
 }
 
 ///|
@@ -194,6 +210,16 @@ async test "a blank command is refused rather than run" {
   // Read as a call with nothing in it, which is the other refusal — either way nothing runs.
   assert_true(via_exec.is_error)
   assert_true(output_text(via_exec).contains("Nothing to run"))
+  // `command` is a way of saying "this is a shell command" that the schema accepts, because a model
+  // whose history is full of the tools-mode `bash` tool will keep writing it. Measured in one
+  // session: 28 of these, each one a wasted round trip.
+  let as_command = execute_tool(
+    "exec",
+    @json.parse("{\"command\":\"echo hi\"}"),
+    ".",
+  )
+  assert_false(as_command.is_error, msg=output_text(as_command))
+  assert_true(output_text(as_command).contains("hi"))
 }
 
 ///|

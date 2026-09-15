@@ -592,3 +592,45 @@ test "the change section is the last thing in the prompt" {
   assert_true(prompt.find("- exec:").unwrap() < at)
   assert_eq(prompt[at:].contains("## Workspace"), false)
 }
+
+///|
+/// `command` names the same dialect as `bash`, and `bash` wins if both are given.
+///
+/// The acceptance is a correction to the tool rather than a widening of it: the rule the schema
+/// states is "name the dialect with the field", and `command` names it unambiguously — it can only
+/// be a shell command. The refusals it prevents were a model carrying the tools-mode `bash` tool in
+/// its history, which no instruction can make it unlearn.
+test "command is another way to say the shell dialect" {
+  assert_eq(
+    exec_dialect(@json.parse("{\"command\":\"  ls -la  \"}")),
+    ExecDialect::Command(text="ls -la"),
+  )
+  // A call that fills both has misunderstood which field means what; the one the tool is named for
+  // is the safer reading, and it is still a command rather than a refusal.
+  assert_eq(
+    exec_dialect(@json.parse("{\"bash\":\"echo a\",\"command\":\"echo b\"}")),
+    ExecDialect::Command(text="echo a"),
+  )
+  // A program with a stray `command` beside it is still the program: only one of the two fields can
+  // be a program, and the pair is not ambiguous the way `bash` and `moonbit` are.
+  assert_eq(
+    exec_dialect(
+      @json.parse("{\"command\":\"\",\"moonbit\":\"async fn main {}\"}"),
+    ),
+    ExecDialect::Program(text="async fn main {}"),
+  )
+  // `command` names a command, so a call that uses it can leave a process behind.
+  assert_true(
+    leaves_a_process("exec", @json.parse("{\"command\":\"sleep 5 &\"}")),
+  )
+}
+
+///|
+/// The keys of a call, for a refusal that can name what the model actually sent.
+test "argument keys are listed, sorted, and empty for a call with none" {
+  assert_eq(argument_keys(@json.parse("{\"timeout\":5,\"cmd\":\"ls\"}")), [
+    "cmd", "timeout",
+  ])
+  assert_eq(argument_keys(@json.parse("{}")), [])
+  assert_eq(argument_keys(Json::string("not an object")), [])
+}

@@ -134,8 +134,17 @@ async fn run_exec(
         "Pass either `bash` or `moonbit`, not both: one call runs one thing.",
       )
     @core.ExecDialect::Neither =>
+      // The fields that arrived are echoed when there were any, because a refusal a model can act on
+      // has to name what it actually sent. A key that is only misspelled (`cmd`, `shell`) reads as an
+      // instruction rather than as silence; an empty call is told plainly that it is empty, which is
+      // a different mistake from a wrong name.
       @core.ToolOutput::error(
-        "Nothing to run. Pass `bash` with a shell command, or `moonbit` with `@builtin/NAME` or a MoonBit program.",
+        match @core.argument_keys(arguments) {
+          [] =>
+            "Nothing to run: the call had no arguments. Pass `bash` with a shell command, or `moonbit` with `@builtin/NAME` or a MoonBit program."
+          keys =>
+            "Nothing to run: expected `bash` (a shell command) or `moonbit` (a program), but the call had \{keys.join(", ")}. One of those two names, with the command or program as its value."
+        },
       )
     @core.ExecDialect::Command(text~) =>
       run_command(text, arguments, cwd, watcher?)

@@ -377,3 +377,25 @@ fn clip_one_line(text : String, limit : Int) -> String {
   }
   out.to_string()
 }
+
+///|
+/// The keys of a call's arguments, for a refusal that names what actually arrived.
+///
+/// A tool that says only "pass one of these" leaves a model that sent `{"cmd": "…"}` guessing at
+/// which part of its call was wrong. The names it sent are the difference between a message it can
+/// act on and one it has to interpret.
+///
+/// Sorted, so two runs of the same refusal read the same way.
+pub fn argument_keys(arguments : Json) -> Array[String] {
+  let out : Array[String] = []
+  match arguments {
+    Object(fields) => {
+      for name, _ in fields {
+        out.push(name)
+      }
+      out.sort()
+    }
+    _ => ()
+  }
+  out
+}
