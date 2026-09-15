@@ -653,15 +653,23 @@ async test "the log is reported at every commit, not only at the end" {
       },
     )
     assert_eq(result.model_calls, 2)
-    // The prompt, the two responses and the tool round. The turn opening and the model change are
-    // bookkeeping: they move neither the spend nor the conversation.
-    assert_eq(snapshots.length(), 4)
+    // The prompt, the turn opening, the two responses and the tool round. The turn opening reports
+    // nothing new — it moves neither the spend nor the conversation — and is reported anyway,
+    // because it is the entry that answers "is a turn in flight" for the caller: without it the
+    // caller's copy stops at the prompt, and the next prompt opens a second turn beside the first.
+    // The model change is the one commit that is not reported: it is written before the prompt,
+    // moves nothing the caller watches, and is read from the file by whoever needs it.
+    assert_eq(snapshots.length(), 5)
     // Nothing spent yet when the prompt goes in, and the window has already moved — the figure a
-    // reader watches when a turn spends a long time before its first token.
-    let (spent, _, _) = snapshots[0]
+    // reader watches when a turn spends a long time before its first token. The turn opening
+    // reports the same numbers one commit later.
+    let (spent, _, at_prompt) = snapshots[0]
     assert_eq(spent, 0)
+    let (still_nothing, _, after_opening) = snapshots[1]
+    assert_eq(still_nothing, 0)
+    assert_eq(after_opening, at_prompt)
     // The first call's own tokens are reported while the turn is still working on the second.
-    let (first, input, _) = snapshots[1]
+    let (first, input, _) = snapshots[2]
     assert_eq(first, 1)
     assert_eq(input, 10, msg="the first scripted call bills 10 prompt tokens")
     // The last snapshot before the turn ended has the whole of it, tool round included — that is
@@ -1683,4 +1691,287 @@ async test "a refused call does not open a job record" {
       )
     },
   )
+}
+
+///|
+/// A log left with an unanswered tool call is closed before the next request goes out.
+///
+/// The situation is ordinary rather than exotic: the reader presses Stop while a tool round is
+/// running. The assistant message with its `tool_calls` is already committed, the results are not —
+/// and that transcript is one a provider refuses outright, because an assistant message that asks
+/// for tools must be followed by the answers to them. Measured, in the app: two prompts in a row
+/// went out, died on the endpoint's rejection, and left the session looking like it would not run
+/// anything again. Nothing in the log said why, because the failure happened before the first entry
+/// of the new turn could be written.
+///
+/// What is asserted is the shape of the first request: the call has an answer, and the answer says
+/// the truth about what happened rather than pretending the tool ran.
+async test "an unanswered tool call is closed before the next request" {
+  let dir = scratch("repair")
+  // A log that stopped between the call and its result, exactly as a Stop leaves one.
+  let entries : Array[@core.Entry] = [
+    {
+      id: "u1",
+      parent_id: None,
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Message(
+        message=@core.User({
+          content: [@core.Text("read the note")],
+          timestamp: FIXED_TIME,
+        }),
+      ),
+    },
+    {
+      id: "a1",
+      parent_id: Some("u1"),
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Message(
+        message=@core.Assistant({
+          content: [
+            @core.ToolCall(
+              id="call_interrupted",
+              name="read",
+              arguments=Json::object(Map([("path", Json::string("note.txt"))])),
+            ),
+          ],
+          api: "openai-completions",
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          usage: @core.Usage::zero(),
+          stop_reason: @core.ToolUse,
+          timestamp: FIXED_TIME,
+          response_id: None,
+          response_model: None,
+          raw_stop_reason: Some("tool_calls"),
+          error_message: None,
+        }),
+      ),
+    },
+  ]
+  let seen : Array[String] = []
+  with_fake_model([text_sse("carrying on")], seen, async fn(base_url) {
+    let ctx = context_for(dir, base_url, entries)
+    let result = @agent.run_turn(
+      ctx,
+      "continue",
+      FIXED_TIME,
+      thinking_level="high",
+    )
+    assert_eq(result.replies, ["carrying on"])
+
+    assert_eq(seen.length(), 1)
+    // The call is answered in the very first request: no round trip is spent learning that the
+    // transcript is not acceptable.
+    assert_true(
+      seen[0].contains("\"role\":\"tool\""),
+      msg="the request carried an unanswered tool call: \{seen[0]}",
+    )
+    assert_true(seen[0].contains("call_interrupted"), msg=seen[0])
+
+    // And the log says so, so that the next process to open the session sends the same thing.
+    let session = logged(ctx.session_path)
+    assert_false(
+      session.needs_repair(),
+      msg="the log still has an unanswered call",
+    )
+    let kinds : Array[String] = []
+    for entry in session.entries {
+      match entry.kind {
+        @core.Message(message~) =>
+          match message {
+            @core.User(_) => kinds.push("user")
+            @core.Assistant(_) => kinds.push("assistant")
+            @core.ToolResult(_) => kinds.push("toolResult")
+          }
+        _ => ()
+      }
+    }
+    assert_eq(kinds, ["user", "assistant", "toolResult", "user", "assistant"])
+  })
+}
+
+///|
+/// A turn stopped while the model was asking for tools leaves a gap, and the next turn closes it.
+///
+/// This is the whole of the reported symptom, end to end: press Stop at the wrong moment, and the
+/// log holds an assistant message whose `tool_calls` nothing answers. The loop breaks on `stopping()`
+/// at the top *before* running the tools — which is deliberate, since a stop must not start new work
+/// — so the gap is what a stop leaves rather than a mistake in the stop.
+///
+/// What matters is what happens next, which is where it used to fail: the reader types again, the
+/// request carries the unanswered call, and the provider refuses the whole thing. The turn never
+/// starts, nothing is written, and the session looks like it will not run anything again.
+async test "a gap left by a stop is closed by the turn after it" {
+  let dir = scratch("stop-gap")
+  let seen : Array[String] = []
+  with_fake_model([bash_tool_call_sse("echo never-runs")], seen, async fn(
+    base_url,
+  ) {
+    let ctx = context_for(dir, base_url, [])
+    let stop = Ref(false)
+    // The stop is raised from `on_commit`, which is the moment that matters and the one a reader
+    // cannot aim at: the assistant message with its tool call has just been written, and the tools
+    // have not started. `stopping()` is checked immediately after that commit, so the turn ends
+    // between the call and its answer — which is exactly what pressing Stop at the wrong moment
+    // does, and what leaves a transcript a provider will not accept.
+    let stop_after_the_call : async (@core.Session) -> Unit = fn(session) {
+      for entry in session.entries {
+        match entry.kind {
+          @core.Message(message~) =>
+            match message {
+              @core.Assistant(a) => if !a.content.is_empty() { stop.val = true }
+              _ => ()
+            }
+          _ => ()
+        }
+      }
+    }
+    let result = @agent.run_turn(
+      ctx,
+      "run something",
+      FIXED_TIME,
+      thinking_level="high",
+      should_stop=() => stop.val,
+      on_commit=stop_after_the_call,
+    )
+    assert_eq(result.tool_calls, 0)
+
+    // The gap is real: the model asked for a tool, the answer is committed, and no result was
+    // written. This is what the reader's next prompt used to run into.
+    let left = logged(ctx.session_path)
+    assert_true(
+      left.needs_repair(),
+      msg="the stop did not leave the unanswered call this test is about",
+    )
+
+    // The next turn — the reader typing again — is sent a transcript the provider will accept.
+    let seen2 : Array[String] = []
+    with_fake_model([text_sse("carrying on")], seen2, async fn(base2) {
+      let ctx2 = context_for(dir, base2, left.entries)
+      let second = @agent.run_turn(
+        ctx2,
+        "try again",
+        FIXED_TIME,
+        thinking_level="high",
+      )
+      assert_eq(second.replies, ["carrying on"])
+      assert_eq(seen2.length(), 1)
+      assert_true(
+        seen2[0].contains("\"role\":\"tool\""),
+        msg="the repaired request has no tool result: \{seen2[0]}",
+      )
+      assert_false(logged(ctx2.session_path).needs_repair())
+    })
+  })
+}
+
+///|
+/// A prompt after a failed turn opens one turn, not two.
+///
+/// The invariant `continuing` exists to keep is "at most one turn is open", and it is kept by asking
+/// the *caller's* session whether a turn is in flight. That answer is only as current as the last
+/// commit the caller was told about — and a turn that failed on a network error never reaches its
+/// end, so the caller keeps whatever it was last handed. The turn opening is now reported like any
+/// other commit for exactly this reason: without it the caller's copy stops at the prompt, the next
+/// prompt sees no turn in flight, and the log ends up with two openings and one outcome.
+async test "a prompt after a failure leaves one open turn, not two" {
+  let dir = scratch("after-failure")
+  let path = "\{dir}/session.jsonl"
+  let tools = @core.builtin_tools()
+  let header : @core.SessionHeader = {
+    id: "test",
+    timestamp: @core.format_iso_utc(FIXED_TIME),
+    cwd: dir,
+    parent_session: None,
+    version: Some(3),
+  }
+  @platform.create_session(path, header)
+  // The caller's copy of the session, kept the way the app keeps its own: every commit it is told
+  // about, and — after a turn that finished — the session the turn handed back. A turn that *failed*
+  // never hands one back, which is the whole of this test.
+  let current = Ref(@core.Session::new(header, []))
+  let ctx_for = (base_url : String) => {
+    @agent.AgentContext::new(
+      session=current.val,
+      session_path=path,
+      cwd=dir,
+      api_key="fixture-key",
+      system_prompt=@core.build_system_prompt(dir, tools),
+      tools~,
+      base_url~,
+      context_window=@core.deepseek_v4_flash_context_window(),
+    )
+  }
+  let remember : async (@core.Session) -> Unit = session => {
+    current.val = session
+  }
+  // The first turn dies on a connection that is never there: the one failure that leaves the caller
+  // holding an open turn, because the cleanup after the loop never runs.
+  let dead = "http://127.0.0.1:9"
+  let raised = try {
+    let _ = @agent.run_turn(
+      ctx_for(dead),
+      "first prompt",
+      FIXED_TIME,
+      thinking_level="high",
+      max_rounds=1,
+      on_commit=remember,
+    )
+    false
+  } catch {
+    _ => true
+  } noraise {
+    _ => false
+  }
+  assert_true(raised)
+  assert_true(
+    current.val.turn_in_flight(),
+    msg="the failed turn should have left the caller with an open turn",
+  )
+
+  let seen : Array[String] = []
+  with_fake_model([text_sse("second answer")], seen, async fn(base_url) {
+    let second = @agent.run_turn(
+      ctx_for(base_url),
+      "second prompt",
+      FIXED_TIME,
+      thinking_level="high",
+      on_commit=remember,
+    )
+    assert_eq(second.replies, ["second answer"])
+    // The reader's words reached the model: this is the half of the bug that was silent.
+    assert_eq(seen.length(), 1)
+    assert_true(seen[0].contains("second prompt"), msg=seen[0])
+
+    // One opening per prompt, each closed: the failed turn is abandoned rather than left open
+    // beside the new one, so the log never claims two turns in flight.
+    let log = logged(path)
+    let mut starts = 0
+    let mut outcomes = 0
+    let mut trace = ""
+    for entry in log.entries {
+      match entry.kind {
+        @core.Custom(custom_type~, ..) => {
+          trace = trace + "\n  " + custom_type
+          if custom_type == @core.turn_start_type() {
+            starts += 1
+          } else if custom_type == @core.turn_outcome_type() {
+            outcomes += 1
+          }
+        }
+        @core.Message(message~) =>
+          match message {
+            @core.User(_) => trace = trace + "\n  user"
+            @core.Assistant(_) => trace = trace + "\n  assistant"
+            @core.ToolResult(_) => trace = trace + "\n  toolResult"
+          }
+        _ => ()
+      }
+    }
+    if starts != 2 || outcomes != 2 {
+      fail("starts=\{starts} outcomes=\{outcomes}\{trace}")
+    }
+    assert_false(log.turn_in_flight())
+    assert_false(log.needs_repair())
+  })
 }

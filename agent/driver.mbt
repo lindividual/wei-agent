@@ -973,6 +973,24 @@ pub async fn run_turn(
       timestamp,
     )
   }
+  // A log that stopped between a tool call and its result is closed here, before the request that
+  // would otherwise be refused.
+  //
+  // The gap is made by a stop, and it is a gap in the *transcript* rather than in our bookkeeping:
+  // an assistant message that asks for tools must be followed by the answers to them, and a provider
+  // rejects the whole request — measured, in the app: two prompts in a row came back as an endpoint
+  // error and left the session looking like it would not run anything again. The reader had pressed
+  // Stop during a model call, the assistant message with its `tool_calls` was already committed, and
+  // nothing was left to write the results.
+  //
+  // Repaired here rather than in a front end, because the rule being violated belongs to the
+  // protocol and not to a window: the web UI offers the reader a choice when it notices an
+  // interrupted turn, the app does not, and a third front end should not have to remember either.
+  // The synthetic result says what actually happened, so a model that sees it checks the state
+  // before repeating a write.
+  for entry in session.repair_entries(timestamp) {
+    session = commit(session, ctx.session_path, entry.kind, timestamp)
+  }
   // A continued turn appends nothing here: the prompt it is carrying is already the last user
   // message in the log, and appending it again would put the question to the model twice.
   if !continuing {
@@ -1000,6 +1018,11 @@ pub async fn run_turn(
     // simply types again is choosing to move on, so the old turn is closed here rather than left
     // open forever — otherwise the log would claim two turns in flight and the interruption notice
     // would survive the decision to abandon it.
+    //
+    // Asked of the session this call was handed, which is the caller's copy rather than the file —
+    // so it is only as current as the last commit the caller was told about. That is why the
+    // opening below is reported like any other commit: a caller whose copy stops at the prompt
+    // cannot see the turn it just opened, and the next prompt then opens a second one beside it.
     if session.turn_in_flight() {
       session = commit(
         session,
@@ -1023,6 +1046,12 @@ pub async fn run_turn(
       ),
       timestamp,
     )
+    // Reported even though it moves neither the spend nor the conversation: what it moves is the
+    // caller's answer to "is a turn in flight", and that question is what decides whether the next
+    // prompt continues this turn or closes it. A turn that failed on a network error is the case
+    // that found this — the log kept its open turn, the caller's copy did not, and the turn after
+    // it opened a second one.
+    committed(session)
   }
 
   let replies : Array[String] = []
