@@ -13,3 +13,7 @@ spike-native/
 # SwiftPM 的构建产物，以及 `macos/build-moonbit.sh` 生成的 MoonBit 归档
 macos/PiShell/.build/
 macos/vendor/
+
+# `macos/make-app.sh` 打出来的 .app。可再生产，而且是一个二进制：要发布就发到 Release，
+# 让它带着自己的签名和版本号走，而不是留一份在版本历史里。
+macos/dist/
