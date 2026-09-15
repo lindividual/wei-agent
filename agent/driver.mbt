@@ -273,7 +273,16 @@ priv enum RepairStep {
 ///
 /// Pure over the log, so the arithmetic that a mistake here costs — a request refused on every turn,
 /// with the reason in a byte offset — is testable without a disk.
-fn plan_repair(session : @core.Session) -> Array[RepairStep] {
+fn plan_repair(
+  session : @core.Session,
+  /// Whether the turn the log left open should be closed as abandoned.
+  ///
+  /// Not always, and the difference matters: closing it is a statement that the reader has moved on,
+  /// which only a caller that is starting a new turn can make. A host that is merely *opening* a
+  /// session must leave the open turn alone — that entry is what the reader is shown as "this turn was
+  /// interrupted, continue or start fresh", and closing it here would answer that question for them.
+  close_open_turn : Bool,
+) -> Array[RepairStep] {
   let path = session.path()
   // Where each call is answered, if anywhere on the path.
   let answer_at : Map[String, Int] = Map([])
@@ -324,10 +333,41 @@ fn plan_repair(session : @core.Session) -> Array[RepairStep] {
   }
   // The turn a stop left open, closed as abandoned. Read from the log rather than inferred from what
   // the caller holds, because the caller's copy is exactly what is out of date here.
-  if session.turn_in_flight() {
+  if close_open_turn && session.turn_in_flight() {
     steps.push(Abandon)
   }
   steps
+}
+
+///|
+/// Make a session's transcript one a provider will accept, and write the result.
+///
+/// For a host that is opening a session: the log may have been left by a process that died, or by a
+/// build that wrote a tool result in the wrong place, and either way the first request built from it
+/// would be refused. Idempotent, and a no-op — one comparison for an already-valid session — because
+/// this runs on every open.
+///
+/// Deliberately not `close_open_turn`: whether the interrupted turn is over is the reader's answer to
+/// give, and a host that opens a session is not the one asking. `run_turn` closes it, because a new
+/// turn is exactly that statement.
+pub async fn repair_session(
+  session : @core.Session,
+  path : String,
+  timestamp : Int64,
+) -> @core.Session {
+  let written = apply_repair(
+    plan_repair(session, false),
+    session.path(),
+    session,
+    path,
+    timestamp,
+  )
+  if written > 0 {
+    // Re-read, because the repair moved entries the caller's copy still holds under their old parents.
+    @platform.load_session(path)
+  } else {
+    session
+  }
 }
 
 ///|
@@ -1209,7 +1249,7 @@ pub async fn run_turn(
   // repairing at all: an answer that is not adjacent to its call is a request every provider refuses,
   // on every turn, forever.
   let written = apply_repair(
-    plan_repair(session),
+    plan_repair(session, true),
     session.path(),
     session,
     ctx.session_path,

@@ -2310,3 +2310,100 @@ async test "an answer in the wrong place is moved to its call" {
     assert_false(log.turn_in_flight())
   })
 }
+
+///|
+/// Opening a session repairs the transcript without answering the reader's question.
+///
+/// The two are separate decisions and this is the test that keeps them apart. `repair_session` is what
+/// a host calls when it opens a file — the app resuming one, the web UI showing one — and it must fix
+/// what a provider would reject while leaving the interrupted turn *open*, because that entry is what
+/// the reader is shown: "this turn was interrupted; continue it, or start fresh". A host that closed it
+/// on open would have answered that for them, and the notice would never appear.
+///
+/// "Start fresh" is not a cancel — see `TurnEnding::Abandoned` — which is why this is not a rewrite of
+/// the turn's history but a refusal to touch it.
+async test "opening a session repairs it but leaves the interrupted turn open" {
+  let dir = scratch("repair-on-open")
+  let path = "\{dir}/session.jsonl"
+  let header : @core.SessionHeader = {
+    id: "test",
+    timestamp: @core.format_iso_utc(FIXED_TIME),
+    cwd: dir,
+    parent_session: None,
+    version: Some(3),
+  }
+  @platform.create_session(path, header)
+  let entries : Array[@core.Entry] = [
+    {
+      id: "u1",
+      parent_id: None,
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Message(
+        message=@core.User({
+          content: [@core.Text("go")],
+          timestamp: FIXED_TIME,
+        }),
+      ),
+    },
+    {
+      id: "t1",
+      parent_id: Some("u1"),
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Custom(
+        custom_type=@core.turn_start_type(),
+        data=Some(Json::object(Map([("prompt", Json::string("go"))]))),
+      ),
+    },
+    {
+      id: "a1",
+      parent_id: Some("t1"),
+      timestamp: @core.format_iso_utc(FIXED_TIME),
+      kind: @core.Message(
+        message=@core.Assistant({
+          content: [
+            @core.ToolCall(
+              id="call_open",
+              name="exec",
+              arguments=Json::object(Map([("bash", Json::string("echo hi"))])),
+            ),
+          ],
+          api: "openai-completions",
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          usage: @core.Usage::zero(),
+          stop_reason: @core.ToolUse,
+          timestamp: FIXED_TIME,
+          response_id: None,
+          response_model: None,
+          raw_stop_reason: Some("tool_calls"),
+          error_message: None,
+        }),
+      ),
+    },
+  ]
+  @platform.append_entries(path, entries)
+
+  let opened = @agent.repair_session(
+    @core.parse_session_file(@platform.read_text(path)),
+    path,
+    FIXED_TIME,
+  )
+  // The gap is closed…
+  assert_false(opened.needs_repair(), msg="the call was not answered")
+  // …and the turn is still open, so whoever draws the session can still offer to continue it.
+  assert_true(
+    opened.turn_in_flight(),
+    msg="opening the session decided the reader's turn for them",
+  )
+  assert_eq(opened.in_flight_prompt(), Some("go"))
+
+  // Nothing was lost, and the answer is next to the call it answers.
+  let after = logged(path)
+  let ids : Array[String] = []
+  for entry in after.path() {
+    ids.push(entry.id)
+  }
+  assert_true(ids.contains("u1"))
+  assert_true(ids.contains("a1"))
+  assert_true(ids.contains("t1"))
+}

@@ -112,16 +112,18 @@ async fn open_session(
       guard @platform.path_exists(path) else {
         raise Failure::Failure("no session file at \{path}")
       }
-      let session = @platform.load_session(path)
-      let entries = session.repair_entries(@env.now().reinterpret_as_int64())
-      if entries.length() > 0 {
-        // The closers go into the log, not only into memory: a repair that lives until the process
-        // exits is not a repair.
-        @platform.append_entries(path, entries)
-        (session.add_entries(entries), path)
-      } else {
-        (session, path)
-      }
+      // The transcript is made valid before anything reads it, by the one implementation of that
+      // rule (`@agent.repair_session`): a log written by a process that died, or by an older build,
+      // can have a tool result in the wrong place, and the first request built from it would be
+      // refused. The interrupted turn is left open — offering to continue it is the app's business,
+      // and this is not the place to decide it.
+      let loaded = @platform.load_session(path)
+      let session = @agent.repair_session(
+        loaded,
+        path,
+        @env.now().reinterpret_as_int64(),
+      )
+      (session, path)
     }
     _ => fresh_session(shell_root, cwd)
   }

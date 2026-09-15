@@ -296,14 +296,11 @@ fn create_session(root : String, cwd : String) -> (@core.Session, String) {
 /// Open a path, closing an interrupted turn if there is one.
 async fn open_path(path : String) -> @core.Session {
   let session = @platform.load_session(path)
-  let entries = session.repair_entries(@env.now().reinterpret_as_int64())
-  if entries.is_empty() {
-    return session
-  }
-  // The closers go into the log, not only into memory: a repair that exists only
-  // until the process exits is not a repair.
-  @platform.append_entries(path, entries)
-  session.add_entries(entries)
+  // One implementation of "what a provider will accept", shared with everything else that opens a
+  // session: an answer that is not adjacent to the call it answers is refused just as surely as a
+  // missing one, and this used to append answers at the end — which is only the right place when the
+  // call is the last entry.
+  @agent.repair_session(session, path, @env.now().reinterpret_as_int64())
 }
 
 ///|

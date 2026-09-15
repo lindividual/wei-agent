@@ -342,16 +342,14 @@ async fn Shell::show(self : Shell, path : String) -> Unit {
     self.say_sessions()
     return
   }
-  let session = @platform.load_session(path)
-  // The same repair a resumed session gets: a turn that died leaves tool calls the provider would
-  // reject, and the closers go into the log rather than only into memory.
-  let entries = session.repair_entries(@env.now().reinterpret_as_int64())
-  let loaded = if entries.length() > 0 {
-    @platform.append_entries(path, entries)
-    session.add_entries(entries)
-  } else {
-    session
-  }
+  // The same repair a resumed session gets, from the same place: a turn that died leaves a transcript
+  // a provider will not take, and what "will not take" means — a call with no answer, or an answer
+  // that is not next to its call — is one rule with one implementation.
+  let loaded = @agent.repair_session(
+    @platform.load_session(path),
+    path,
+    @env.now().reinterpret_as_int64(),
+  )
   self.session = loaded
   self.path = path
   self.cwd = loaded.header.cwd
@@ -407,6 +405,19 @@ priv struct Draft {
   detail : String
   /// Tools only: the call this row answers.
   call_id : String
+}
+
+///|
+/// One block of text as the host draws it: parsed markdown, or null when there is nothing to parse.
+///
+/// Null rather than an empty array, because "this row has no markdown" and "this row's markdown is
+/// empty" are the same fact, and the host's rule is the simple one: parsed blocks or the text.
+fn blocks_of(text : String) -> Json {
+  if text == "" {
+    Json::null()
+  } else {
+    @md.blocks_json(text)
+  }
 }
 
 ///|
@@ -561,8 +572,11 @@ fn history_rows(session : @core.Session) -> Array[Json] {
           ("id", Json::string(draft.id)),
           ("text", Json::string(draft.text)),
           // Everything in a history is over: nothing here is still arriving, which is what lets the
-          // host render its markdown.
-          ("complete", Json::boolean(true)),
+          // host render its markdown. The parse comes with it rather than being asked for row by
+          // row — see `say_blocks` for why the shell owns it — and it is paid once per session
+          // opened. A store large enough for that to be felt is the point at which this becomes a
+          // request the host makes for the rows it is about to draw.
+          ("blocks", blocks_of(draft.text)),
           ("name", Json::string(draft.name)),
           ("detail", Json::string(draft.detail)),
           ("output", Json::string(output)),
