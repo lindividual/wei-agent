@@ -224,6 +224,12 @@ public enum Wei {
         public static let row: CGFloat = 40
         /// The hairline under a divider or around a floating surface.
         public static let hairline: CGFloat = 0.5
+        /// The window's toolbar. The one control height the platform fixes rather than a view choosing:
+        /// a unified titlebar and toolbar are 52 points on every Mac that draws one, whatever the window
+        /// is showing. It is a number here because the transcript runs *under* the toolbar, so something
+        /// has to say how far the content must start below the top for its first row to be readable — and
+        /// the toolbar itself is not a view that can be asked.
+        public static let toolbar: CGFloat = 52
     }
 
     // ── the mark ───────────────────────────────────────────────────────────

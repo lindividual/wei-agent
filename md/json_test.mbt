@@ -1,7 +1,7 @@
 ///|
 /// The tests assert on the JSON, not on the value, because the JSON is the contract: the host
 /// decodes these names, and a rename here that the host does not know about is two builds that
-/// disagree about the same answer. `macos/PiShell/Tests/PiModelTests/MarkdownTests.swift` pins the
+/// disagree about the same answer. `macos/PiShell/Tests/PiModelTests/SidebarTests.swift` pins the
 /// same literals from the consuming side.
 
 ///|
@@ -151,10 +151,76 @@ test "strikethrough is a span" {
 }
 
 ///|
-test "an image arrives as its alt text" {
+test "a picture crosses as a picture, with its alt text beside it" {
   assert_eq(
     wire("![a chart](https://example.com/c.png)"),
-    "[{\"t\":\"p\",\"spans\":[{\"t\":\"link\",\"url\":\"https://example.com/c.png\",\"spans\":[{\"t\":\"text\",\"text\":\"a chart\"}]}]}]",
+    "[{\"t\":\"p\",\"spans\":[{\"t\":\"image\",\"url\":\"https://example.com/c.png\",\"alt\":\"a chart\"}]}]",
+  )
+}
+
+///|
+test "a picture the agent just wrote is one the host can read" {
+  // The case the alt-text fallback made unusable, and the reason a bare path is allowed through:
+  // the agent writes the file, then refers to it, and there is no URL in the answer at all.
+  assert_eq(
+    wire("![shot](/tmp/shot.png)"),
+    "[{\"t\":\"p\",\"spans\":[{\"t\":\"image\",\"url\":\"/tmp/shot.png\",\"alt\":\"shot\"}]}]",
+  )
+  assert_eq(
+    wire("![shot](file:///tmp/shot.png)"),
+    "[{\"t\":\"p\",\"spans\":[{\"t\":\"image\",\"url\":\"file:///tmp/shot.png\",\"alt\":\"shot\"}]}]",
+  )
+}
+
+///|
+test "a data URL crosses only when it is a picture" {
+  assert_eq(
+    wire(
+      "![d](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==)",
+    ),
+    "[{\"t\":\"p\",\"spans\":[{\"t\":\"image\",\"url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==\",\"alt\":\"d\"}]}]",
+  )
+  // Not a picture, so not a picture span: the alt text is what is left of it. The parser's own
+  // `is_unsafe` is what decides, and it allows four picture media types and nothing else.
+  assert_eq(
+    wire("![d](data:text/html,<b>hi</b>)"),
+    "[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"d\"}]}]",
+  )
+}
+
+///|
+test "a relative picture keeps its words and its target" {
+  // Refused as a picture — relative to what is the reader's question, not the model's — and then
+  // the link rule applies, which allows a relative link: the reader who wrote it may well have
+  // meant one, and a link the platform cannot open is a link that does nothing rather than a hole.
+  assert_eq(
+    wire("![p](chart.png)"),
+    "[{\"t\":\"p\",\"spans\":[{\"t\":\"link\",\"url\":\"chart.png\",\"spans\":[{\"t\":\"text\",\"text\":\"p\"}]}]}]",
+  )
+}
+
+///|
+test "an unsafe picture is a word" {
+  assert_eq(
+    wire("![x](javascript:alert(1))"),
+    "[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"x\"}]}]",
+  )
+}
+
+///|
+test "alt text is flattened out of its emphasis" {
+  // The alt arrives as inline nodes; the host is handed a caption, which is one line and one run.
+  assert_eq(
+    wire("![a **bold** chart](/tmp/c.png)"),
+    "[{\"t\":\"p\",\"spans\":[{\"t\":\"image\",\"url\":\"/tmp/c.png\",\"alt\":\"a bold chart\"}]}]",
+  )
+}
+
+///|
+test "a picture in a table cell or a bullet crosses the same way" {
+  assert_eq(
+    wire("- ![one](/tmp/1.png)"),
+    "[{\"t\":\"ul\",\"items\":[[{\"t\":\"p\",\"spans\":[{\"t\":\"image\",\"url\":\"/tmp/1.png\",\"alt\":\"one\"}]}]]}]",
   )
 }
 

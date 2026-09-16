@@ -23,9 +23,6 @@ import PiModel
 struct RootView: View {
     @ObservedObject var client: PiClient
     @ObservedObject var actions: WindowActions
-    /// Whether the background-jobs register is open. On the window rather than on a column: it is a
-    /// popover from the toolbar, and every column can see it.
-    @State private var showingJobs = false
     /// Which project's sessions the middle column is listing.
     ///
     /// A window fact, not a shell fact, and the distinction is the reason this is `@State` rather than
@@ -83,7 +80,12 @@ struct RootView: View {
 
     var body: some View {
         NavigationSplitView {
-            WorkspaceList(client: client, browsing: $browsing)
+            WorkspaceList(
+                client: client,
+                browsing: $browsing,
+                search: $search,
+                actions: actions
+            )
                 .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 300)
                 // The column keeps its own title, and the detail column gives its title to the toolbar
                 // instead — see `ConversationView`. Three columns means two headings that are not the
@@ -94,7 +96,7 @@ struct RootView: View {
                 client: client,
                 browsing: browsed,
                 sections: sections,
-                search: $search,
+                searching: searching,
                 onBrowse: { browsing = $0 }
             )
             .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 460)
@@ -122,17 +124,25 @@ struct RootView: View {
             .navigationTitle(sessionListTitle)
             .navigationSubtitle(sessionListSubtitle)
         } detail: {
-            ConversationView(
-                client: client,
-                showingJobs: $showingJobs
-            )
-            .frame(minWidth: 420, minHeight: 320)
+            ConversationView(client: client)
+                .frame(minWidth: 420, minHeight: 320)
         }
         // The brand accent, applied where the platform applies it: with `.tint`, the system draws its own
         // selection, focus rings and default buttons in this colour. Setting it here rather than painting a
         // background per control is what keeps every control agreeing without being told separately — and it
         // is why the reader's own accent colour does not show through in this app.
         .tint(Wei.Palette.accent)
+        // **The toolbar is transparent, so what shows through it is the page.** With a toolbar background
+        // of its own, the top of the window is a strip that spans all three columns — and a strip that
+        // spans them is what makes them read as one region. Measured against Notes: its toolbar differs
+        // from its page by one step of grey (254 against 255); ours differed by fourteen, which is a band
+        // however lightly it is drawn. `.windowToolbar` is the placement that means the window's own
+        // toolbar rather than a column's.
+        //
+        // `toolbarBackgroundVisibility` is the current spelling of this (`toolbarBackground` is the older
+        // one, deprecated at some unreleased version). It needed macOS 15 and the target was 14, which is
+        // why this file used the old name; the target is 26 now, so it uses the new one.
+        .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         // Following the conversation: when the shell moves to another session — a click, `⌃⇥`, a new one,
         // a deleted one — the list has to be showing it, or the reader is looking at the wrong project
         // with the highlight nowhere. Deliberately keyed on the *path*, so browsing another project while
@@ -168,18 +178,123 @@ struct RootView: View {
 private struct WorkspaceList: View {
     @ObservedObject var client: PiClient
     @Binding var browsing: String
+    /// The search field's text. Owned by the window (see `RootView`), because the window's title reads it.
+    @Binding var search: String
+    /// Adding a workspace opens the window's folder chooser, which is this object rather than this view —
+    /// the File menu opens the same one.
+    @ObservedObject var actions: WindowActions
+    @Environment(\.openSettings) private var openSettings
+
+    /// Sessions with a turn in flight, from the shell's per-row flag.
+    ///
+    /// Flat across workspaces on purpose: the question this section answers is "is anything running", and
+    /// making the reader scan four projects to answer it is what the section is for. The row says which
+    /// project it belongs to instead.
+    private var running: [SessionRow] {
+        client.groups.flatMap(\.sessions).filter(\.running)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             wordmark
             List(selection: $browsing) {
+                // **Two sections that are usually empty, and absent when they are.** Nothing running means
+                // no heading rather than an empty one: a section that says "Running sessions" over an empty
+                // space teaches the reader to skip the place where they will one day need to look. The web
+                // UI's rule is the same, and for the same reason.
+                if !running.isEmpty {
+                    SectionTitle("Running sessions")
+                    ForEach(running) { row in
+                        // A button rather than a tagged row: this list's *selection* is which workspace it
+                        // is listing, and a session picked from here opens a conversation instead — one List
+                        // cannot be selecting two different kinds of thing.
+                        Button {
+                            client.open(row.path)
+                        } label: {
+                            RunningSessionRow(row: row, workspace: label(for: row))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                if !client.jobs.isEmpty {
+                    SectionTitle("Running tool calls")
+                    ForEach(client.jobs) { job in
+                        JobRow(job: job, onKill: { client.killJob(job.id) })
+                    }
+                }
+                SectionTitle("Workspaces")
                 ForEach(client.groups) { group in
                     WorkspaceRow(group: group)
                         .tag(group.cwd)
                 }
+                // Adding one is a workspace action, so it belongs in this list rather than in the File menu
+                // alone — the menu item stays, because a Mac reader looks for "New …" in File.
+                Button {
+                    actions.choosingFolder = true
+                } label: {
+                    Label("Add Workspace…", systemImage: "plus")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Wei.Palette.accent)
             }
             .listStyle(.sidebar)
+            // The list's content is inset under the search field the platform places in this column, so its
+            // first row lays out *above* the list's own top edge and is clipped: measured, the "Running tool
+            // calls" title came out at ay 154 with the list's frame starting at 169. A top content margin is
+            // what keeps the first row out of that band. (Found by dumping the accessibility tree, which is
+            // the only way this shows up — the row is in the tree, with a real size, and simply not drawn.)
+            .contentMargins(.top, Wei.Space.loose, for: .scrollContent)
+            Divider()
+            settings
         }
+        // **The platform's own search, placed in the sidebar.** It was a hand-rolled capsule inside this
+        // column's content, and that is the version this file argued for at length — the reasoning was
+        // sound for a deployment target of macOS 14 and is wrong now on two counts.
+        //
+        // First, the scope: the query spans *every* project, and a field drawn inside the sessions column
+        // read as "filter the list I am looking at". Put at the top of the workspace column it says what it
+        // does — the search covers all of them — and `.sidebar` is the placement that means exactly this.
+        //
+        // Second, and what settled it: our capsule was `.glassEffect` on the app's own surface, and glass
+        // over the sidebar's vibrant material renders *dark* (measured: fill 124–138 against the sidebar's
+        // 220–247) — a black pill in a light sidebar. `.searchable` is the system's search field, so it
+        // renders the way the platform renders one over a sidebar, in every appearance, without us keeping
+        // a second implementation of a control the system already has.
+        .searchable(text: $search, placement: .sidebar, prompt: "Search all sessions")
+        // The register was refreshed when the popover opened; now that the rows are always on screen it is
+        // refreshed when the column appears, and on every revision the shell sends (see `PiClient.jobs`).
+        .onAppear { client.refreshJobs() }
+    }
+
+    /// Which project a running session belongs to, for the row that has room for one word of it.
+    private func label(for row: SessionRow) -> String {
+        client.groups.first(where: { $0.sessions.contains(where: { $0.path == row.path }) })?.label ?? ""
+    }
+
+    /// Settings, as the last list item rather than a button in the toolbar.
+    ///
+    /// It is the app's own control, not this column's and not that one's — and a control that belongs to no
+    /// column is what the bottom of the first column is for. The web UI pins its equivalent to the bottom of
+    /// the sidebar for exactly this reason, and a Mac reader looking for preferences looks in the app menu
+    /// first anyway (`⌘,` is still wired).
+    private var settings: some View {
+        Button {
+            openSettings()
+        } label: {
+            HStack(spacing: Wei.Space.cozy) {
+                Image(systemName: "gearshape")
+                    .font(Wei.Font.control())
+                    .frame(width: Wei.Icon.control, alignment: .center)
+                Text("Settings")
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(Wei.Palette.secondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Settings (⌘,)")
+        .padding(.horizontal, Wei.Space.cozy)
+        .padding(.vertical, Wei.Space.tight)
     }
 
     /// The mark and the app's name, at the top of the first column.
@@ -201,13 +316,11 @@ private struct WorkspaceList: View {
         .padding(.horizontal, Wei.Space.loose)
         .padding(.top, Wei.Space.regular)
         .padding(.bottom, Wei.Space.cozy)
-        // The mark is the brand's fill hue, so a hairline under the wordmark is what makes it read as the
-        // app's own strip rather than as the first row of the list.
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Wei.Palette.separator)
-                .frame(height: Wei.Control.hairline)
-        }
+        // **No hairline under it.** There was one — "so it reads as the app's own strip rather than as
+        // the first row of the list" — and a strip is exactly what it made: a divider across the top of
+        // the first column is the same tell as the band that used to sit over the third one, and it was
+        // the last one left. On its own the wordmark reads the way Notes' "Mac" reads at the head of its
+        // folder list: a heading, not a region. Same reason the toolbar lost its background.
     }
 }
 
@@ -216,6 +329,60 @@ private struct WorkspaceList: View {
 /// The dot is kept from the two-column version and means more here than it did: the middle column shows
 /// whichever project the reader is *browsing*, which is not necessarily the one holding the open
 /// conversation — so without a mark, browsing away from a running session hides where it is.
+/// A section's title, as its own row.
+///
+/// **A row rather than a `Section` header, and that is a workaround with a measurement behind it.** With
+/// `Section("Running tool calls") { … }`, the header of the *first* section in this list does not lay out at
+/// all whenever that section is inside an `if` — the accessibility tree has it at zero size and above the
+/// list's own top edge (measured: `AXHeading [0,956 0x0]`), so the title is simply invisible while its rows
+/// are on screen. Removing the `if` made the same header lay out at `[22,171 97x14]`, which is how it was
+/// identified. The sections here must be absent when they are empty — a heading over nothing is a heading
+/// that teaches the reader to skip the place they will one day need — so the titles are drawn instead.
+///
+/// Styled to match what the platform's own sidebar header looked like in the one place it did render.
+private struct SectionTitle: View {
+    let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(Wei.Font.caption(.semibold))
+            .foregroundStyle(Wei.Palette.secondary)
+            .padding(.top, Wei.Space.cozy)
+            .padding(.bottom, Wei.Space.tiny)
+    }
+}
+
+/// One session with a turn in flight.
+///
+/// Two lines because there are two facts: which conversation, and which project it is in — the second is
+/// what makes one flat list of every workspace readable. The spinner is the platform's rather than a drawn
+/// dot, so it moves on its own without a timer here.
+private struct RunningSessionRow: View {
+    let row: SessionRow
+    let workspace: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Wei.Space.tiny) {
+            Text(row.label)
+                .font(Wei.Font.control())
+                .lineLimit(1)
+                .truncationMode(.middle)
+            HStack(spacing: Wei.Space.tight) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text(workspace)
+                    .font(Wei.Font.caption())
+                    .foregroundStyle(Wei.Palette.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .help(row.path)
+    }
+}
+
 private struct WorkspaceRow: View {
     let group: SessionGroup
 
@@ -248,11 +415,13 @@ private struct WorkspaceRow: View {
 /// job to say which one. What a reader needs from this list is "the one from this afternoon" or "the one
 /// from June", which is what the headings give them; see `timeSections`.
 ///
-/// The search field is here rather than in the sidebar because **this is the list it filters**. Typing
-/// reaches every project, and a result is headed by the project it came from — a match in another
-/// directory has to say so, or opening it is a jump with no explanation. Deliberately not a search of the
-/// *transcripts*: that would mean reading every file, which is the cost the shell avoids everywhere else,
-/// and a list that pauses to read the disk is a list that stops responding.
+/// **This column lists the results; the field that produces them is in the workspace column.** They were in
+/// one place, on the argument that a field belongs in the list it filters — which holds for a filter and
+/// fails for a search. This one reaches every project, so in this column it read as "filter the project I am
+/// looking at", and a result headed by some *other* project arrived as a surprise.
+///
+/// Deliberately not a search of the *transcripts*: that would mean reading every file, which is the cost the
+/// shell avoids everywhere else, and a list that pauses to read the disk is a list that stops responding.
 private struct SessionList: View {
     @ObservedObject var client: PiClient
     /// The project being browsed.
@@ -260,8 +429,10 @@ private struct SessionList: View {
     /// What to draw, from the rules in `PiModel` — computed one level up, where the titlebar can see the
     /// count too.
     let sections: [SessionSection]
-    /// The search field's text. Owned by the window (see `RootView`), because the title reads it.
-    @Binding var search: String
+    /// Whether what is drawn is a *result set* rather than this project's sessions. A fact about the query,
+    /// and the query belongs to the window now (the field is in the workspace column), so this column is
+    /// told it rather than deriving it from a binding it no longer holds.
+    let searching: Bool
     /// Called when a search result is clicked, so the first column can follow the reader into the project
     /// they just reached into — otherwise the two columns would disagree about where they are.
     let onBrowse: (String) -> Void
@@ -278,10 +449,6 @@ private struct SessionList: View {
 
     private var groups: [SessionGroup] {
         client.groups
-    }
-
-    private var searching: Bool {
-        !search.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     /// The selection is the shell's current session, not a copy of it. Clicking asks the shell to switch,
@@ -305,60 +472,25 @@ private struct SessionList: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            searchField
-            list
-        }
-    }
-
-    /// A capsule field on the app's own surface, rather than `.searchable`.
-    ///
-    /// **The standard control, and why this is not it.** On macOS the standard search field is
-    /// `NSSearchField`, which SwiftUI hands you as `.searchable` — a rounded *rectangle*, at control height,
-    /// and either in the toolbar or in one of the placements the modifier documents. It is a good control
-    /// and it is in the wrong place here: in a three-column split the placement meaning "this column" is not
-    /// one of them, and a field that landed in the toolbar would look like it searched the conversation.
-    /// A *capsule* is not standard on macOS at all — that shape is the toolbar's own button shape in macOS
-    /// 26, which is why this is the reference the reader is comparing against.
-    ///
-    /// So: the standard control's *behaviour* (leading magnifier, inline clear button, Return to commit) at
-    /// the toolbar's *shape* and height, inside the list it filters. Deviating from the platform's shape is
-    /// a cost paid knowingly; the radius, the material and the height are all the platform's, and the
-    /// magnifier and the clear button are where a Mac reader looks for them.
-    ///
-    /// Size: the toolbar's own control height, so the field lines up with the buttons in the titlebar
-    /// rather than floating at some third height between them and the list.
-    ///
-    /// Kept *above* the list rather than scrolling with it — a control, not the first row, and a search
-    /// field you have to scroll back up to is one you forget is there.
-    private var searchField: some View {
-        HStack(spacing: Wei.Space.tight) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: Wei.Icon.inline))
-                .foregroundStyle(Wei.Palette.secondary)
-            TextField("Search sessions", text: $search)
-                .textFieldStyle(.plain)
-                .font(Wei.Font.control())
-            if !search.isEmpty {
+        // No field here any more: the query spans every project, so its control lives in the workspace
+        // column. What is left in this one is the list that query produces.
+        list
+        // **The column's own action, in the column's own toolbar region.** Every control in this app
+        // appears over the column it acts on — Notes' arrangement, and the reason its three columns are
+        // legible from the titlebar alone. This button was in the detail column's toolbar, which put the
+        // one control that adds a row to *this* list over the transcript instead: the top of the window
+        // then read as two regions (a sidebar, and an everything-else that happened to be split), which
+        // is exactly what a reader of this window reported seeing.
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
                 Button {
-                    search = ""
+                    client.newSession()
                 } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: Wei.Icon.inline))
-                        .foregroundStyle(Wei.Palette.secondary)
+                    Label("New Session", systemImage: "square.and.pencil")
                 }
-                .buttonStyle(.plain)
-                .help("Clear")
+                .help("New session in this project (⌘N)")
             }
         }
-        // The toolbar control height, and the reason the field reads as belonging to the titlebar's row of
-        // buttons rather than to the list underneath it.
-        .frame(height: Wei.Control.regular)
-        .padding(.horizontal, Wei.Space.regular)
-        .weiSurface(in: Capsule())
-        .padding(.horizontal, Wei.Space.loose)
-        .padding(.top, Wei.Space.regular)
-        .padding(.bottom, Wei.Space.cozy)
     }
 
     private var list: some View {
@@ -374,7 +506,13 @@ private struct SessionList: View {
                         .tag(row.path)
                     }
                 } header: {
+                    // These are *time* headings — Today, Previous 30 Days — and they carry the same job
+                    // Notes' month headings do: they are how a reader finds a session by when it was
+                    // rather than by what it was called. Notes sets its own at the control size and
+                    // semibold; the list style's default here is a caption, which measured 10 points of
+                    // ink against Notes' 13.5 and read as a caption rather than as a heading.
                     Text(section.title)
+                        .font(Wei.Font.control(.semibold))
                 }
             }
             if let deleted {
@@ -414,8 +552,11 @@ private struct SessionList: View {
         if searching {
             return "No sessions match."
         }
+        // Said without pointing at a control: the button that starts one is in this column's own
+        // toolbar, and the sentence that used to be here ("Type below to start one") pointed at a
+        // composer that lives in the next column over.
         return groups.contains(where: { $0.cwd == browsing })
-            ? "No sessions in this project. Type below to start one."
+            ? "No sessions in this project."
             : "No project selected."
     }
 
@@ -560,71 +701,27 @@ private struct SessionRowView: View {
 
 /// What the shell is, what it has said, and a box to answer it in.
 ///
-/// The conversation carries **its own title**, over the transcript: the session by name, and under it the model
-/// that will answer and where the tools run. The window's title says which *project* the middle column is
-/// listing, so without this the window would not say which conversation it is showing.
+/// **The name of the conversation is the only heading, and it is a bar rather than a band.** This column
+/// once opened with an opaque band — the name, the model, and the working directory on a material with a
+/// hairline under it, running edge to edge — and that is what was removed: a band is the mark of a
+/// *panel*, which is why the window read as a sidebar and an everything-else that happened to be split
+/// rather than as three columns. A bar is not that. It has no background and no rule, it is one line of
+/// type at the column's leading edge, and what separates it from the conversation is the conversation
+/// itself going blurry underneath it.
+///
+/// The other two facts the band carried are still gone, and deliberately: the model is on the composer's
+/// own picker, next to the message it will answer; the directory is the project the middle column is
+/// listing. Every state the band reported — starting, no key, a turn that failed — is the composer's
+/// status line, which says it under the field where a reader is looking anyway (`PiClient.blocked`).
 private struct ConversationView: View {
     @ObservedObject var client: PiClient
-    @Binding var showingJobs: Bool
-
-    @Environment(\.openSettings) private var openSettings
     /// Shared with the transcript, which decides when it keeps up, and with the send button, which is
     /// the one thing that overrides that decision.
     @StateObject private var scroll = TranscriptScroll()
 
-    /// The session's name, and the two facts about it that the title bar does not carry.
-    ///
-    /// A heading rather than a `navigationTitle`, because the window's title says which *project* the middle
-    /// column is listing. What this adds is what the transcript is: the conversation by name, the model that
-    /// will answer, and where the tools run — the three things a reader checks mid-turn.
-    ///
-    /// On a **material**, so the transcript scrolling under it fades rather than disappearing behind a band.
-    /// That is the platform's own answer to "a header over scrolling content": the vibrancy is the gradient.
-    /// The hairline under it is deliberately the separator at half weight — enough to mark the edge of the
-    /// title, not enough to draw a line across the window.
-    private var conversationHeader: some View {
-        VStack(alignment: .leading, spacing: Wei.Space.tiny) {
-            Text(client.currentTitle.isEmpty ? client.currentPath : client.currentTitle)
-                .font(Wei.Font.title())
-                .lineLimit(1)
-                .truncationMode(.middle)
-            if !subtitleLine.isEmpty {
-                Text(subtitleLine)
-                    .font(Wei.Font.caption())
-                    .foregroundStyle(Wei.Palette.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, Wei.Space.section)
-        .padding(.top, Wei.Space.loose)
-        .padding(.bottom, Wei.Space.cozy)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Wei.Palette.separator)
-                .frame(height: Wei.Control.hairline)
-                .opacity(0.5)
-        }
-    }
-
-    /// What the heading's second line says: the model in force, and where the tools run.
-    ///
-    /// Both are things a reader checks — "is it the model I thought", "is it working in the directory I
-    /// thought" — and both were in the window's subtitle before the three-column layout took it.
-    private var subtitleLine: String {
-        switch client.state {
-        case .starting:
-            return "starting…"
-        case let .ready(_, _, cwd, _):
-            return "\(client.catalog.currentLabel) · \(cwd)"
-        case .unkeyed:
-            return "no API key — open Settings"
-        case let .failed(text):
-            return text
-        }
-    }
+    /// How tall the bar over the transcript is, as laid out. See `ConversationTitleHeightKey` for why the
+    /// margin below the toolbar has to be told about it rather than recomputing it.
+    @State private var titleHeight: CGFloat = 0
 
     var body: some View {
         TranscriptView(
@@ -636,18 +733,10 @@ private struct ConversationView: View {
                 : nil,
             onContinue: { client.continueTurn() },
             onDismiss: { client.dismissTurn() },
-            scroll: scroll
+            scroll: scroll,
+            // The first row has to clear both the toolbar and this column's own title.
+            topMargin: Wei.Control.toolbar + (sessionName == nil ? 0 : titleHeight)
         )
-            // The conversation's own title, **inset over the transcript** rather than stacked above it.
-            //
-            // This is the difference between a heading and a band. `safeAreaInset` keeps the title in the
-            // scroll view's safe area: the transcript keeps its full height, rows scroll *under* the title,
-            // and the material the title sits on is what they fade into. Stacking it in a `VStack` — which
-            // is what this was — shortens the transcript by the header's height and gives the top of the
-            // column a hard opaque edge, which is the "gradient went away" that was reported.
-            .safeAreaInset(edge: .top, spacing: 0) {
-                conversationHeader
-            }
             // And the same treatment at the other end, for the same reason: the composer is a card that
             // **floats over** the conversation. It is an inset rather than the last child of a `VStack`
             // because the stack is what shortens the transcript to make room and leaves a hard opaque edge
@@ -664,58 +753,83 @@ private struct ConversationView: View {
                     onStop: { client.stop() }
                 )
             }
+            // **What this conversation is called, at this column's leading edge.**
+            //
+            // It says something the window's title does not: that one names the *list* the middle column
+            // is showing (which project, how many sessions), because a window has one title and the list
+            // is what it is about. A reader who has scrolled into an answer is looking at one conversation,
+            // and the name of it belongs where they are looking.
+            //
+            // The repetition is deliberate. The same name is on the row in the middle column, and that is
+            // correct rather than a mistake to be tidied away: one is the name of a thing in a list of
+            // things, and this one is the name of the thing on screen. (What *was* a mistake — written down
+            // at the top of this column's history — is the version that made the window's title and the
+            // transcript's heading say the same words: a window has one title, and two of them read as a
+            // program that does not know what it is showing.)
+            //
+            // `safeAreaBar` rather than a `HStack` above the transcript, and that is the whole of the
+            // effect: a bar insets the safe area and **extends the scroll edge effect with it**, so the
+            // conversation keeps scrolling *under* the name and is blurred where it passes beneath — the
+            // arrangement the settings panel has at the top of its right-hand column. A heading that is
+            // simply the first child of a `VStack` shortens the scroll view instead, so nothing ever goes
+            // under it and the blur is spent on empty space.
+            //
+            // No background and no hairline under it. A band with a rule under it is the mark of a *panel*,
+            // which is exactly what this column used to open with and why the window read as a sidebar and
+            // everything else; the blur is what separates the name from what passes under it.
+            .safeAreaBar(edge: .top, alignment: .leading) {
+                if let name = sessionName {
+                    Text(name)
+                        .font(Wei.Font.title())
+                        // One line, and the id of the file if it comes to that: a question can be long, and a
+                        // title that wraps to four lines is a title that has become the first paragraph.
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.horizontal, Wei.Space.section)
+                        .padding(.vertical, Wei.Space.cozy)
+                        .background(
+                            GeometryReader { geometry in
+                                Color.clear.preference(
+                                    key: ConversationTitleHeightKey.self,
+                                    value: geometry.size.height
+                                )
+                            }
+                        )
+                }
+            }
+            .onPreferenceChange(ConversationTitleHeightKey.self) { height in
+                titleHeight = height
+            }
         // Deliberately no `navigationTitle` here. In a three-column split the *content* column elects the
         // window's title and this one's is ignored — the two facts that used to live here have moved: the
         // model is on the composer's own picker, next to the message it will answer, and the directory is
         // the project the middle column is listing, whose full path is on its row's tooltip.
-        .toolbar {
-            // A plain button in the toolbar, next to Settings and styled like it — the same floating capsule
-            // every toolbar control in macOS 26 is.
-            //
-            // It went through two other shapes on the way here and both were wrong: a `Menu` (so one click
-            // opened a menu that asked which kind of new session you wanted), and then a bare glyph inside the
-            // column's own heading row (which is not where a toolbar control goes, and did not look like one).
-            // "New session in *this* project" is one action with one answer, and the variant that needs a
-            // choice — a session in some other folder — is in the File menu where a reader goes looking for it.
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    client.newSession()
-                } label: {
-                    Label("New Session", systemImage: "square.and.pencil")
-                }
-                .help("New session in this project (⌘N)")
-            }
-
-            // Only while something is running: a button that opens an empty list is a button that
-            // teaches the reader to ignore it. The count is the point — it is the one thing on screen
-            // that says work is still going somewhere.
-            if !client.jobs.isEmpty {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showingJobs = true
-                    } label: {
-                        Label("\(client.jobs.count) running", systemImage: "gearshape.2")
-                    }
-                    .help("Background jobs")
-                    .popover(isPresented: $showingJobs, arrowEdge: .top) {
-                        JobsPanel(client: client)
-                    }
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    openSettings()
-                } label: {
-                    Label("Settings", systemImage: "gearshape")
-                }
-                .help("Settings (⌘,)")
-            }
-        }
+        // Deliberately no `toolbar` at all. What used to be here — the running-jobs register and Settings —
+        // has moved to the workspace column, which is where the web UI keeps both and where they describe
+        // something that spans the window rather than this column: jobs run in *any* session, and settings
+        // belong to the app. What the window's toolbar holds now is one control per column, each over the
+        // column it acts on: Hide Sidebar over the workspace column, New Session over the session list.
+        //
+        // And **deliberately no `toolbar(removing: .title)`**, which is how the settings panel gets its
+        // leading-edge title: there the window's title and the drawn one are the same fact and one of them
+        // has to go. Here they are two facts — the list, and the conversation on screen — so the window's
+        // title stays where the system puts it, over the column it is about.
     }
 
+    /// What the session on screen is called: the reader's own name for it, else its first question, else
+    /// the id — the three-source rule the list's rows are already labelled by (`SessionRow.label`).
+    ///
+    /// Read from those same rows rather than computed again, so the title here and the row in the middle
+    /// column cannot drift apart. `nil` while the store has not listed the session, which is a session
+    /// created a moment ago: the bar is simply not drawn rather than drawn empty.
+    private var sessionName: String? {
+        guard let label = client.sessions.first(where: { $0.path == client.currentPath })?.label,
+            !label.isEmpty
+        else { return nil }
+        return label
+    }
 }
 
-/// The conversation.
 /// What the window is in the middle of doing.
 ///
 /// A reference type shared by the scene and the view tree, because two places have to start the same
@@ -797,6 +911,21 @@ private struct TranscriptViewportKey: PreferenceKey {
     }
 }
 
+/// How tall the bar over the transcript is, including its own padding.
+///
+/// Needed because the two numbers are separate mechanisms and only one of them knows about the other: the
+/// bar insets the *safe area*, while what keeps the transcript's first row from being hidden for good is a
+/// content margin (`Wei.Control.toolbar`, measured from the window's top edge). Adding the bar on top of
+/// that margin without measuring it put the title on the first line of the conversation — which is what the
+/// first version of this did, and what a screenshot showed. Measured rather than written as a constant so
+/// that the font size and the padding stay the only places that decide it.
+private struct ConversationTitleHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct TranscriptView: View {
     let conversation: Conversation
     let revision: Int
@@ -819,6 +948,11 @@ private struct TranscriptView: View {
     let onDismiss: () -> Void
     @ObservedObject var scroll: TranscriptScroll
 
+    /// How far below the window's top edge the first row must start — the toolbar, plus whatever bar the
+    /// column draws over the top of the scroll view. The view above this one knows about its own bar and
+    /// passes the sum; `Wei.Control.toolbar` is the answer for a column that draws none.
+    var topMargin: CGFloat = Wei.Control.toolbar
+
     /// The app-wide scroll monitor, installed while the transcript is on screen. See `onAppear`.
     @State private var monitor: Any?
 
@@ -833,7 +967,12 @@ private struct TranscriptView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
             }
+            // The transcript takes the top of the column over; the notice does not. The two buttons that
+            // are the only way out of an interrupted turn are the last thing that should have a toolbar
+            // drawn on top of them, so when there is a notice the transcript gives the top edge back
+            // (`ignoresSafeArea` with no edges) and the notice keeps its place below the toolbar.
             transcript
+                .ignoresSafeArea(.container, edges: interruptedPrompt == nil ? .top : [])
         }
     }
 
@@ -887,6 +1026,26 @@ private struct TranscriptView: View {
             // The two-parameter form is the one macOS 14 introduced: the old signature is deprecated
             // and warns on every build. Neither argument is used — the revision is what changed, and
             // the view body already knows that.
+            // The content starts below the toolbar even though the scroll view does not.
+            //
+            // This is the half of "runs under the toolbar" that is easy to forget: the scroll view begins
+            // at the window's top edge now, so without a margin on the *content* the first row of the
+            // conversation would sit behind the toolbar for good — visible while scrolling past, never
+            // visible at the top, which is a row the reader could never read. A content margin keeps both
+            // facts: what scrolls goes under the toolbar, and nothing is permanently hidden by it.
+            .contentMargins(.top, topMargin, for: .scrollContent)
+            // **And what passes under the toolbar is blurred, by the platform.** `scrollEdgeEffectStyle`
+            // is macOS 26's own answer to "content runs under a floating control": a progressive blur at
+            // the scroll edge, strongest at the edge and gone a little below it. Measured from Podcasts —
+            // a Catalyst app using the same effect — the band is about 60 points, and per-row edge energy
+            // goes 0.0–0.9 at the edge, 2.9–5.3 at 50 points, and 18–25 by 70, where text is crisp again.
+            //
+            // This is what both earlier attempts were reaching for and could not get: an *opaque* band
+            // hid the first row for good ("全遮挡了"), and a bare content margin left rows colliding with
+            // the toolbar's own controls, which reads as a bug rather than as depth. A blur says the third
+            // thing — this is still there, you are scrolling past it. `.soft` is the subtle variant; `.hard`
+            // is the stronger one, and `nil` (or `scrollEdgeEffectHidden`) turns the whole thing off.
+            .scrollEdgeEffectStyle(.soft, for: .top)
             .onChange(of: revision) { _, _ in
                 guard scroll.following, let last = conversation.rows.last else { return }
                 proxy.scrollTo(last.id, anchor: .bottom)
@@ -1249,6 +1408,84 @@ private struct BlockView: View {
     }
 }
 
+/// A paragraph, with the pictures in it given their own line.
+///
+/// A picture cannot be drawn inside an `AttributedString` — the text attributes a `Text` takes carry
+/// no image — so a paragraph containing one is laid out as *runs*: the text before it, the picture,
+/// the text after it. Most answers are the easy case, because a picture is usually a line of its own,
+/// which is one run and nothing changes.
+///
+/// The cost of the two-part paragraph is stated rather than hidden: prose does not flow around a
+/// picture, so `before ![x](/tmp/x.png) after` is three lines rather than a sentence with a picture in
+/// it. Laying that out properly is a text system of its own, and it would be spent on a shape no
+/// answer here writes.
+///
+/// A run of nothing but whitespace is dropped rather than drawn. The newlines around an image are
+/// how the markdown was written, not a gap the reader asked for.
+private struct ParagraphView: View {
+    let spans: [Block.Span]
+
+    private enum Run {
+        case text([Block.Span])
+        case picture(target: String, alt: String)
+    }
+
+    var body: some View {
+        if hasPicture {
+            VStack(alignment: .leading, spacing: Wei.Space.cozy) {
+                ForEach(Array(runs.enumerated()), id: \.offset) { _, run in
+                    switch run {
+                    case let .text(spans):
+                        line(spans)
+                    case let .picture(target, alt):
+                        Picture(target: target, alt: alt)
+                    }
+                }
+            }
+        } else {
+            // No picture, which is nearly every paragraph: the text is the whole of it.
+            line(spans)
+        }
+    }
+
+    private func line(_ spans: [Block.Span]) -> some View {
+        Text(Styled.spans(spans))
+            .font(Wei.Font.body())
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var hasPicture: Bool {
+        spans.contains { span in
+            if case .image = span { return true }
+            return false
+        }
+    }
+
+    private var runs: [Run] {
+        var out: [Run] = []
+        var pending: [Block.Span] = []
+        func flush() {
+            defer { pending.removeAll() }
+            guard !pending.isEmpty else { return }
+            // A run that says nothing is the newline the markdown was written with, not a gap.
+            let said = Styled.spans(pending).characters
+            guard said.contains(where: { !$0.isWhitespace }) else { return }
+            out.append(.text(pending))
+        }
+        for span in spans {
+            guard case let .image(target, alt) = span else {
+                pending.append(span)
+                continue
+            }
+            flush()
+            out.append(.picture(target: target, alt: alt))
+        }
+        flush()
+        return out
+    }
+}
+
 /// One block, drawn.
 private struct BlockBody: View {
     let block: Block
@@ -1256,10 +1493,7 @@ private struct BlockBody: View {
     var body: some View {
         switch block {
         case let .paragraph(spans):
-            Text(Styled.spans(spans))
-                .font(Wei.Font.body())
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+            ParagraphView(spans: spans)
 
         case let .heading(level, spans):
             Text(Styled.spans(spans))
@@ -1528,6 +1762,12 @@ private enum Styled {
             out.foregroundColor = .accentColor
             out.underlineStyle = .single
             return out
+        case let .image(_, alt):
+            // A picture inside a line of text — a table cell, a bullet, a heading. There is no
+            // picture here, and the alt text is what the markdown itself provided as the words for
+            // it: the same answer as a picture whose bytes could not be read, in the one place a
+            // `Picture` view cannot be put.
+            return AttributedString(alt)
         }
     }
 }

@@ -5,12 +5,35 @@ import UniformTypeIdentifiers
 import PiKit
 import PiModel
 
+/// The card's outline, in one place.
+///
+/// The fill under the glass, the glass itself and the ring drawn while a file is dragged over it all
+/// describe the same rectangle, and they were three separate `RoundedRectangle(cornerRadius: 24)` literals
+/// — which is how a card ends up with a fill that does not quite meet its ring. `Wei.Radius.surface` is the
+/// token, documented as "the floating composer, the biggest thing in the window": the literal said 24 and
+/// the token says 28, and the token is the one that was written down as the decision.
+struct CardShape: InsettableShape {
+    var inset: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        RoundedRectangle(
+            cornerRadius: Wei.Radius.surface - inset,
+            style: .continuous
+        ).path(in: rect.insetBy(dx: inset, dy: inset))
+    }
+
+    func inset(by amount: CGFloat) -> CardShape {
+        var copy = self
+        copy.inset += amount
+        return copy
+    }
+}
+
 /// The surface the composer floats on.
 ///
-/// Now a name for `Wei.surface` rather than an implementation, because the search field needed the same
-/// surface in a capsule and two implementations of "the material this app floats on" is exactly the drift
-/// a design system exists to prevent. See `Design.swift` for why the glass is the platform's own and what
-/// the older-macOS fallback is.
+/// A name for `Wei.surface` rather than an implementation, because the search field needs the same surface
+/// in a capsule and two implementations of "the material this app floats on" is exactly the drift a design
+/// system exists to prevent.
 extension View {
     func composerSurface(cornerRadius: CGFloat) -> some View {
         weiSurface(in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
@@ -84,30 +107,28 @@ struct Composer: View {
         // close to the window's edge — the elevation, not the spacing, is what separates it.
         .padding(.top, Wei.Space.loose)
         .padding(.bottom, Wei.Space.cozy)
-        // The transcript fades out as it goes under the card instead of being cut off by it. The web
-        // UI puts the same gradient on its chat scroller, for the same reason: a hard edge under a
-        // floating card reads as the end of the conversation.
+        // The transcript fades out as it goes under the card instead of being cut off by it. The web UI
+        // puts the same gradient on its chat scroller, for the same reason: a hard edge under a floating
+        // card reads as the end of the conversation.
         //
-        // **The ramp is the top padding, and everything below it is opaque.** That split is the whole
-        // of the effect and the first version had neither half: it spread one gradient over the entire
-        // frame, so at the card's own height the wash was only part-way — measured, a line of the
-        // transcript behind the card kept its ink (tone 94 against 88 outside it), and the card's glass
-        // adds almost no fill on a white page (248 against 255), so nothing was hiding it. Text showing
-        // through the box you are typing into is not a floating card; it is two texts on one line.
-        .background {
-            VStack(spacing: 0) {
-                LinearGradient(
-                    colors: [
-                        Color(nsColor: .windowBackgroundColor).opacity(0),
-                        Color(nsColor: .windowBackgroundColor),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: Wei.Space.loose)
-                Color(nsColor: .windowBackgroundColor)
-            }
-        }
+        // **One gradient over the whole frame, and it is doing two jobs.** At the top it is nearly clear,
+        // so the conversation is visible right up to the card's edge and *through* its upper part — blurred
+        // by the glass, which is what a floating card is supposed to look like. By the bottom it is opaque,
+        // which is what keeps the composer's own figures (the context ring, the cost) off the transcript
+        // text behind them.
+        //
+        // This was briefly replaced by an opaque fill plus a short top ramp, on the reading that a line of
+        // the transcript was legible inside the card. It was not: the thing measured at mid-grey through the
+        // card was a *table border* (its own tone is ~150 against a glyph's ~40), and the card had been
+        // masking text correctly all along. The opaque fill then hid everything the reader liked about this
+        // rectangle — "文字滚动的时候，在 composer 底下也会透出来" — and had to come out again.
+        .background(
+            LinearGradient(
+                colors: [.clear, Wei.Palette.window],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
         // The composer owns the keyboard: a window whose only text field is not focused is a window
         // where the first thing a reader does is click. Focus follows the editor being usable, so a
         // turn that ends hands the keyboard straight back.
@@ -123,9 +144,9 @@ struct Composer: View {
             editor
             toolbar
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 12)
-        .composerSurface(cornerRadius: 24)
+        .padding(.horizontal, Wei.Space.regular)
+        .padding(.vertical, Wei.Space.regular)
+        .composerSurface(cornerRadius: Wei.Radius.surface)
         // Dropping a file on the card attaches it. The card is the thing on screen that is about the
         // message being written, so it is the thing that should accept something for it.
         //
@@ -140,8 +161,8 @@ struct Composer: View {
             dropping = targeted
         }
         .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(Color.accentColor, lineWidth: dropping ? 2 : 0)
+            CardShape()
+                .strokeBorder(Wei.Palette.accent, lineWidth: dropping ? 2 : 0)
                 .opacity(dropping ? 1 : 0)
         )
         // Pasting an image attaches it; pasting anything else goes where it would have gone.

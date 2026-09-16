@@ -38,6 +38,7 @@ PI_SHELL_DEBUG=/tmp/pi-wire.log open "macos/dist/wei Agent.app"
 | 重建了 `libpiweb.a`，症状还是旧的 | SwiftPM 也不会因为归档变了而重链**别的产品**：`touch` Swift 源码多不做用，`pi-shell-cli` 和 `PiShellPackageTests.xctest` 都照样跑旧二进制。最坏的表现不是报错，而是**旧 shell 用旧线格式回答**：新加的字段在日志里根本不存在，于是一个正确的消费侧看起来像写错了 | `rm -f` 掉那个产品再 build（`.xctest` 要 `rm -rf` 整个目录）。`swift test` 里那条真启 runtime 的测试就是抓这一类的 |
 | 改了 MoonBit 侧、`swift test` / `pi-shell-cli` 还是旧行为 | 归档重建了，但**那两个产品没有重链**（见上一条）。这次是 `NewSession` 的 gate 明明删了、CLI 仍然回「a turn is running here — stop it first」 | `rm -f .build/arm64-apple-macosx/debug/pi-shell-cli` 再 build。**验证一个 shell 侧的改动，永远要先把跑它的那个产品删掉重建** |
 | 同上，而且你已经 build 过了 | 同上，但更隐蔽：跑的是 `swift build`（debug 可执行文件），**根本没重新打包** —— 用户打开的还是几天前那个 `.app` | 给人用的东西一律 `macos/make-app.sh`；`make-app.sh` 会先 `rm` 掉旧的宿主可执行文件再重建，这是它对这条的补偿 |
+| 跑完 `make-app.sh`，**用户正开着的那个 app 不见了** | `make-app.sh` 对 `macos/dist/wei Agent.app` 是 `rm -rf` 再重建，而用户那个进程就是从这个 bundle 里启动的 —— 正在跑的 app 的 bundle 被从底下抽掉 | 跑之前先让用户退出那个 app（或者至少跑完告诉他重启）；这是本仓库第一次踩到，**我没有证据说进程是自己退的还是被杀的**（无崩溃报告，我这一轮的 `pkill` 模式都不匹配 `MacOS/wei`），但「把运行中的 bundle 删掉」是唯一确定的变量 |
 | 一屏 `was built for newer 'macOS' version` 警告 | MoonBit 用本机 SDK 编译，Swift package 的 target 是 14 | 忽略。不是错误，也修不掉（除非把 deployment target 提到本机版本） |
 | `swift run PiShell` 有窗口、没菜单栏、不聚焦 | 裸可执行文件不是 `.app` | `AppDelegate` 里的 `setActivationPolicy(.regular)`；打包后是 no-op |
 | 窗口起来什么都没发生 | 宿主装了 reader 但没在 C 侧注册回调（`pi_shell_set_emit`），`emit_sink` 是 NULL，**每一行都被丢掉且不报错** | `Emit.install` 同时做这两件事；`PiShellTests` 里有一条真启 runtime 的测试守着 |
@@ -92,7 +93,15 @@ PI_SHELL_DEBUG=/tmp/pi-wire.log open "macos/dist/wei Agent.app"
 | 启动后拿到的 PID 不对 | `( … & )` 拿到的是**子 shell** 的 PID，不是 app 的 | 子 shell 里用 `exec env … /path/to/pi`，再 `echo $!` |
 | `pkill -f "Macos/pi"` 把自己也匹配上了（现在可执行文件叫 `wei`，但坑的形状一样） | `-f` 匹配整条命令行，而你的 `bash -c` 里就写着这个字符串 | 用锚定：`pkill -9 -f "Macos/pi$"`。**这条我照着写了又踩了**：`pkill -9 -f "MacOS/pi"` 没杀掉任何一个 app（用户那个进程活得好好的），因为模式先匹配上了**它自己所在的 `bash -c`**，命令根本没走到那一步。教训是锚定要落在**参数的位置**上，`$` 放在路径后面；光把模式写短不算锚定 |
 | 反复启动后测到的行为不对 | **多个实例在跑**，你连的是上一个 | 每次测完按 PID 确认存活；断言时带上 PID / 窗口标题 |
+| 按 PID 找窗口号 | 用户的 app 和你的 demo 同时跑时，按 owner 名选窗口会选到**用户那个**（两个进程 owner 都叫 `wei Agent`） | 按 `kCGWindowOwnerPID` 过滤 `CGWindowListCopyWindowInfo`，取 `layer == 0` 且有标题那个；`.optionAll` 是必须的（见第六节） |
+| 看不见 `Settings…` 菜单项；或者想切设置窗左边的某一项，AX 里翻不到 | 主菜单在**主线程忙的时候还会重建**（启动早期能看到的菜单项，几秒后又一次 `NSApp.mainMenu` 就变了）；而列表行的 `AXPress` 返回 **-25206**（不支持该动作） | 菜单项拿不准就不要猜选择器（`sendAction(showSettingsWindow:)` 返回 `true` 却什么都不做）：按 desc 找主窗左下角那个 `Settings` 按钮按下去。切换左栏那一项用**设 `kAXSelectedAttribute`**（不是 `AXPress`） |
+| 想把窗口改小，好看清滚动边缘效果 | `kAXSizeAttribute` 写入返回 **-25200**（不可设） | 改小不行就换成**内容长的那一项**（Skills 会列一长串技能）再滚；或者去 `/tmp` 写一个只含布局的壳子（第六节） |
+| 把 `safeAreaBar` 的 bar 摆在 `ScrollView` 上面，第一行文字**和标题重叠** | `safeAreaBar` insets safe area，但挡住第一行的不是它 —— 是转录自己的 content margin，而那个数是从**窗口顶边**量的（`Wei.Control.toolbar`）。两个机制各懂一半 | bar 的实际高度量出来加进 content margin（`ConversationTitleHeightKey`），别写常数 |
+| 想看「内容从 bar 下面穿过去被模糊」的效果，滚了半天没反应 | 那一栏的内容不够长，压根没有可滚的东西（设置面板的 API Key 那页就装得下） | 换内容长的一页（Skills）或长会话；也可以只写布局的壳子（第六节）。注意合成滚轮事件 `wheel1` 是 `Int32`：传负数给 `Int()` 再装回 `Int32` 会 crash（`Range requires lowerBound <= upperBound`） |
 | 改了「换会话」相关的代码，测完用户说他打了一半的字跟着跑 | 我**拿用户正在用的会话做了测试**，进程真的把新 turn 写进了他的日志 | **纪律**：测试先 `cp` 一份会话到临时目录，用 `PI_SHELL_SESSION` 指过去。永远不碰 `~/.pi-mb/sessions/` |
+| 手写一条 `.jsonl` 造演示会话，app 只回一句 `could not start: missing field: timestamp` —— 没有别的线索，看起来像 store 没发现、像路径不对、像编码不对 | `Entry::from_json` 要的**每一层都有 `timestamp`**：entry 一层，`message` 一层也是（真实日志里 assistant 的 message 自带 `timestamp`/`usage`/`model`/…）。只写 `role`+`content` 的 message 不是一条能读的记录 | 别手写：`cp` 一条真会话，**只替换 assistant 那条的 `content[].text`**，其余字段照搬（一轮就通）。再配 `PI_SHELL_SESSION=<那条文件的路径>` 直接打开它 —— 会话标题会变成它的 id，不必让 store 发现工作区 |
+| 想造一段「要长到能滚」的转录，结果只有几行 | 上面那条修法把小会话变干净了，也把它变短了 —— 而模糊/滚动这类效果需要**有东西滚** | 复制一条**大的**真会话（按文件大小倒序取第一条，几十兆也行）到临时 store、改 header 的 `cwd`，`PI_SHELL_SESSION` 指过去。一次就得到上千条消息，且一个 token 不花 |
+| 同一台机器上开着用户的 app，自己又起一个 demo，截图/断言拿到的是**错的实例** | 两个进程 owner 都叫 `wei Agent`（debug 可执行文件的 owner 是 `PiShell`，但 `.app` 那个不是），按名字选窗口会选到用户那个 | 按 **PID** 过滤 `CGWindowListCopyWindowInfo(.optionAll)` 选窗口号（`scripts` 无关，十几行 Swift 就够），再 `screencapture -x -o -l <num>`（`-o` 去掉阴影）。见第六节 |
 | AX 树太大，AppleScript 直接放弃 | 1500 行的转录 + 长会话 | 也是上面那条：用 Swift AX 工具，或者拿小的会话测 |
 
 ## 六、调试手法（正面清单，别丢）
@@ -132,3 +141,10 @@ PI_SHELL_DEBUG=/tmp/pi-wire.log open "macos/dist/wei Agent.app"
 
   所以截图是**只读**的：能看状态，不能驱动。要驱动得靠键盘/鼠标，而那就需要辅助功能。
   截图前先查一次权限，别把 TCC 拒绝当成 app 的问题。
+- **按 PID 找窗口号**（用户的 app 和你的 demo 同时在跑时，这是唯一可靠的选法）：
+  `CGWindowListCopyWindowInfo(.optionAll)` 拿全表，按 `kCGWindowOwnerPID` 过滤，取 `layer == 0`
+  且带标题的那个；`screencapture -x -o -l <num>`（`-o` 去掉阴影）。十几行 Swift 存成一个小工具，
+  比每次手抄窗口号强 —— 而且 **`.optionAll` 是必要的**：`.optionOnScreenOnly` 在这种 app 上会
+  返回空表（同一个查询里有 `onscreen=true` 的窗口，只换 flag 却什么都拿不到）。
+- **演示一段对话不需要一行模型**：`cp` 一条真会话、换掉 assistant 的正文、`PI_SHELL_SESSION=` 指
+  过去，窗口里就是那段对话。验证「答案里的图」这种纯渲染的事，这样一轮几秒钟，且不花 token。

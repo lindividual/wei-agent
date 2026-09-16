@@ -117,7 +117,9 @@ public enum Block: Equatable, Decodable {
     ///
     /// A flat list rather than a tree, which is what makes `**bold and *italic***` one pass on this
     /// side: the nesting is *accumulated* as the host walks down. `link` is the one case that carries
-    /// its own spans, because the target is a property of the link rather than of the words in it.
+    /// its own spans, because the target is a property of the link rather than of the words in it —
+    /// and `image` is the same split HTML's `src`/`alt` makes: what to draw, and what to say when it
+    /// cannot be drawn.
     public indirect enum Span: Equatable, Decodable {
         case text(String)
         case code(String)
@@ -125,6 +127,7 @@ public enum Block: Equatable, Decodable {
         case strong([Span])
         case strike([Span])
         case link(url: String, spans: [Span])
+        case image(url: String, alt: String)
 
         /// The same tagged shape one level down, and the same reason for it.
         public init(from decoder: Decoder) throws {
@@ -146,15 +149,20 @@ public enum Block: Equatable, Decodable {
                     url: try fields.decode(String.self, forKey: .url),
                     spans: try fields.decode([Span].self, forKey: .spans)
                 )
+            case .image:
+                self = .image(
+                    url: try fields.decode(String.self, forKey: .url),
+                    alt: try fields.decode(String.self, forKey: .alt)
+                )
             }
         }
 
         private enum SpanKeys: String, CodingKey {
-            case t, text, spans, url
+            case t, text, spans, url, alt
         }
 
         private enum SpanKind: String, Decodable {
-            case text, code, em, strong, del, link
+            case text, code, em, strong, del, link, image
         }
     }
 

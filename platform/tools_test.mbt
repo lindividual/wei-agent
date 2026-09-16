@@ -99,6 +99,34 @@ async test "edit replaces matched text" {
 }
 
 ///|
+/// The edit tool on a file containing characters outside the BMP, end to end on
+/// disk. Emoji are two code units wide, so the scan for `oldText` has windows
+/// that begin and end between the halves of one; slicing there used to abort the
+/// process, taking the whole shell down with it on a real edit.
+async test "edit works on a file containing emoji" {
+  let dir = scratch("edit_emoji")
+  let _ = execute_tool(
+    "write",
+    @json.parse(
+      "{\"path\":\"notes.txt\",\"content\":\"deploy 😀 then 😀 report\"}",
+    ),
+    dir,
+  )
+  let edited = execute_tool(
+    "edit",
+    @json.parse(
+      "{\"path\":\"notes.txt\",\"edits\":[{\"oldText\":\"😀 report\",\"newText\":\"🙂 report\"}]}",
+    ),
+    dir,
+  )
+  assert_false(edited.is_error, msg=output_text(edited))
+  let read = output_text(
+    execute_tool("read", @json.parse("{\"path\":\"notes.txt\"}"), dir),
+  )
+  assert_true(read.contains("deploy 😀 then 🙂 report"), msg=read)
+}
+
+///|
 /// An edit whose text is absent changes nothing and says why, so the model can
 /// correct the call rather than guess.
 async test "a failed edit leaves the file untouched" {

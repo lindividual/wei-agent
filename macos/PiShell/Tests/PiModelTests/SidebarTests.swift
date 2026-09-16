@@ -279,6 +279,22 @@ final class BlockTests: XCTestCase {
         XCTAssertEqual(spans[3], .link(url: "https://x.y", spans: [.text("here")]))
     }
 
+    /// A picture, which is the one span the host does not draw as text.
+    ///
+    /// The field name is what this pins: `md/json.mbt` writes `url` and `alt`, and a rename on either
+    /// side of the boundary is two builds that disagree about the same answer. The producer asserts the
+    /// same literal in `md/json_test.mbt`.
+    func testAPictureArrivesWithItsAltText() throws {
+        let event = try XCTUnwrap(
+            decode(
+                #"{"kind":"blocks","id":"reply-6","blocks":[{"t":"p","spans":[{"t":"image","url":"/tmp/shot.png","alt":"a chart"}]}]}"#
+            )
+        )
+        guard case let .blocks(_, blocks) = event else { return XCTFail("expected blocks") }
+        guard case let .paragraph(spans) = blocks[0] else { return XCTFail("expected a paragraph") }
+        XCTAssertEqual(spans, [.image(url: "/tmp/shot.png", alt: "a chart")])
+    }
+
     /// A parse lands in the row it names, and the row keeps its text.
     func testABlockParseIsPatchedIntoTheRowItNames() {
         var conversation = Conversation()

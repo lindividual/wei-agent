@@ -31,11 +31,16 @@ let linkPiWeb: [LinkerSetting] = [
 
 let package = Package(
   name: "PiShell",
-  // `.v14` rather than `.v13`: the sidebar is a `NavigationSplitView` with a `List(selection:)` in
-  // `sidebar` style, and the toolbar's placement around it is the macOS 14 behaviour — on 13 the same
-  // view compiles and puts the button somewhere else. The deployment target is the version the UI is
-  // written *for*, not the oldest one it would start on.
-  platforms: [.macOS(.v14)],
+  // **The newest macOS, not the oldest one this would start on.** The target is the version the UI is
+  // written *for*, and this UI is written for 26: it spends `glassEffect`, it draws the transcript under
+  // a toolbar whose background it removes, and it would rather use the API the platform has now than
+  // carry an availability branch for one it does not. The cost is stated plainly — the app runs on this
+  // macOS and later, and a machine on 15 gets nothing. That is the trade the reader asked for.
+  // Written as a string rather than `.v26` because the typed spelling needs
+  // `swift-tools-version: 6.2`, and raising that would also switch the package to the Swift 6 language
+  // mode — strict concurrency everywhere, which is a much larger change than "target the newest OS".
+  // `"26.0"` says the same thing to the build system and changes nothing else.
+  platforms: [.macOS("26.0")],
   targets: [
     // The boundary, in C.
     .target(name: "PiShellC"),

@@ -44,7 +44,7 @@ pub(all) enum Align {
 ///
 /// A flat list rather than a tree: the host applies Nesting by *accumulating* attributes, which is
 /// what makes `*bold **and italic**` one pass rather than a recursive descent on the other side of
-/// the wire. The one exception is `Link`, which carries its own spans because a link's target is a
+/// the wire. `Link` is the exception, and it carries its own spans because a link's target is a
 /// property of the link rather than of the words inside it.
 pub(all) enum Span {
   Text(String)
@@ -53,4 +53,11 @@ pub(all) enum Span {
   Strong(Array[Span])
   Strike(Array[Span])
   Link(String, Array[Span])
+  /// A picture the host draws itself: what to load, and what to say when it cannot be loaded.
+  ///
+  /// The same split HTML's `src`/`alt` makes, and for the same reason — one is the picture and the
+  /// other is the label under it. The label is text rather than spans because it is a label: a
+  /// caption that can be bold is a caption whose width nothing can measure, and every host that
+  /// draws a picture has to measure the room it takes.
+  Image(String, String)
 } derive(Debug, Eq)

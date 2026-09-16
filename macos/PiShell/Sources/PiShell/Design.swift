@@ -174,11 +174,15 @@ extension Wei {
 
     /// The one way this app draws a floating surface.
     ///
-    /// On macOS 26 that is Liquid Glass — the system's own material, which samples what is behind it and
-    /// carries the platform's current idea of how much a floating thing should lift. On 14 and 15 it is the
-    /// thin material plus the hairline and shadow this app drew before glass existed. Everything hand-rolled is
-    /// deliberately absent on 26: a stroke of ours over glass is a second edge, and a shadow of ours under it
-    /// is a second lift, which is what makes an app look like it is imitating the platform.
+    /// Liquid Glass — the system's own material, which samples what is behind it and carries the platform's
+    /// current idea of how much a floating thing should lift. Everything hand-rolled is deliberately absent:
+    /// a stroke of ours over glass is a second edge, and a shadow of ours under it is a second lift, which is
+    /// what makes an app look like it is imitating the platform.
+    ///
+    /// This used to be a two-branch modifier — glass on 26, and a thin material plus a hairline plus a shadow
+    /// on 14 and 15, for a deployment target of 14. The target is 26 now (see `Package.swift`), so the second
+    /// branch was unreachable code that no one could ever have run on this machine, and it is gone: one
+    /// surface, the platform's.
     ///
     /// Shape-generic rather than taking a radius, because a floating control is not always a rounded
     /// rectangle — the search field is a capsule, and it is the same surface as the composer.
@@ -190,14 +194,7 @@ extension Wei {
         let shape: S
 
         func body(content: Content) -> some View {
-            if #available(macOS 26.0, *) {
-                content.glassEffect(.regular, in: shape)
-            } else {
-                content
-                    .background(.regularMaterial, in: shape)
-                    .overlay(shape.strokeBorder(Palette.separator, lineWidth: Control.hairline))
-                    .shadow(color: .black.opacity(0.03), radius: 8, y: 4)
-            }
+            content.glassEffect(.regular, in: shape)
         }
     }
 }

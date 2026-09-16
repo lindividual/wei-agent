@@ -80,6 +80,8 @@ pub fn Span::to_json(self : Span) -> Json {
     Strike(spans) => tag("del", [("spans", spans_json(spans))])
     Link(url, spans) =>
       tag("link", [("url", Json::string(url)), ("spans", spans_json(spans))])
+    Image(url, alt) =>
+      tag("image", [("url", Json::string(url)), ("alt", Json::string(alt))])
   }
 }
 

@@ -3,54 +3,15 @@ import SwiftUI
 import PiKit
 import PiModel
 
-/// What is still running: the work that outlived the tool call that started it.
+/// The background jobs, as the workspace column draws them.
 ///
-/// The register opens from the transcript's toolbar rather than sitting in the window, because it is
-/// an exception report. Most of the time nothing is running and the panel would be an empty box; when
-/// something *is* running — a dev server, a `sleep` from an hour ago — it is the only place that says
-/// so, and the moment a reader wants it is the moment they notice the machine is busy.
-///
-/// Not a separate window: a job belongs to a session, and this is a list the reader checks and closes.
-struct JobsPanel: View {
-    @ObservedObject var client: PiClient
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if client.jobs.isEmpty {
-                empty
-            } else {
-                List(client.jobs) { job in
-                    JobRow(job: job, onKill: { client.killJob(job.id) })
-                }
-                .listStyle(.inset)
-            }
-        }
-        .frame(width: 380, height: 260)
-        .onAppear { client.refreshJobs() }
-    }
-
-    private var empty: some View {
-        VStack(spacing: 6) {
-            Image(systemName: "checkmark.circle")
-                .font(.system(size: 22))
-                .foregroundStyle(.secondary)
-            Text("Nothing running")
-                .fontWeight(.medium)
-            // Said rather than implied, because "nothing running" is ambiguous: it could mean the
-            // list is broken. What would appear here is a process the agent left behind — a server,
-            // a long command — after the call that started it returned.
-            Text("Background jobs started by the agent appear here while their process is alive.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
+/// A row drawn in the sidebar rather than a popover from the toolbar, because there is now a *section* for
+/// them in that column and a register living in two places is a register that disagrees with itself. The web
+/// UI keeps its equivalent ("Background") in the sidebar for the same reason, and the kill control travels
+/// with the row — a list that names a runaway process and cannot stop it is a list you then have to search
+/// for the way to stop it.
 /// One job: what it is, how long it has been going, and the way to stop it.
-private struct JobRow: View {
+struct JobRow: View {
     let job: Job
     let onKill: () -> Void
 

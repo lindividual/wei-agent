@@ -201,10 +201,7 @@ fn push_inline(
       )
     Autolink(link) => out.push(Link(link.v.link.v, [Text(link.v.link.v)]))
     Link(link) => push_link(link.v, defs, out)
-    // An image is not drawn — the host has no loader for a remote URL, and a broken-image box is
-    // worse than a word. Its alt text is what a reader can act on, so that is what crosses, as a
-    // link to the source when the target is one the host may open.
-    Image(image) => push_link(image.v, defs, out)
+    Image(image) => push_image(image.v, defs, out)
     RawHtml(_) => ()
     // Inline math keeps its delimiters, for the same reason the block form does.
     ExtMathSpan(math) =>
@@ -218,6 +215,94 @@ fn push_inline(
         ),
       )
   }
+}
+
+///|
+/// A picture, when the host may be asked to draw one.
+///
+/// This crossed as its alt text once, on the grounds that the host had no loader and a broken-image
+/// box is worse than a word. The host has one now — the same decode the composer uses for an
+/// attachment — so the picture itself crosses, and the alt text crosses with it as the thing to say
+/// when the bytes are not there after all. A target this package will not vouch for takes the old
+/// road: the words, as a link when they point somewhere.
+fn push_image(
+  image : @cmark.InlineLink,
+  defs : Map[String, @cmark.LabelDef],
+  out : Array[Span],
+) -> Unit {
+  match image.reference_definition(defs) {
+    Some(@cmark.LabelDef::LinkDef(definition)) =>
+      match definition.v.dest {
+        Some(dest) if drawable_image(dest.v) =>
+          out.push(Image(dest.v, alt_text(image.text)))
+        // Unresolvable, or a target the host is not to read: the words, and the target only if it is
+        // one the host may open — which is the link rule, applied to an image whose picture is out.
+        _ => push_link(image, defs, out)
+      }
+    // A footnote reference, or a label with no definition: the words are still the reader's.
+    _ => push_inline(image.text, defs, out)
+  }
+}
+
+///|
+/// Whether a picture may be loaded from this target.
+///
+/// **It is a policy, and narrower than "any URL".** The link side refuses `javascript:` and `file:`
+/// because it hands its target to the platform's opener — a hole in a browser is a hole in whatever
+/// the reader clicks it with. A picture is not that: the host reads the bytes itself and decodes
+/// them, so the test is not "is this safe to open" but "is this a picture that may be read". What
+/// passes it:
+///
+///   - an absolute path, and a `file:` URL — a picture the agent just wrote is the case this exists
+///     for, and it is the one the alt-text fallback made unusable;
+///   - `data:` — the parser's own test still filters it, so only the four picture media types get
+///     through and `data:text/html` is not a picture;
+///   - `http(s)` — the one case that needs the network, and so the one case that can still be
+///     arriving when the host draws it.
+///
+/// A *relative* target is refused rather than guessed at: what it is relative to is the reader's
+/// directory as much as it is the model's, and a picture loaded from the wrong one is worse than a
+/// caption. Everything refused arrives as the alt text, which is what arrived for all of them
+/// before.
+fn drawable_image(target : String) -> Bool {
+  if target.has_prefix("/") {
+    // A bare path. Not a URL at all, so there is no scheme to be fooled by, and it is the shape a
+    // model writes for a picture it has just saved.
+    true
+  } else {
+    let lower = target.to_lower()
+    if lower.has_prefix("data:") ||
+      lower.has_prefix("http:") ||
+      lower.has_prefix("https:") {
+      // The parser's own test still applies to these — it is what keeps `data:text/html` from being
+      // a picture, and it is the same test the link side uses.
+      !@cmark.InlineLink::is_unsafe(target)
+    } else {
+      // A local `file:` URL, and **deliberately not `is_unsafe`**: that test refuses `file:` because
+      // its own caller hands the URL to the platform's opener, and this one reads the bytes itself.
+      // A path the model can name is a path the host reads either way (the composer attaches one),
+      // so the narrower rule would refuse the pictures this was built for and allow the same read
+      // through another door. What is refused is the *remote* form — `file://host/x` loads from
+      // somewhere this machine is not.
+      lower.has_prefix("file:///") ||
+      (lower.has_prefix("file:/") && !lower.has_prefix("file://"))
+    }
+  }
+}
+
+///|
+/// An image's alt text, flattened into one line.
+///
+/// The parser gives it as the inline nodes between the brackets, so `![**bold**](…)` is an emphasis
+/// rather than a string. A host that draws it as the caption under a picture wants one line: the
+/// lines are joined with a space, because a caption is not a paragraph and a newline in it is a line
+/// break nothing asked for.
+fn alt_text(text : @cmark.Inline) -> String {
+  text
+  .to_plain_text(break_on_soft=false)
+  .map(fn(line) { line.to_array().join("") })
+  .to_array()
+  .join(" ")
 }
 
 ///|

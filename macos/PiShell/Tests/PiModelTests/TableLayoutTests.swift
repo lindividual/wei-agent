@@ -18,6 +18,9 @@ final class TableLayoutTests: XCTestCase {
             case let .text(text), let .code(text): return total + text.count
             case let .emph(inner), let .strong(inner), let .strike(inner): return total + inner.count
             case let .link(_, inner): return total + inner.count
+            // A picture in a cell measures as wide as the word that stands in for it: what a table
+            // cell ends up drawing is that word, so that is the width the column is laid out for.
+            case let .image(_, alt): return total + alt.count
             }
         }) * 10
     }
