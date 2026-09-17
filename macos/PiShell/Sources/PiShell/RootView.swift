@@ -39,6 +39,11 @@ struct RootView: View {
     /// two places computing one fact.
     @State private var search = ""
 
+    /// The session being renamed, and what the dialog's field holds. Owned by the window because two
+    /// columns start the same dialog: the list's row menu, and the pencil beside the conversation's name.
+    @State private var renaming: SessionRow?
+    @State private var renameDraft = ""
+
     /// The project whose sessions are listed: the reader's choice when they have made one, and otherwise
     /// the project of the session that is open.
     private var browsed: String {
@@ -97,7 +102,8 @@ struct RootView: View {
                 browsing: browsed,
                 sections: sections,
                 searching: searching,
-                onBrowse: { browsing = $0 }
+                onBrowse: { browsing = $0 },
+                onRename: { startRenaming($0) }
             )
             .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 460)
             // **This column owns the window's title, and the detail column does not.** That is not a
@@ -124,8 +130,15 @@ struct RootView: View {
             .navigationTitle(sessionListTitle)
             .navigationSubtitle(sessionListSubtitle)
         } detail: {
-            ConversationView(client: client)
-                .frame(minWidth: 420, minHeight: 320)
+            ConversationView(
+                client: client,
+                onRename: {
+                    // The same dialog as the row's own context menu, started from this column because the
+                    // name is written *here*: a reader who wants it different is looking at it.
+                    if let row = currentSessionRow { startRenaming(row) }
+                }
+            )
+            .frame(minWidth: 420, minHeight: 320)
         }
         // The brand accent, applied where the platform applies it: with `.tint`, the system draws its own
         // selection, focus rings and default buttons in this colour. Setting it here rather than painting a
@@ -164,6 +177,38 @@ struct RootView: View {
             guard case let .success(urls) = result, let url = urls.first else { return }
             client.newSession(in: url.path)
         }
+        // **One rename dialog for both columns.** It used to live in the session list, which was right
+        // while the list was the only place a session could be named. The pencil is now in the conversation
+        // column's toolbar — next to the name it changes — and two copies of a dialog is two places for the
+        // wording, the button order and the "what does this write" sentence to drift apart.
+        .alert("Rename Session", isPresented: renamePresented) {
+            TextField("Name", text: $renameDraft)
+            Button("Cancel", role: .cancel) { renaming = nil }
+            Button("Rename") {
+                if let renaming { client.rename(renaming.path, to: renameDraft) }
+                renaming = nil
+            }
+        } message: {
+            Text("The name is written into the session's own file, so it travels with it.")
+        }
+    }
+
+    /// The row for the session on screen, from the list the shell sent. `nil` for a session created a
+    /// moment ago, which the store has not listed yet.
+    private var currentSessionRow: SessionRow? {
+        client.sessions.first(where: { $0.path == client.currentPath })
+    }
+
+    private var renamePresented: Binding<Bool> {
+        Binding(
+            get: { renaming != nil },
+            set: { if !$0 { renaming = nil } }
+        )
+    }
+
+    private func startRenaming(_ row: SessionRow) {
+        renameDraft = row.label
+        renaming = row
     }
 }
 
@@ -436,12 +481,13 @@ private struct SessionList: View {
     /// Called when a search result is clicked, so the first column can follow the reader into the project
     /// they just reached into — otherwise the two columns would disagree about where they are.
     let onBrowse: (String) -> Void
+    /// Called when a row's menu asks to rename it. The dialog itself belongs to the window: the same one is
+    /// started from beside the conversation's own name.
+    let onRename: (SessionRow) -> Void
     /// The session deleted most recently, so the list can offer it back. The file was renamed rather than
     /// removed, so this is a convenience on top of a recovery that was already possible.
     @State private var deleted: (path: String, label: String)?
     @State private var undoTimer: Task<Void, Never>?
-    @State private var renaming: SessionRow?
-    @State private var newName = ""
 
     /// How long the offer to undo a delete stands. The same window the web UI uses, and for the same
     /// reason: an offer that stays until it is used is a row that never leaves.
@@ -481,6 +527,17 @@ private struct SessionList: View {
         // one control that adds a row to *this* list over the transcript instead: the top of the window
         // then read as two regions (a sidebar, and an everything-else that happened to be split), which
         // is exactly what a reader of this window reported seeing.
+        //
+        // **Where this button cannot go, measured.** `.primaryAction` is not "this column's action" — it is
+        // the window's trailing edge, so the button sits over the *conversation* column (measured:
+        // `x=872…917` of 921) even though this column ends at 466. But `.navigation` here is not the fix
+        // either: it puts the button at this column's leading edge (`x=230…271`) and **the window's own
+        // title moves out of the way** — from `x=230…864` to `x=391…551`, i.e. out of the list column and
+        // over the boundary. That is not a preference to trade away: the title names the list, and it is
+        // over the list for that reason (see `macos/README.md`, "标题栏归中间那栏"). So the declaration
+        // stays here and the placement stays `.primaryAction`; what "over the column it acts on" means for
+        // this control is the toolbar's trailing edge, where every Mac app puts an add button for the
+        // thing the window is showing.
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -500,7 +557,7 @@ private struct SessionList: View {
                     ForEach(section.rows) { row in
                         SessionRowView(
                             row: row,
-                            onRename: { startRenaming(row) },
+                            onRename: { onRename(row) },
                             onDelete: { delete(row) }
                         )
                         .tag(row.path)
@@ -536,16 +593,6 @@ private struct SessionList: View {
                     .padding(.horizontal, 24)
             }
         }
-        .alert("Rename Session", isPresented: renameBinding) {
-            TextField("Name", text: $newName)
-            Button("Cancel", role: .cancel) { renaming = nil }
-            Button("Rename") {
-                if let renaming { client.rename(renaming.path, to: newName) }
-                renaming = nil
-            }
-        } message: {
-            Text("The name is written into the session's own file, so it travels with it.")
-        }
     }
 
     private var emptyMessage: String {
@@ -558,18 +605,6 @@ private struct SessionList: View {
         return groups.contains(where: { $0.cwd == browsing })
             ? "No sessions in this project."
             : "No project selected."
-    }
-
-    private var renameBinding: Binding<Bool> {
-        Binding(
-            get: { renaming != nil },
-            set: { if !$0 { renaming = nil } }
-        )
-    }
-
-    private func startRenaming(_ row: SessionRow) {
-        newName = row.label
-        renaming = row
     }
 
     private func delete(_ row: SessionRow) {
@@ -701,13 +736,12 @@ private struct SessionRowView: View {
 
 /// What the shell is, what it has said, and a box to answer it in.
 ///
-/// **The name of the conversation is the only heading, and it is a bar rather than a band.** This column
-/// once opened with an opaque band — the name, the model, and the working directory on a material with a
-/// hairline under it, running edge to edge — and that is what was removed: a band is the mark of a
-/// *panel*, which is why the window read as a sidebar and an everything-else that happened to be split
-/// rather than as three columns. A bar is not that. It has no background and no rule, it is one line of
-/// type at the column's leading edge, and what separates it from the conversation is the conversation
-/// itself going blurry underneath it.
+/// **The name of the conversation is the only heading, and it is a toolbar item rather than a band.** This
+/// column once opened with an opaque band — the name, the model, and the working directory on a material with
+/// a hairline under it, running edge to edge — and that is what was removed: a band is the mark of a *panel*,
+/// which is why the window read as a sidebar and an everything-else that happened to be split rather than as
+/// three columns. A line of type in the toolbar's own row is not that: no background, no rule, and the
+/// conversation goes soft behind it as it scrolls under the row.
 ///
 /// The other two facts the band carried are still gone, and deliberately: the model is on the composer's
 /// own picker, next to the message it will answer; the directory is the project the middle column is
@@ -715,6 +749,9 @@ private struct SessionRowView: View {
 /// status line, which says it under the field where a reader is looking anyway (`PiClient.blocked`).
 private struct ConversationView: View {
     @ObservedObject var client: PiClient
+    /// Starts the window's rename dialog for the session on screen. Beside the name, because that is the
+    /// thing it changes.
+    let onRename: () -> Void
     /// Shared with the transcript, which decides when it keeps up, and with the send button, which is
     /// the one thing that overrides that decision.
     @StateObject private var scroll = TranscriptScroll()
@@ -723,23 +760,21 @@ private struct ConversationView: View {
     /// margin below the toolbar has to be told about it rather than recomputing it.
     @State private var titleHeight: CGFloat = 0
 
-    /// How far the title is lifted out of the bar's own row and onto the toolbar's centre line, so that the
-    /// name shares a row with the toolbar's controls instead of sitting a line below them.
+    /// How far the title and the pencil are lifted, so that they sit on the toolbar's centre line rather
+    /// than on the line below it.
     ///
-    /// A safe-area bar is drawn *below* the toolbar, so sharing that row means moving the type up by the
-    /// toolbar's height less the half-line the platform centres its own items on. The same amount is given
-    /// back as bottom padding, so the bar's own height — and with it the clearance the first row of the
-    /// conversation needs — is unchanged. **Measured against a running window**: 46 puts the text's centre on
-    /// the toolbar's, 26, for this font at `Wei.Control.toolbar`. Re-measure if either changes.
-    private static let titleLift: CGFloat = 46
+    /// A safe-area bar is drawn *below* the toolbar, and the platform centres its own items at 26 of the
+    /// toolbar's 52 points (`Wei.Control.toolbar`). The bar's own content starts at 52 + `Wei.Space.tiny`,
+    /// so the lift is `52 + 2 − (26 − lineHeight / 2)` — **measured on a running window** (by reading the
+    /// AX frames of the toolbar's button and of this text, which is how "the same row" was checked), not
+    /// derived from a formula. It is applied as an `offset`, so the bar keeps the height the transcript has
+    /// to clear.
+    private static let titleLift: CGFloat = 41
 
-    /// Room on the trailing side for the toolbar's own control.
-    ///
-    /// A toolbar item sits in the last stretch of its column, and this column ends where the session button
-    /// is: measured on a running window, that button occupies the last 49 points of the width. 64 clears it
-    /// with a gap on the 4-point grid — and it is also where a long name gets its ellipsis, which is why the
-    /// title is truncated rather than running underneath the button.
-    private static let titleTrailingInset: CGFloat = 64
+    /// Room at the trailing end for the toolbar's own control — measured, the session button occupies the
+    /// last 49 points of the window, and its row is this row once the bar is lifted. This is also where a
+    /// long name gets its ellipsis, so the two never touch.
+    private static let titleClearance: CGFloat = 64
 
     var body: some View {
         TranscriptView(
@@ -752,7 +787,7 @@ private struct ConversationView: View {
             onContinue: { client.continueTurn() },
             onDismiss: { client.dismissTurn() },
             scroll: scroll,
-            // The first row has to clear both the toolbar and this column's own title.
+            // The first row has to clear the toolbar *and* this column's own bar.
             topMargin: Wei.Control.toolbar + (sessionName == nil ? 0 : titleHeight)
         )
             // And the same treatment at the other end, for the same reason: the composer is a card that
@@ -771,77 +806,84 @@ private struct ConversationView: View {
                     onStop: { client.stop() }
                 )
             }
-            // **What this conversation is called, at this column's leading edge.**
-            //
-            // It says something the window's title does not: that one names the *list* the middle column
-            // is showing (which project, how many sessions), because a window has one title and the list
-            // is what it is about. A reader who has scrolled into an answer is looking at one conversation,
-            // and the name of it belongs where they are looking.
-            //
-            // The repetition is deliberate. The same name is on the row in the middle column, and that is
-            // correct rather than a mistake to be tidied away: one is the name of a thing in a list of
-            // things, and this one is the name of the thing on screen. (What *was* a mistake — written down
-            // at the top of this column's history — is the version that made the window's title and the
-            // transcript's heading say the same words: a window has one title, and two of them read as a
-            // program that does not know what it is showing.)
-            //
-            // `safeAreaBar` rather than a `HStack` above the transcript, and that is the whole of the
-            // effect: a bar insets the safe area and **extends the scroll edge effect with it**, so the
-            // conversation keeps scrolling *under* the name and is blurred where it passes beneath — the
-            // arrangement the settings panel has at the top of its right-hand column. A heading that is
-            // simply the first child of a `VStack` shortens the scroll view instead, so nothing ever goes
-            // under it and the blur is spent on empty space.
-            //
-            // No background and no hairline under it. A band with a rule under it is the mark of a *panel*,
-            // which is exactly what this column used to open with and why the window read as a sidebar and
-            // everything else; the blur is what separates the name from what passes under it.
+            // **What this conversation is called, and the pencil that renames it, on one line.**
+            ///
+            /// The name says something the window's title does not: that one names the *list* the middle
+            /// column is showing (which project, how many sessions), because a window has one title and the
+            /// list is what it is about. A reader who has scrolled into an answer is looking at one
+            /// conversation, and the name of it — with the way to change it — belongs at the head of it.
+            ///
+            /// The repetition is deliberate: one is the name of a thing in a list of things, this one is the
+            /// name of the thing on screen. (What *was* a mistake, written down at the top of this column's
+            /// history, is the version that made the window's title and this heading say the same words.)
+            ///
+            /// **A bar, not a toolbar item.** Both were tried and measured. A `ToolbarItem` holds one thing
+            /// cleanly — a title *or* a button — and a second item in this column's region makes the platform
+            /// re-flow the row: the title left the column and landed over the *list* (`x=230…397`), and the
+            /// window's own title was pushed from `x=230…864` to `x=397…557`. A bar is drawn by this view, so
+            /// the two controls are laid out by `HStack` and nothing else moves.
+            ///
+            /// **And it is lifted onto the toolbar's centre line** (`titleLift`), so the name and the pencil
+            /// share the row the window's own controls are on rather than sitting a line below them.
+            ///
+            /// What is kept either way: the blur. `safeAreaBar` insets the safe area, and
+            /// `scrollEdgeEffectStyle(.soft, for: .top)` fades what passes beneath — so the conversation goes
+            /// soft behind the name as it scrolls under it.
             .safeAreaBar(edge: .top, alignment: .leading) {
                 if let name = sessionName {
-                    Text(name)
-                        .font(Wei.Font.title())
-                        // One line, and the end of it if it does not fit: a question can be long, and a
-                        // title that wraps to four lines is a title that has become the first paragraph.
-                        // The tail rather than the middle, so what the reader sees is how the question
-                        // *begins* — which is how they would recognize it in the list — and so the
-                        // ellipsis is where they expect one.
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        // The width is the room there is, not the width of the words: this is what makes
-                        // the platform truncate, rather than the text being clipped by its neighbours.
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.leading, Wei.Space.section)
-                        .padding(.trailing, Self.titleTrailingInset)
-                        .padding(.top, Wei.Space.cozy - Self.titleLift)
-                        .padding(.bottom, Wei.Space.cozy + Self.titleLift)
-                        .background(
-                            GeometryReader { geometry in
-                                Color.clear.preference(
-                                    key: ConversationTitleHeightKey.self,
-                                    value: geometry.size.height
-                                )
-                            }
-                        )
-                        // The whole question on hover, since the line above may be showing a third of it.
-                        .help(name)
+                    HStack(spacing: Wei.Space.cozy) {
+                        Text(name)
+                            .font(Wei.Font.title())
+                            // One line, and the end of it if it does not fit: a question can be long, and a
+                            // title that wraps to four lines is a title that has become the first paragraph.
+                            // The tail rather than the middle, so what the reader sees is how the question
+                            // *begins* — which is how they would recognize it in the list — and so the
+                            // ellipsis is where they expect one. The width has to be flexible for that:
+                            // truncation happens when there is a limit to truncate against.
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            // The whole question on hover, since the row may be showing a third of it.
+                            .help(name)
+                        // **Beside the name it changes.** It is the same dialog the row's own context menu
+                        // starts — one dialog, in `RootView`, because two copies is two places for the
+                        // wording and the button order to drift apart.
+                        // The glyph alone: a `Label` in a bar draws its words too, and a button reading
+                        // "Rename Session" next to the name it renames is a sentence where a control belongs.
+                        // The words stay as the accessible name.
+                        Button(action: onRename) {
+                            Image(systemName: "pencil")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Rename this session")
+                        .accessibilityLabel("Rename Session")
+                    }
+                    .padding(.leading, Wei.Space.section)
+                    // Room at the trailing end for the toolbar's own control, which is on this row once the
+                    // bar is lifted: measured, it occupies the last 49 points of the window.
+                    .padding(.trailing, Wei.Space.section + Self.titleClearance)
+                    .padding(.vertical, Wei.Space.tiny)
+                    // `offset` rather than padding: this moves what is *drawn* without changing the bar's
+                    // height, and the bar's height is what the first row of the conversation has to clear.
+                    .offset(y: -Self.titleLift)
+                    .background(
+                        GeometryReader { geometry in
+                            Color.clear.preference(
+                                key: ConversationTitleHeightKey.self,
+                                value: geometry.size.height
+                            )
+                        }
+                    )
                 }
             }
             .onPreferenceChange(ConversationTitleHeightKey.self) { height in
                 titleHeight = height
             }
-        // Deliberately no `navigationTitle` here. In a three-column split the *content* column elects the
-        // window's title and this one's is ignored — the two facts that used to live here have moved: the
-        // model is on the composer's own picker, next to the message it will answer, and the directory is
-        // the project the middle column is listing, whose full path is on its row's tooltip.
-        // Deliberately no `toolbar` at all. What used to be here — the running-jobs register and Settings —
-        // has moved to the workspace column, which is where the web UI keeps both and where they describe
+        // What this column's toolbar holds is **the name of what is in it and the pencil that renames it** —
+        // one control, over the thing it acts on. What used to be here instead — the running-jobs register and
+        // Settings — is in the workspace column, which is where the web UI keeps both and where they describe
         // something that spans the window rather than this column: jobs run in *any* session, and settings
-        // belong to the app. What the window's toolbar holds now is one control per column, each over the
-        // column it acts on: Hide Sidebar over the workspace column, New Session over the session list.
-        //
-        // And **deliberately no `toolbar(removing: .title)`**, which is how the settings panel gets its
-        // leading-edge title: there the window's title and the drawn one are the same fact and one of them
-        // has to go. Here they are two facts — the list, and the conversation on screen — so the window's
-        // title stays where the system puts it, over the column it is about.
+        // belong to the app.
     }
 
     /// What the session on screen is called: the reader's own name for it, else its first question, else
@@ -931,23 +973,20 @@ private struct TranscriptBottomKey: PreferenceKey {
     }
 }
 
-/// And how tall the window onto it is.
-private struct TranscriptViewportKey: PreferenceKey {
+/// How tall the bar over the transcript is, including its own padding.
+///
+/// Needed because two mechanisms each know half of it: the bar insets the *safe area*, while what keeps the
+/// transcript's first row from being hidden for good is a content margin measured from the window's top
+/// edge. Adding one without the other put the title on top of the first line, which a screenshot caught.
+private struct ConversationTitleHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }
 }
 
-/// How tall the bar over the transcript is, including its own padding.
-///
-/// Needed because the two numbers are separate mechanisms and only one of them knows about the other: the
-/// bar insets the *safe area*, while what keeps the transcript's first row from being hidden for good is a
-/// content margin (`Wei.Control.toolbar`, measured from the window's top edge). Adding the bar on top of
-/// that margin without measuring it put the title on the first line of the conversation — which is what the
-/// first version of this did, and what a screenshot showed. Measured rather than written as a constant so
-/// that the font size and the padding stay the only places that decide it.
-private struct ConversationTitleHeightKey: PreferenceKey {
+/// And how tall the window onto it is.
+private struct TranscriptViewportKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
@@ -976,9 +1015,9 @@ private struct TranscriptView: View {
     let onDismiss: () -> Void
     @ObservedObject var scroll: TranscriptScroll
 
-    /// How far below the window's top edge the first row must start — the toolbar, plus whatever bar the
-    /// column draws over the top of the scroll view. The view above this one knows about its own bar and
-    /// passes the sum; `Wei.Control.toolbar` is the answer for a column that draws none.
+    /// How far below the window's top edge the first row must start — the toolbar, plus whatever bar this
+    /// column draws over the top of the scroll view. The view above this one knows its own bar and passes
+    /// the sum; `Wei.Control.toolbar` is the answer for a column that draws none.
     var topMargin: CGFloat = Wei.Control.toolbar
 
     /// The app-wide scroll monitor, installed while the transcript is on screen. See `onAppear`.
