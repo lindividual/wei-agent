@@ -86,6 +86,20 @@ public struct SessionGroup: Identifiable, Equatable, Decodable {
     public var id: String { cwd }
 }
 
+/// Which project a session belongs to, named the way the project list names it.
+///
+/// Two places need this answer and they must not disagree: the session list, where the name is the subtitle
+/// under a row, and the flat "Running sessions" list, where it is what makes one list of every project
+/// readable. The session row itself carries no workspace — identity is the file path, and a session found by
+/// search comes from a project the reader is not browsing — so the lookup is by containment, and empty when
+/// the store has not listed it yet.
+public func workspaceLabel(of row: SessionRow, in groups: [SessionGroup]) -> String {
+    for group in groups where group.sessions.contains(where: { $0.path == row.path }) {
+        return group.label
+    }
+    return ""
+}
+
 /// One finished block of markdown, as the shell parsed it.
 ///
 /// The parse happens in the shell — `md/`, which is cmark, the same engine the web UI renders with —

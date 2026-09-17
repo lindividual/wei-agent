@@ -77,7 +77,10 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 |---|---|---|
 | 不知道 Liquid Glass 怎么写、能不能用 | 凭记忆猜 API 不可靠 | **读 SDK 的 `.swiftinterface`**：`…/MacOSX.sdk/System/Library/Frameworks/SwiftUI.framework/…/arm64e-apple-macos.swiftinterface`。这次就是这么找到 `glassEffect` 的完整签名与可用性标注的 |
 | 同上，而且它不在 `SwiftUI` 里 | `glassEffect`、`Glass` 定义在 **SwiftUICore**（`@_originallyDefinedIn(module: "SwiftUI", macOS: 15.0)` 那套写法） | 按框架名找文件，别只 grep SwiftUI |
-| 用了 macOS 26 的 API，但 package 的 target 是 14 —— 会不会崩在旧系统上 | —— | 用 `swift build` 后 `nm -m <binary> \| grep glassEffect` 看是不是 **weak external**，再 `otool -l \| grep minos` 看部署目标。weak 链接 + `if #available` 就是安全的 |
+| 想让 `.inset` 列表的行左右/上下多留白，改了 `.listRowInsets` 或 `.contentMargins(.horizontal, for: .scrollContent)`，一点没变 | 在 macOS 上这两个 modifier **对列表的行内边距不起作用**：四种写法（不设 / `listRowInsets` / `contentMargins` / 两者都设）量下来，`AXRow`、`AXCell`、`AXStaticText` 三层的 frame **一模一样**（285×320 的探针壳子：行 x=290…610、单元格 300…600、文字 306…） | padding 加在**行自己的内容**上（row view 里 `.padding(.horizontal, …)`）。量法：读 AX 的 `AXRow`/`AXCell`/`AXStaticText` 三个 x —— 三者一起动才算真的动了 |
+| 用 macOS 26 的 API，但 package 的 target 是 14 —— 会不会崩在旧系统上 | —— | 用 `swift build` 后 `nm -m <binary> \| grep glassEffect` 看是不是 **weak external**，再 `otool -l \| grep minos` 看部署目标。weak 链接 + `if #available` 就是安全的 |
+| 搞不清一个 `ToolbarItem` 会落在**哪一栏**（三栏 split），截图看不出来 | 同一段声明换 placement 会落到不同栏，而且栏与栏在视觉上只隔一条分隔线 | **从进程内部读 `NSApp.windows.first?.toolbar?.items`**：`item.view` 的 frame 相对整窗，再沿 `superview` 链找到 superview 是 `NSToolbarView` 的那个祖先（item 自己的 frame 是相对 item view 的）。实测：声明在侧栏、`.automatic` → `x=117…161`（侧栏，在平台自己的侧栏开关 `x=161…208` 前面）；`.navigation` → 中间栏；`.primaryAction` → 窗口尾端。顺带同一条链上能读到 item 里的 `NSTextField`：平台画的窗口标题是 `_NSToolbarTitleField`（实测 `x=226 h=16`），可见它仍然在画 |
+| 想知道「设置面板是不是系统那样的偏好工具条」 | `TabView` 放在 `Settings` 场景里才会被画成偏好工具条；放在普通窗口里就是普通 tab | 同一套自查：AX 树里 `AXToolbar` 下面一个 `AXButton` 一个标签，窗口标题是当前标签名（实测五个标签 `x=103…417`、窗口标题 `API Key`） |
 
 ## 五、验证与自动化（这次最费时间的一块）
 
@@ -106,6 +109,7 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | 想看「标题和工具条是不是同一行」，靠看截图估 | 截图能量，但估不准 | **读 AX 的 frame**：`axframe`（第六节）把整棵树连 `y=.. x=..` 打出来。工具条是 `AXToolbar y=0..52`，按钮 `x=872..917`，标题 `y=14..38` —— 两行是不是同一行，一眼就有数字 |
 | 工具条 item 的高度/内容想靠 `padding` 挪位置，结果转录第一行被压住 | bar 的高度就是转录第一行要避开的量（`contentMargins(.top, 工具条 + bar 高度)`） | 只是**画**的位置要挪，就用 `offset`（不改布局高度）；要连高度一起改才用 padding |
 | 想把标题和工具条的按钮放成**同一行**，把标题放进 `ToolbarItem` | 工具条 item 的宽度是固定的：**长度超过可用宽度的 item 会被收进溢出菜单**（右端出现 `»`），并且把同一行其它 item 的位置挤乱 —— 长标题的结果是「标题不见了 + 按钮移位 + 多了个 chevron」，而不是省略号。顺带它还会破坏顶部那层边缘效果。见下一条 | 别往工具条里塞长文本：`safeAreaBar` 画在工具条下方（那样才有模糊和 inset），再把**文字**抬到工具条的中心线上（`ConversationView.titleLift`），抬起的量在下面补回去，bar 高度不变 |
+| 自己画的 bar 里多了一行内容（标题下面加副标题），结果**副标题掉到工具条线下面**、挂在转录上 | 抬起量原来是个**常数**（`titleLift: CGFloat = 41`，是「块只有一行」时量出来的答案）。块高变了，中线就不在 26 上了 —— 名字还在工具条那行，项目那行掉到它下面 18pt（`y=5..29` vs `y=31..46`） | 把「抬多少」写成**从块高算出来的**（`toolbar/2 + height/2`，`height` 就是 `ConversationTitleHeightKey` 那个数），而不是一个只在旧内容上对的常数。这是「量出来的值要跟着被量的东西走」那条的变体：常数比公式便宜，但只在它量的那个形状上对 |
 | 想让 `Text` 末尾出现省略号，写了 `lineLimit(1)` + `truncationMode(.tail)`，结果没有省略号 | 省略只发生在**宽度被约束**的时候：一个自然宽度的 `Text` 会要多少给多少，超出部分被邻居裁掉而不是变成 `…` | 加 `.frame(maxWidth: .infinity, alignment: .leading)`（或别的上限），让平台知道可用宽度是多少 —— 再用**尾部内边距**给它让开右边的按钮 |
 | 想量「标题在不在工具条那一行」，靠看截图估 | 截图能量，但估不准 | **读 AX 的 frame**：`axframe`（第六节）把整棵树连 `y=.. x=..` 打出来。工具条是 `AXToolbar y=0..52`，按钮 `x=872..917`，标题 `y=14..38` —— 两行是不是同一行，一眼就有数字 |
 | 想看「内容从 bar 下面穿过去被模糊」的效果，滚了半天没反应 | 那一栏的内容不够长，压根没有可滚的东西（设置面板的 API Key 那页就装得下） | 换内容长的一页（Skills）或长会话；也可以只写布局的壳子（第六节）。注意合成滚轮事件 `wheel1` 是 `Int32`：传负数给 `Int()` 再装回 `Int32` 会 crash（`Range requires lowerBound <= upperBound`） |
@@ -125,6 +129,13 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 - **需要知道「视图内部此刻是什么」时，直接 `FileHandle.standardError.write`**：app 的 stderr 重定向到
   文件即可。这次靠它在 `onKeyPress`、`submit()`、`ShellClient.send` 三处打点，一次就分清了「没触发」
   和「触发了但值是旧的」。
+- **自己进程的 AX 树不需要任何权限。** 第六组里那三条「看/点/读菜单」的权限约束只针对**别的**进程：
+  `AXUIElementCreateApplication(getpid())` 递归读 `kAXChildrenAttribute`，一行命令就能拿到整棵树的
+  `role/title/value/x/y`（这次临时加了个 `WEI_AXDUMP=1` 就走的探针，十分钟里靠它定了五件事：行内边距、
+  工具条 item 落在哪一栏、平台还在不在画标题、设置面板是不是真偏好工具条、副标题掉到哪去了）。
+  只有想要**事件**（鼠标/键盘）时才必须去要辅助功能权限。
+  量到的是 AX 的 frame，不是像素，所以它只说「在哪里、多大」，不说「好不好看」—— 好看仍然只能靠眼睛
+  （而截图要屏幕录制权限，会掉）。两者互补：AX 回答「是不是同一行」，截图回答「这一行难不难看」。
 - **`wei-cli` 是同一套 agent 的终端形态**：怀疑是 shell 侧还是宿主侧时，先在终端复现 —— 这次
   shell 侧一次就通过了，问题定位在宿主，省掉大量窗口里的瞎试。
 - **假模型比真 API 好用**：一个几十行的 python SSE server（`/tmp` 里现写）能构造工具调用、思考流、

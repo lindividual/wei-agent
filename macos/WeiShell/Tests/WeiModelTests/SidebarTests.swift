@@ -71,6 +71,31 @@ final class SidebarTests: XCTestCase {
         )
     }
 
+    /// Where a session lives, as the list says it.
+    ///
+    /// The label and not the path, because two readers use this answer: the subtitle under a row in the
+    /// middle column, and the project name in the flat "Running sessions" list. Both are read next to the
+    /// first column's own rows, so a path here would be a third vocabulary for one thing.
+    func testASessionIsNamedByItsWorkspace() {
+        let groups = [
+            SessionGroup(cwd: "/home/me/one", label: "one", current: true, sessions: [row("a")]),
+            SessionGroup(cwd: "/home/me/two", label: "two", current: false, sessions: [row("b")]),
+        ]
+        XCTAssertEqual(workspaceLabel(of: row("a"), in: groups), "one")
+        XCTAssertEqual(workspaceLabel(of: row("b"), in: groups), "two")
+    }
+
+    /// A session the store has not listed — one created a moment ago, or one whose store has since gone —
+    /// has no workspace, and the answer is empty rather than an educated guess: the caller's rule is to
+    /// draw nothing, and a guess would be a row claiming to be somewhere it is not.
+    func testASessionOutsideEveryGroupHasNoWorkspace() {
+        let groups = [
+            SessionGroup(cwd: "/home/me/one", label: "one", current: true, sessions: [row("a")])
+        ]
+        XCTAssertEqual(workspaceLabel(of: row("elsewhere"), in: groups), "")
+        XCTAssertEqual(workspaceLabel(of: row("a"), in: []), "")
+    }
+
     /// A row's identity is its path: the label can change under a rename and a list must not then
     /// treat the same session as two. The eight hex characters are a name the shell sends, not the
     /// identity — two workspaces could hold sessions whose ids collide.

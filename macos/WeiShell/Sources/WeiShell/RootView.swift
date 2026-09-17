@@ -241,7 +241,6 @@ private struct WorkspaceList: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            wordmark
             List(selection: $browsing) {
                 // **Two sections that are usually empty, and absent when they are.** Nothing running means
                 // no heading rather than an empty one: a section that says "Running sessions" over an empty
@@ -268,19 +267,11 @@ private struct WorkspaceList: View {
                     }
                 }
                 SectionTitle("Workspaces")
+                addWorkspace
                 ForEach(client.groups) { group in
                     WorkspaceRow(group: group)
                         .tag(group.cwd)
                 }
-                // Adding one is a workspace action, so it belongs in this list rather than in the File menu
-                // alone — the menu item stays, because a Mac reader looks for "New …" in File.
-                Button {
-                    actions.choosingFolder = true
-                } label: {
-                    Label("Add Workspace…", systemImage: "plus")
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Wei.Palette.accent)
             }
             .listStyle(.sidebar)
             // The list's content is inset under the search field the platform places in this column, so its
@@ -289,8 +280,27 @@ private struct WorkspaceList: View {
             // what keeps the first row out of that band. (Found by dumping the accessibility tree, which is
             // the only way this shows up — the row is in the tree, with a real size, and simply not drawn.)
             .contentMargins(.top, Wei.Space.loose, for: .scrollContent)
-            Divider()
             settings
+        }
+        // **The app's mark, in this column's own toolbar band, above the search field.** Drawn rather than
+        // imported, from the same `Wei.Mark` geometry the icon is drawn from, so the two cannot drift.
+        //
+        // It was the first row of this column instead — the mark *and* the app's name — and what was removed
+        // is the row: a heading above the search field pushed everything this column is for (the projects)
+        // one row further down, to say a name the window's own menu bar already says. The name is now only
+        // in the tooltip.
+        //
+        // `.automatic` is the placement that lands in *this* column's band. Declared here it sits at the
+        // leading end of the sidebar — in front of the platform's own sidebar toggle, and above the search
+        // field rather than beside it. The same item declared `.navigation` lands in the *content* column
+        // instead, and `.primaryAction` is the window's trailing edge, which is where the session buttons
+        // are.
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Wei.MarkView(height: 18)
+                    .accessibilityLabel("wei Agent")
+                    .help("wei Agent")
+            }
         }
         // **The platform's own search, placed in the sidebar.** It was a hand-rolled capsule inside this
         // column's content, and that is the version this file argued for at length — the reasoning was
@@ -313,67 +323,72 @@ private struct WorkspaceList: View {
 
     /// Which project a running session belongs to, for the row that has room for one word of it.
     private func label(for row: SessionRow) -> String {
-        client.groups.first(where: { $0.sessions.contains(where: { $0.path == row.path }) })?.label ?? ""
+        workspaceLabel(of: row, in: client.groups)
     }
 
-    /// Settings, as the last list item rather than a button in the toolbar.
+    /// Adding one, as the *first* row of the list it adds to.
+    ///
+    /// It was the last row, which put it below every project: at four projects it is below the fold, and a
+    /// control the reader has to scroll to find is a control that is not there. Adding is a workspace action,
+    /// so it stays in this list rather than in the File menu alone — the menu item stays, because a Mac
+    /// reader looks for "New …" in File.
+    ///
+    /// The glyph is given a workspace row's own slot (`WorkspaceRow.glyphSlot`), so the plus sits over the
+    /// folders and every label in the list starts at the same place.
+    private var addWorkspace: some View {
+        Button {
+            actions.choosingFolder = true
+        } label: {
+            HStack(spacing: Wei.Space.tight) {
+                Image(systemName: "plus")
+                    .font(Wei.Font.control())
+                    .frame(width: WorkspaceRow.glyphSlot, alignment: .center)
+                Text("Add Workspace…")
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(Wei.Palette.accent)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Settings, as one glyph at the bottom of this column.
     ///
     /// It is the app's own control, not this column's and not that one's — and a control that belongs to no
     /// column is what the bottom of the first column is for. The web UI pins its equivalent to the bottom of
     /// the sidebar for exactly this reason, and a Mac reader looking for preferences looks in the app menu
     /// first anyway (`⌘,` is still wired).
+    ///
+    /// **The glyph alone**: the word beside it said nothing the gear does not, and the hairline over it was
+    /// the last divider left in this column (the top of the column had one for the same reason, and lost it
+    /// for the same reason). What replaces the two is where it sits: the gear's own box is the **slot the
+    /// project rows put their folders in** (`WorkspaceRow.glyphSlot`), placed where those rows' content starts
+    /// — `loose` (16) past this column's edge, which is the list's 10 of row inset plus 6 of cell inset. So
+    /// the gear shares a centre line with both the folders above it and the magnifier in the search field
+    /// (measured: `x=33` from the column's edge, all three). The height is a control's, which is what makes
+    /// it a comfortable thing to click.
     private var settings: some View {
-        Button {
-            openSettings()
-        } label: {
-            HStack(spacing: Wei.Space.cozy) {
+        HStack(spacing: 0) {
+            Button {
+                openSettings()
+            } label: {
                 Image(systemName: "gearshape")
                     .font(Wei.Font.control())
-                    .frame(width: Wei.Icon.control, alignment: .center)
-                Text("Settings")
-                Spacer(minLength: 0)
+                    .frame(width: WorkspaceRow.glyphSlot, height: Wei.Control.small)
+                    .contentShape(Rectangle())
             }
-            .foregroundStyle(Wei.Palette.secondary)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Settings (⌘,)")
-        .padding(.horizontal, Wei.Space.cozy)
-        .padding(.vertical, Wei.Space.tight)
-    }
-
-    /// The mark and the app's name, at the top of the first column.
-    ///
-    /// It earns the space for a reason beyond decoration: **since the window's title became the project and
-    /// its session count, the app's own name appears nowhere else in the interface.** The About box and the
-    /// Dock, and neither is something a reader looks at. This is where a Mac app puts it.
-    ///
-    /// Drawn rather than imported, from `Wei.Mark` — the same geometry the icon is drawn from, so the two
-    /// cannot drift, and recoloured by the palette like everything else.
-    private var wordmark: some View {
-        HStack(spacing: Wei.Space.cozy) {
-            Wei.MarkView(height: 18)
-            Text("wei Agent")
-                .font(Wei.Font.control(.medium))
-                .foregroundStyle(Wei.Palette.secondary)
+            .buttonStyle(.plain)
+            .help("Settings (⌘,)")
+            .accessibilityLabel("Settings")
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, Wei.Space.loose)
-        .padding(.top, Wei.Space.regular)
-        .padding(.bottom, Wei.Space.cozy)
-        // **No hairline under it.** There was one — "so it reads as the app's own strip rather than as
-        // the first row of the list" — and a strip is exactly what it made: a divider across the top of
-        // the first column is the same tell as the band that used to sit over the third one, and it was
-        // the last one left. On its own the wordmark reads the way Notes' "Mac" reads at the head of its
-        // folder list: a heading, not a region. Same reason the toolbar lost its background.
+        .foregroundStyle(Wei.Palette.secondary)
+        .padding(.leading, Wei.Space.loose)
+        .padding(.trailing, Wei.Space.regular)
+        .padding(.vertical, Wei.Space.tight)
     }
 }
 
-/// One project: a folder, its name, how many sessions, and whether the open conversation is inside it.
-///
-/// The dot is kept from the two-column version and means more here than it did: the middle column shows
-/// whichever project the reader is *browsing*, which is not necessarily the one holding the open
-/// conversation — so without a mark, browsing away from a running session hides where it is.
 /// A section's title, as its own row.
 ///
 /// **A row rather than a `Section` header, and that is a workaround with a measurement behind it.** With
@@ -428,13 +443,24 @@ private struct RunningSessionRow: View {
     }
 }
 
+/// One project: a folder, its name, how many sessions, and whether the open conversation is inside it.
+///
+/// The dot is kept from the two-column version and means more here than it did: the middle column shows
+/// whichever project the reader is *browsing*, which is not necessarily the one holding the open
+/// conversation — so without a mark, browsing away from a running session hides where it is.
 private struct WorkspaceRow: View {
     let group: SessionGroup
 
+    /// The width of a row's leading glyph slot — the same slot in the add row above, so every label in this
+    /// list starts at the same place whatever its glyph measures. 18 is `folder`'s advance at the control
+    /// size (measured: an 18×14 box for a 14-point glyph), and it is the widest of the two.
+    static let glyphSlot: CGFloat = Wei.Icon.control + Wei.Space.tight
+
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Wei.Space.tight) {
             Image(systemName: "folder")
                 .font(Wei.Font.control())
+                .frame(width: Self.glyphSlot, alignment: .center)
                 .foregroundStyle(Wei.Palette.secondary)
             Text(group.label)
                 .lineLimit(1)
@@ -497,6 +523,15 @@ private struct SessionList: View {
         client.groups
     }
 
+    /// Which project a session belongs to, and what to call it.
+    ///
+    /// The same answer the first column's rows give a project, which is what makes the subtitle under a
+    /// session readable as a *name* rather than as a path. Qualified, because this type has a method of the
+    /// same name: unqualified, the lookup would call itself.
+    private func workspaceLabel(of row: SessionRow) -> String {
+        WeiModel.workspaceLabel(of: row, in: groups)
+    }
+
     /// The selection is the shell's current session, not a copy of it. Clicking asks the shell to switch,
     /// and the row highlights when the shell says it has.
     private var selection: Binding<String?> {
@@ -537,6 +572,7 @@ private struct SessionList: View {
                     ForEach(section.rows) { row in
                         SessionRowView(
                             row: row,
+                            workspace: workspaceLabel(of: row),
                             onRename: { onRename(row) },
                             onDelete: { delete(row) }
                         )
@@ -562,6 +598,14 @@ private struct SessionList: View {
             }
         }
         .listStyle(.inset)
+        // **No `.listRowInsets` here, and that is a finding rather than an omission.** On macOS those insets
+        // do not move an `.inset` list's rows: measured (own-process accessibility tree, four ways — none, set,
+        // `contentMargins(.horizontal,)`, both), the row, its cell and its text came out at exactly the same
+        // frames every time. What *does* move the text is padding inside the row's own content
+        // (`SessionRowView`), which is where the extra room the reader asked for lives. The highlight keeps the
+        // inset the list style gives it (10 points), and the text under it starts one step in from that. The
+        // vertical room is the same lever, and the row's own `padding(.vertical,.tiny)` is what makes its
+        // highlight taller than its three lines.
         .overlay {
             // Nothing to show says why: an empty list with no message is indistinguishable from a list
             // that has not loaded.
@@ -655,25 +699,34 @@ private struct UndoRow: View {
 
 /// One session, in the list.
 ///
-/// Two lines, which is what makes the list scannable rather than a wall of first sentences: the label is
-/// what the reader is looking for, and under it the two facts that decide whether this is the one they
-/// want — how long ago it was used, and whether anything is still happening in it. One line forced both
-/// onto the same row and left no room for the second, which is how this read before.
+/// Three lines, and each is a different question the reader is asking: *which* conversation (the label),
+/// *where* it lives (the project, in small type under it), and *when* it was last used. The project is the
+/// one the middle line had to wait for: these rows are one project's sessions, but a **search result is not**
+/// — the query spans every project, so a result has to say which project it came from.
+///
+/// The name is weighted rather than coloured to make it the top line. It was 15 semibold for a while, and
+/// that read as a *heading*: three quarters of the way to the window's own section headings (13 semibold) and
+/// over them on the second look. Control weight at control size over caption is the hierarchy the first
+/// column already uses for a project and its count, which is what makes the two lists read as one system.
 private struct SessionRowView: View {
     let row: SessionRow
+    /// The project this session lives in, as the first column names it.
+    let workspace: String
     let onRename: () -> Void
     let onDelete: () -> Void
 
     @State private var confirmingDelete = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: Wei.Space.tiny) {
             Text(row.label)
-                .font(Wei.Font.control())
+                .font(Wei.Font.control(.medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
-            HStack(spacing: 5) {
-                Text(sessionAgeText(modified: row.modified, now: Date(), calendar: .current))
+            HStack(spacing: Wei.Space.tight) {
+                Text(workspace)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 if row.running {
                     // A turn in flight *in this session*. With more than one conversation able to run at
                     // once this is a per-row fact rather than a statement about the window, which is
@@ -684,11 +737,21 @@ private struct SessionRowView: View {
             }
             .font(Wei.Font.caption())
             .foregroundStyle(Wei.Palette.secondary)
+            Text(sessionAgeText(modified: row.modified, now: Date(), calendar: .current))
+                .font(Wei.Font.caption())
+                .foregroundStyle(Wei.Palette.tertiary)
         }
-        // Taller than one line of text, and the same height whatever the second line holds, so the list
-        // does not step: a row with a status chip is not a taller row than one without.
+        // Taller than the three lines of text, and the same height whatever the middle line holds, so the
+        // list does not step: a row with a status chip is not a taller row than one without.
         .frame(minHeight: Wei.Control.row, alignment: .leading)
-        .padding(.vertical, 2)
+        // Room inside the row, since the platform's list will not take it on the outside: see the note on the
+        // list in `SessionList`. Eight a side is what puts this column's text on the **same left edge as the
+        // transcript's own** — the transcript's content is padded by `Wei.Space.section` (24) from its column,
+        // and a row here is already 16 in (10 of highlight inset, 6 of cell inset), so 8 more makes the two
+        // columns' text line up down the window. The vertical step keeps the highlight from looking like a box
+        // drawn tight around the type.
+        .padding(.horizontal, Wei.Space.cozy)
+        .padding(.vertical, Wei.Space.tiny)
         .help(row.path)
         .contextMenu {
             // Renaming is offered on every row and refused by the shell for a session that is not open:
@@ -740,21 +803,26 @@ private struct ConversationView: View {
     /// margin below the toolbar has to be told about it rather than recomputing it.
     @State private var titleHeight: CGFloat = 0
 
-    /// How far the title and the pencil are lifted, so that they sit on the toolbar's centre line rather
-    /// than on the line below it.
+    /// How far the title block is lifted, so that it is centred on the toolbar's centre line rather than
+    /// sitting on the line below it.
     ///
     /// A safe-area bar is drawn *below* the toolbar, and the platform centres its own items at 26 of the
-    /// toolbar's 52 points (`Wei.Control.toolbar`). The bar's own content starts at 52 + `Wei.Space.tiny`,
-    /// so the lift is `52 + 2 − (26 − lineHeight / 2)` — **measured on a running window** (by reading the
-    /// AX frames of the toolbar's button and of this text, which is how "the same row" was checked), not
-    /// derived from a formula. It is applied as an `offset`, so the bar keeps the height the transcript has
-    /// to clear.
-    private static let titleLift: CGFloat = 41
+    /// toolbar's 52 points (`Wei.Control.toolbar`). So the lift is the centring itself — the block's centre
+    /// moved onto that line, `toolbar / 2 + height / 2` — and it is applied as an `offset`, so the bar keeps
+    /// the height the transcript has to clear.
+    ///
+    /// **It was the constant 41, measured on a running window** (by reading the AX frames of the toolbar's
+    /// button and of this text, which is how "the same row" was checked). This formula gives that same 41
+    /// back for the one-line block it was measured on, and it is the *reason* for 41 rather than a copy of
+    /// it: the copy stayed 41 when the project was added under the name, which left the name on the toolbar's
+    /// line and dropped the project 18 points below it, out over the transcript.
+    private var titleLift: CGFloat { Wei.Control.toolbar / 2 + titleHeight / 2 }
 
-    /// Room at the trailing end for the toolbar's own control — measured, the session button occupies the
-    /// last 49 points of the window, and its row is this row once the bar is lifted. This is also where a
+    /// Room at the trailing end for the toolbar's own controls — measured, one session button occupies 49
+    /// points of the window's trailing edge, and *both* of them are on this row once the bar is lifted (the
+    /// new-session plus and the rename pencil, which together measured 835…917 of 921). This is also where a
     /// long name gets its ellipsis, so the two never touch.
-    private static let titleClearance: CGFloat = 64
+    private static let titleClearance: CGFloat = 104
 
     var body: some View {
         TranscriptView(
@@ -811,27 +879,49 @@ private struct ConversationView: View {
             /// soft behind the name as it scrolls under it.
             .safeAreaBar(edge: .top, alignment: .leading) {
                 if let name = sessionName {
-                    Text(name)
-                        .font(Wei.Font.title())
-                        // One line, and the end of it if it does not fit: a question can be long, and a title
-                        // that wraps to four lines is a title that has become the first paragraph. The tail
-                        // rather than the middle, so what the reader sees is how the question *begins* — which
-                        // is how they would recognize it in the list — and so the ellipsis is where they expect
-                        // one. The width has to be flexible for that: truncation happens when there is a limit
-                        // to truncate against.
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    VStack(alignment: .leading, spacing: Wei.Space.tiny) {
+                        Text(name)
+                            .font(Wei.Font.title())
+                            // One line, and the end of it if it does not fit: a question can be long, and a
+                            // title that wraps to four lines is a title that has become the first paragraph.
+                            // The tail rather than the middle, so what the reader sees is how the question
+                            // *begins* — which is how they would recognize it in the list — and so the
+                            // ellipsis is where they expect one. The width has to be flexible for that:
+                            // truncation happens when there is a limit to truncate against.
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            // The whole question on hover, since the row may be showing a third of it.
+                            .help(name)
+                        // **Which project this conversation is in, in small type under its name.**
+                        //
+                        // The middle column says it too, and the window's title says it for the *list*; the
+                        // reason to say it a third time is the reader this column is for. The middle column is
+                        // a list of what to read next, and it scrolls away — a reader who has been reading one
+                        // answer for minutes has the name of the thing they are reading in front of them and
+                        // nothing else. Same shape as the settings panes: the window's title names the list,
+                        // the second line names the thing.
+                        //
+                        // Empty for a session the store has not listed yet (one created a moment ago), in
+                        // which case the name simply stands alone as it did before.
+                        if let workspace = sessionWorkspace {
+                            Text(workspace)
+                                .font(Wei.Font.caption())
+                                .foregroundStyle(Wei.Palette.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .help(workspacePath)
+                        }
+                    }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        // The whole question on hover, since the row may be showing a third of it.
-                        .help(name)
                         .padding(.leading, Wei.Space.section)
                         // Room at the trailing end for the toolbar's own buttons, which are on this row once the
-                        // bar is lifted: measured, they occupy the last 49 points of the window.
+                        // bar is lifted: measured, one is 49 points of the window's trailing edge and there are
+                        // two of them.
                         .padding(.trailing, Wei.Space.section + Self.titleClearance)
-                            .padding(.vertical, Wei.Space.tiny)
+                        .padding(.vertical, Wei.Space.tiny)
                         // `offset` rather than padding: this moves what is *drawn* without changing the bar's
                         // height, and that height is what the first row of the conversation has to clear.
-                        .offset(y: -Self.titleLift)
+                        .offset(y: -titleLift)
                         .background(
                             GeometryReader { geometry in
                                 Color.clear.preference(
@@ -861,7 +951,11 @@ private struct ConversationView: View {
                 Button {
                     client.newSession()
                 } label: {
-                    Label("New Session", systemImage: "square.and.pencil")
+                    // A plus rather than `square.and.pencil`. The pencil-square is the *document* metaphor
+                    // (Notes' "new note"), and in this window it reads as "write", next to a pencil that
+                    // already means "rename". A plus is the one glyph that says one thing here: this adds a
+                    // session to the list. Renaming keeps the pencil, which is now unambiguous.
+                    Label("New Session", systemImage: "plus")
                 }
                 .help("New session in this project (⌘N)")
             }
@@ -889,6 +983,18 @@ private struct ConversationView: View {
         else { return nil }
         return label
     }
+
+    /// Which project the conversation on screen is in, as the first column names it. `nil` while the store
+    /// has not listed the session, which is why the name can stand alone.
+    private var sessionWorkspace: String? {
+        guard let session = client.currentSession else { return nil }
+        let label = workspaceLabel(of: session, in: client.groups)
+        return label.isEmpty ? nil : label
+    }
+
+    /// The path behind that name, for the tooltip: two projects can share a name and the name is all the row
+    /// has room for — the same reason the first column's rows are helped by their own paths.
+    private var workspacePath: String { client.currentWorkspace }
 }
 
 /// What the window is in the middle of doing.

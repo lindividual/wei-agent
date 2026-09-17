@@ -3,18 +3,25 @@ import SwiftUI
 import WeiKit
 import WeiModel
 
-/// The settings window: a list of sections on the left, one section's detail on the right.
+/// The settings window: **the platform's own preference tabs**, one pane each.
 ///
-/// That arrangement is Notes' — a `NavigationSplitView` inside the settings scene — and it is the
-/// right one for the same reason it is right there: there are now five unrelated kinds of setting,
-/// and a single scrolling form of five kinds is a page a reader has to hunt through. A list that
-/// names them costs one click and makes every section's contents obvious before it is opened.
+/// That is the answer to "is there a standard component": `TabView` inside a `Settings` scene, which macOS
+/// draws as the preference toolbar — one toolbar button per pane, the window titled by the one selected
+/// (verified by reading this process's own accessibility tree: `AXToolbar` with one `AXButton` per tab).
+/// Terminal draws its settings this way, and so does Notes — which is the reference this whole window is
+/// aligned to, so the settings panel should not be the one place that disagrees with it.
+///
+/// It was a `NavigationSplitView`: a list of five panes on the left, one pane's form on the right, 640 × 460.
+/// Nothing was wrong with it — System Settings is a list too — but a list needs a column, and a column for
+/// five rows costs a fifth of the window *and* one click before the pane's own contents are on screen. Five
+/// panes of a few controls each fit across a titlebar; the reader sees what is here at a glance and reaches
+/// any of it in one click.
 ///
 /// The test for what belongs in here is the one the web panel uses: **can a running process honour
 /// it?** A key, a tool mode, a skill switch, the fallback instructions and the turn limits are all
 /// read at the top of a turn, so saving one means the *next* turn uses it. The store, the endpoint
 /// and the model are decided at launch — the model belongs to a session, and is changed from the
-/// composer — so there is no control for them, only a path for a reader who would rather edit the
+/// composer — so there are no controls for them, only a path for a reader who would rather edit the
 /// file by hand.
 ///
 /// Nothing here holds a copy of the settings to apply later. Each control asks the shell for a change
@@ -23,9 +30,7 @@ import WeiModel
 struct SettingsView: View {
     @ObservedObject var client: ShellClient
 
-    /// Which section is showing. A selection rather than a `TabView`, because this is a list of
-    /// places: the sidebar names them and the detail is one of them, which is what the split view is
-    /// for.
+    /// Which pane is showing.
     @State private var pane: Pane? = .key
 
     /// What the five kinds are. Raw values are stable strings so that the selection can live in
@@ -61,24 +66,27 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(Pane.allCases, selection: $pane) { item in
-                Label(item.title, systemImage: item.symbol)
+        VStack(spacing: 0) {
+            TabView(selection: $pane) {
+                // Keyed by the item rather than read back from `pane`: while the tab bar is animating there
+                // is a moment when the selection is neither, and a pane that switched on that value would
+                // draw the wrong form under the right label.
+                ForEach(Pane.allCases) { item in
+                    Form {
+                        if let settings = client.settings {
+                            detail(item, settings)
+                        } else {
+                            waiting
+                        }
+                    }
+                    .formStyle(.grouped)
+                    .tabItem { Label(item.title, systemImage: item.symbol) }
                     .tag(item)
-            }
-            .navigationSplitViewColumnWidth(min: 170, ideal: 180, max: 220)
-        } detail: {
-            Form {
-                if let settings = client.settings {
-                    detail(settings)
-                } else {
-                    waiting
                 }
             }
-            .formStyle(.grouped)
-            .navigationTitle(pane?.title ?? "Settings")
+            settingsFile
         }
-        .frame(width: 640, height: 460)
+        .frame(width: 520, height: 360)
         // Asked for again on appear, even though the shell pushes the settings at startup: the file is
         // hand-editable, and a panel that reported whatever was true when the app launched would be
         // wrong exactly when someone had just been in the file. The push is what keeps the first
@@ -87,8 +95,8 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private func detail(_ settings: ShellSettings) -> some View {
-        switch pane ?? .key {
+    private func detail(_ pane: Pane, _ settings: ShellSettings) -> some View {
+        switch pane {
         case .key: keySection(settings)
         case .tools: toolsSection(settings)
         case .skills: skillsSection(settings)
@@ -129,8 +137,30 @@ struct SettingsView: View {
                     }
                 }
             }
-            fileSection(settings)
         }
+    }
+
+    /// Where the file is, once, for the whole window.
+    ///
+    /// It used to be a section at the bottom of *every* pane — five copies of one path, each taking a group's
+    /// worth of height to say a fact that belongs to the window rather than to the pane. One line at the foot
+    /// of the window says it wherever the reader is, which is also where a reader who has just changed
+    /// something looks to find out what was written.
+    private var settingsFile: some View {
+        HStack(spacing: Wei.Space.cozy) {
+            Text("Settings file")
+                .foregroundStyle(Wei.Palette.tertiary)
+            Text(client.settings?.path ?? "—")
+                .foregroundStyle(Wei.Palette.secondary)
+                .lineLimit(1)
+                .truncationMode(.head)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .font(Wei.Font.code(Wei.Size.micro))
+        .padding(.horizontal, Wei.Space.loose)
+        .padding(.vertical, Wei.Space.cozy)
+        .help("Everything this panel writes, in the same file — hand-editable if you would rather.")
     }
 
     /// A container for a pane's several `Section`s.
@@ -154,24 +184,25 @@ struct SettingsView: View {
     @ViewBuilder
     private func toolsSection(_ settings: ShellSettings) -> some View {
         rebuild {
-            Section("Tools") {
+            // The sentence about the *mode change* is the section's footer rather than a paragraph of its own:
+            // it qualifies the picker above it, and a heading over one sentence is a heading the reader has to
+            // read to learn there is nothing under it. (`formStyle(.grouped)` draws a footer as small secondary
+            // text under its group — the platform's own way of saying this.)
+            Section {
                 Picker("Turn gets", selection: modeBinding(settings)) {
                     Text("Eight tools").tag("tools")
                     Text("Code mode (exec, wait)").tag("code")
                 }
-                // Said rather than implied, because a mode change on a session that has already used
-                // the other mode's tools is exactly the case that surprises people: the model can see
-                // calls to tools this turn does not have.
-                Text("A change applies to the next turn. Resuming a session that used the other mode's tools costs one extra instruction.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+            } footer: {
+                Text("Applies to the next turn. Resuming a session that used the other mode's tools costs one extra instruction.")
             }
+            // Kept, in the pane a reader would look in for it: "where do I change the model" has an answer, and
+            // hunting for a control that is deliberately in another window is the cost of not giving one.
             Section("Not Changeable Here") {
                 Text("The model belongs to a session and is chosen in the composer. The store and the endpoint are decided when the app launches.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            fileSection(settings)
         }
     }
 
@@ -196,7 +227,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Section("Skills") {
+                Section {
                     ForEach(settings.skills) { skill in
                         Toggle(isOn: skillBinding(skill)) {
                             VStack(alignment: .leading, spacing: 1) {
@@ -219,14 +250,10 @@ struct SettingsView: View {
                         }
                         .toggleStyle(.switch)
                     }
-                }
-                Section {
+                } footer: {
                     Text("Switches apply to the next turn. A switched-off skill is not offered to the model and cannot be invoked.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
                 }
             }
-            fileSection(settings)
         }
     }
 
@@ -248,7 +275,7 @@ struct SettingsView: View {
     @ViewBuilder
     private func instructionsSection(_ settings: ShellSettings) -> some View {
         rebuild {
-            Section("Instructions") {
+            Section {
                 Text(sourceSentence(settings))
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -267,12 +294,12 @@ struct SettingsView: View {
                     }
                     .disabled(draftInstructions.isEmpty)
                     Spacer()
-                    Text("Used where there is no AGENTS.md.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
+            } header: {
+                Text("Instructions")
+            } footer: {
+                Text("Used where there is no AGENTS.md.")
             }
-            fileSection(settings)
         }
         // Loaded from the shell once, and then left alone: the field is a draft, and re-syncing it on
         // every settings event would delete what the reader is halfway through typing the moment any
@@ -316,7 +343,7 @@ struct SettingsView: View {
     @ViewBuilder
     private func limitsSection(_ settings: ShellSettings) -> some View {
         rebuild {
-            Section("Turn Limits") {
+            Section {
                 limitRow(
                     "Model calls per turn",
                     help: "0 switches the bound off.",
@@ -354,13 +381,9 @@ struct SettingsView: View {
                     }
                     Spacer()
                 }
-            }
-            Section {
+            } footer: {
                 Text("An empty field means no opinion, and the built-in default comes back. A limit set by a command-line flag is shown but cannot be edited here: the process would ignore the new value, and a field that appears to accept one is worse than no field.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
             }
-            fileSection(settings)
         }
         .onAppear {
             if !limitsLoaded {
@@ -420,37 +443,29 @@ struct SettingsView: View {
 
     // ── shared ────────────────────────────────────────────────────────────
 
-    private func fileSection(_ settings: ShellSettings) -> some View {
-        Section {
-            LabeledContent("Settings file") {
-                Text(settings.path)
-                    .font(.system(size: 11, design: .monospaced))
-                    .textSelection(.enabled)
-                    .lineLimit(1)
-                    .truncationMode(.head)
-            }
-            .help("Everything this panel writes, in the same file — hand-editable if you would rather.")
-        }
-    }
-
     /// What to show when there is nothing to show yet.
     ///
     /// Not an eternal spinner: the shell says what it is doing, and this says the same thing in the
     /// same words, with a way to ask again. A dead end is worse than a delay.
+    ///
+    /// **Its own `Section`, because all five panes are built at once in a `TabView`** — a failed shell would
+    /// otherwise draw those three lines five times down one pane and hide the form's own rows behind them.
     @ViewBuilder
     private var waiting: some View {
-        switch client.state {
-        case .starting:
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("starting the shell…").foregroundStyle(.secondary)
+        Section {
+            switch client.state {
+            case .starting:
+                HStack(spacing: Wei.Space.cozy) {
+                    ProgressView().controlSize(.small)
+                    Text("starting the shell…").foregroundStyle(.secondary)
+                }
+            case let .failed(reason):
+                Text(reason).foregroundStyle(.red)
+                retry
+            default:
+                Text("The shell has not said what is in force.").foregroundStyle(.secondary)
+                retry
             }
-        case let .failed(reason):
-            Text(reason).foregroundStyle(.red)
-            retry
-        default:
-            Text("The shell has not said what is in force.").foregroundStyle(.secondary)
-            retry
         }
     }
 
