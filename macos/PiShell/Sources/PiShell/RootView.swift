@@ -102,6 +102,10 @@ struct RootView: View {
                 browsing: browsed,
                 sections: sections,
                 searching: searching,
+                // Handed down rather than recomputed: the window's title and the one drawn over this column
+                // are the same two strings, and two places computing one fact is how they drift apart.
+                title: sessionListTitle,
+                subtitle: sessionListSubtitle,
                 onBrowse: { browsing = $0 },
                 onRename: { startRenaming($0) }
             )
@@ -128,7 +132,6 @@ struct RootView: View {
             // elects the window's title and the detail column's is ignored. Verified by asking the window what
             // it was called (`NSWindow.title`, read from inside the process — no permission needed).
             .navigationTitle(sessionListTitle)
-            .navigationSubtitle(sessionListSubtitle)
         } detail: {
             ConversationView(
                 client: client,
@@ -478,6 +481,10 @@ private struct SessionList: View {
     /// and the query belongs to the window now (the field is in the workspace column), so this column is
     /// told it rather than deriving it from a binding it no longer holds.
     let searching: Bool
+    /// What this list is and how much of it there is — the window's own title and subtitle, drawn here
+    /// instead (see the `toolbar` below).
+    let title: String
+    let subtitle: String
     /// Called when a search result is clicked, so the first column can follow the reader into the project
     /// they just reached into — otherwise the two columns would disagree about where they are.
     let onBrowse: (String) -> Void
@@ -538,14 +545,52 @@ private struct SessionList: View {
         // stays here and the placement stays `.primaryAction`; what "over the column it acts on" means for
         // this control is the toolbar's trailing edge, where every Mac app puts an add button for the
         // thing the window is showing.
+        // **The platform's title item is removed and the title is drawn here instead.** Not a preference:
+        // there is no font for it. `NSWindow` carries `title`/`subtitle` as strings and nothing else — no
+        // attributed title, no title font anywhere in AppKit — and SwiftUI's `toolbarTitleDisplayMode` is
+        // documented as having no effect on macOS. So the size of the titlebar's own text is the system's,
+        // and the only way to set it is to draw the title yourself. Measured, the system drew it at 13
+        // where this window's scale says 20 (`docs/design-system.md`: `title` = 列表栏标题).
+        //
+        // `navigationTitle` stays: the window still has a name, so the Window menu, the window list and
+        // accessibility read what they always read.
+        //
+        // **One item holding everything this column needs in the bar**: the title, the count, and the
+        // button that adds a row to the list. That is what makes the button sit over *this* column —
+        // `.primaryAction` is the window's trailing edge (measured `x=872…917`, i.e. over the conversation
+        // column), and `.navigation` alone displaced the window's title out of the list column
+        // (`x=230…864` → `x=397…557`). With the platform title removed there is nothing to displace, and
+        // one item means the platform has no second item to re-flow the row around.
+        .toolbar(removing: .title)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    client.newSession()
-                } label: {
-                    Label("New Session", systemImage: "square.and.pencil")
+            ToolbarItem(placement: .navigation) {
+                HStack(spacing: Wei.Space.regular) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(title)
+                            .font(Wei.Font.title())
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text(subtitle)
+                            // A count, so `caption` — the token whose job is "计数、时间、状态行". The design
+                            // system's table lists 窗口副标题 under `title`, which is only true while the
+                            // platform is the one drawing it (at 11, as measured).
+                            .font(Wei.Font.caption())
+                            .foregroundStyle(Wei.Palette.secondary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // The glyph alone, as the toolbar drew it: a `Label` in a view of our own draws its
+                    // words too. The words stay as the accessible name and in the tooltip.
+                    Button {
+                        client.newSession()
+                    } label: {
+                        Image(systemName: "square.and.pencil")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("New session in this project (⌘N)")
+                    .accessibilityLabel("New Session")
                 }
-                .help("New session in this project (⌘N)")
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
