@@ -18,7 +18,7 @@ pub(all) struct ModelRef {
 /// Wider than `Message` because compaction and branching contribute entries that
 /// the model must see as turns, even though they are not user or assistant
 /// output. Keeping them distinct rather than flattening them into user text is
-/// what lets a session read back byte-identically to pi's.
+/// what lets a session read back byte-identically to upstream's.
 pub(all) enum ContextMessage {
   User(UserMessage)
   Assistant(AssistantMessage)
@@ -60,7 +60,7 @@ pub(all) struct SessionContext {
 /// A loaded session: the header, every entry, and where the leaf currently is.
 ///
 /// `index` is a derived lookup kept alongside the entries rather than rebuilt on
-/// each traversal — pi rebuilds it per call, which is fine for short sessions and
+/// each traversal — upstream rebuilds it per call, which is fine for short sessions and
 /// wasteful for long ones.
 pub(all) struct Session {
   header : SessionHeader
@@ -305,12 +305,12 @@ pub fn Session::messages_before(
 // ── What the model actually receives ──────────────────────────────────────
 
 ///|
-/// The framing pi puts around a summary when replaying it to the model.
+/// The framing puts around a summary when replaying it to the model.
 ///
 /// Copied verbatim rather than paraphrased. These strings are part of the wire
-/// format the model has seen, and `harness/gen-deepseek-requests.mjs` captures
-/// them from pi-ai, so the pair is checked against the oracle instead of trusted
-/// to memory.
+/// format the model has seen, and the request-body fixtures record what the
+/// provider actually received, so the pair is checked against the record instead
+/// of trusted to memory.
 pub fn compaction_summary_prefix() -> String {
   "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
 }
@@ -344,7 +344,7 @@ pub fn framed_summary(summary : String, branch~ : Bool) -> String {
 /// One context message as the model sees it.
 ///
 /// summaries and custom messages are not user or assistant output, but the model
-/// has to see them as turns. pi's mapping is the reference here: a summary
+/// has to see them as turns. upstream's mapping is the reference here: a summary
 /// arrives as a user turn wrapped in `<summary>` framing, and a custom message as
 /// a user turn carrying its own content.
 pub fn ContextMessage::to_message(self : ContextMessage) -> Message {
@@ -370,7 +370,7 @@ pub fn ContextMessage::to_message(self : ContextMessage) -> Message {
 ///|
 /// The blocks of an extension-injected message.
 ///
-/// pi passes a string through as one text part and an array through unchanged.
+/// upstream passes a string through as one text part and an array through unchanged.
 /// Anything else has no part shape to preserve, so the JSON is shown as text
 /// rather than dropped: a message the model cannot read is worse than one it
 /// reads awkwardly.
@@ -460,7 +460,7 @@ pub fn ContextMessage::to_json(self : ContextMessage) -> Json {
 /// The name the reader gave this session, if they gave one.
 ///
 /// The name is an entry in the log rather than a field somewhere else, which is what makes it
-/// survive a restart and stay visible to pi: it writes `/name` the same way. The newest entry
+/// survive a restart and stay visible to upstream: it writes `/name` the same way. The newest entry
 /// wins, so renaming twice keeps one name rather than a history of them.
 pub fn Session::name(self : Session) -> String? {
   let mut name : String? = None

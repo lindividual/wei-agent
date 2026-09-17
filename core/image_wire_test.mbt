@@ -89,7 +89,7 @@ test "an image in a tool result reaches a model that can see it" {
 }
 
 ///|
-/// With no image, a tool result stays a plain string — what pi sends, and what the recorded request
+/// With no image, a tool result stays a plain string — what upstream sends, and what the recorded request
 /// fixtures pin. The array form is for pictures, not for every tool call.
 test "a tool result with no image is still a plain string" {
   let result : ToolResultMessage = {
@@ -119,7 +119,7 @@ test "a tool result with no image is still a plain string" {
 ///|
 /// A model that cannot see gets a placeholder that says so, and the turn still runs.
 ///
-/// This is the behaviour the README calls out as matching pi, and it is what keeps a pasted
+/// This is the behaviour the README calls out as matching upstream, and it is what keeps a pasted
 /// screenshot from ending the turn on a text-only model. It must not regress as the vision path is
 /// wired up — the two are different models, not an old and a new implementation.
 test "an image is degraded to a placeholder on a model that cannot see" {

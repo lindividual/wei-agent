@@ -2,7 +2,7 @@
 /// Naming a skill explicitly.
 ///
 /// The command parser is the safety-relevant half — it decides what stops being prose — and the
-/// expansion is the fidelity half, because pi's output is what a habit formed there expects.
+/// expansion is the fidelity half, because upstream's output is what a habit formed there expects.
 /// `strip_skill_frontmatter` is checked against the cases a real file presents: CRLF from Windows,
 /// a BOM from an editor, a closing fence that is not the first `---` in the file.
 
@@ -11,7 +11,7 @@ fn a_skill() -> Skill {
   {
     name: "pdf-report",
     description: "Turn data into a PDF.",
-    path: "/home/u/.pi/agent/skills/pdf-report/SKILL.md",
+    path: "/home/u/.wei/skills/pdf-report/SKILL.md",
   }
 }
 
@@ -106,13 +106,13 @@ test "an empty body is empty rather than a fragment" {
 }
 
 ///|
-test "the expansion frames the body the way pi does, and appends the request" {
+test "the expansion frames the body, and appends the request" {
   let skill = a_skill()
   let plain = skill_expansion(skill, "Do the thing.", "")
   assert_eq(
     plain,
-    "<skill name=\"pdf-report\" location=\"/home/u/.pi/agent/skills/pdf-report/SKILL.md\">\n" +
-    "References are relative to /home/u/.pi/agent/skills/pdf-report.\n\n" +
+    "<skill name=\"pdf-report\" location=\"/home/u/.wei/skills/pdf-report/SKILL.md\">\n" +
+    "References are relative to /home/u/.wei/skills/pdf-report.\n\n" +
     "Do the thing.\n" +
     "</skill>",
   )
@@ -133,7 +133,7 @@ test "the expansion frames the body the way pi does, and appends the request" {
 
 ///|
 /// A name or a path containing a quote would otherwise end the attribute early and turn the rest
-/// of it into markup the model reads as structure. pi does not escape these; escaping is a strict
+/// of it into markup the model reads as structure. upstream does not escape these; escaping is a strict
 /// improvement and byte-identical for an ordinary name.
 test "a quote in a name cannot break out of the attribute" {
   let hostile : Skill = {

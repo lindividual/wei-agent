@@ -23,7 +23,6 @@ fn key_source_name(choice : @core.KeyChoice?) -> String {
       match chosen.source {
         @core.Environment => "environment"
         @core.Saved => "saved"
-        @core.Pi => "pi"
       }
     None => "none"
   }

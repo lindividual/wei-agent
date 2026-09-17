@@ -1,5 +1,5 @@
 import {
-  "lindividual/pi-web-shell/core",
+  "lindividual/wei/core",
   "moonbitlang/async",
   "moonbitlang/async/fs",
   "moonbitlang/core/env",

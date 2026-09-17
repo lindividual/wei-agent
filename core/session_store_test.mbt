@@ -3,8 +3,8 @@
 
 ///|
 /// The encoding is lossy, so the fixtures are the ground truth: these pairs are
-/// what pi actually wrote next to what actually produced them.
-test "session directory names match pi" {
+/// what upstream actually wrote next to what actually produced them.
+test "session directory names match the recorded pairs" {
   for pair in session_dir_fixtures {
     let (cwd, expected) = pair
     assert_eq(session_dir_name(cwd), expected, msg="for \{cwd}")
@@ -32,7 +32,7 @@ test "a complete session file parses" {
 
 ///|
 /// Writing what was read must produce the same records: this is what makes a
-/// session written by this implementation readable by pi and vice versa.
+/// session written by this implementation readable by upstream and vice versa.
 test "entries survive a file round trip" {
   let session = parse_session_file(small_session_file)
   let rewritten = session.header.to_line()
@@ -78,7 +78,7 @@ test "blank lines are skipped" {
 }
 
 ///|
-test "entry ids look like pi's" {
+test "entry ids look like the recorded ones" {
   for _ in 0..<20 {
     let id = new_entry_id()
     assert_eq(id.length(), 8)

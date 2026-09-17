@@ -3,8 +3,8 @@
 ///
 /// The decisions — what a header means, which of two same-named skills wins — are in
 /// `core/skill.mbt`; this file only knows where to look and how to read a file. The roots are
-/// pi's, in pi's order, so a skill installed for pi is found here without being copied: global
-/// before project, so a project skill can shadow a global one of the same name.
+/// this project's own, global before project, so a project skill can shadow a global one of the
+/// same name.
 ///
 /// Discovery is bounded twice, because a scanned root is user-controlled: at most
 /// `skill_scan_limit()` instruction files are read, and each read takes only a prefix. A
@@ -37,16 +37,13 @@ fn skill_header_bytes() -> Int {
 /// that should apply, which is the opposite of how a path lookup usually reads but is what
 /// makes a project able to override a global skill.
 pub fn skill_roots(cwd : String, home : String) -> Array[String] {
-  let roots : Array[String] = [
-    "\{home}/.pi/agent/skills",
-    "\{home}/.agents/skills",
-  ]
+  let roots : Array[String] = ["\{home}/.wei/skills", "\{home}/.agents/skills"]
   if cwd != "" {
     let mut dir = cwd
     // Every ancestor, not just the workspace root: a skill committed at the repository root
     // applies in every subdirectory of that repository.
     while dir != "" && dir != "/" {
-      roots.push("\{dir}/.pi/skills")
+      roots.push("\{dir}/.wei/skills")
       roots.push("\{dir}/.agents/skills")
       let parent = @core.parent_of(dir)
       if parent == dir {

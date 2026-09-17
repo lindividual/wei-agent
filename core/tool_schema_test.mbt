@@ -131,7 +131,7 @@ test "array items are validated" {
 
 ///|
 /// `additionalProperties: false` is honoured when present, but absent means
-/// permissive — which is how pi's own tool schemas are written.
+/// permissive — which is how upstream's own tool schemas are written.
 test "additional properties are only rejected when the schema says so" {
   let strict = schema_of(
     "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false}",

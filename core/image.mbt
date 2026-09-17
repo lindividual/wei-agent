@@ -7,7 +7,7 @@
 /// to the text reader, which then reports "not UTF-8 text" about a file the model could have been
 /// shown.
 ///
-/// The signatures are the same four pi accepts, so an image that works there works here. Nothing
+/// The signatures are the same four upstream accepts, so an image that works there works here. Nothing
 /// here decodes the image: what the model needs is the bytes, and the provider is what turns them
 /// into something the model can look at.
 

@@ -40,13 +40,8 @@ async fn main {
     None => ()
   }
   let env_key = environment_key()
-  let pi_key = pi_api_key(home)
-  let choice = @core.choose_api_key(env_key, settings.saved_api_key, pi_key)
-  let root = if args.store == "" {
-    "\{home}/.pi-mb/sessions"
-  } else {
-    args.store
-  }
+  let choice = @core.choose_api_key(env_key, settings.saved_api_key)
+  let root = if args.store == "" { "\{home}/.wei/sessions" } else { args.store }
   let cwd = @platform.current_dir()
   // Header-only sessions accumulate from every start that never got used. Ten minutes is long
   // enough that a session another instance is writing right now is safe.
@@ -74,7 +69,6 @@ async fn main {
     key_source: "none",
     key_hint: "",
     env_key,
-    pi_key,
     env_key_set: env_key != "",
     settings,
     settings_lock: @async.Mutex(),
@@ -116,7 +110,7 @@ async fn main {
       )
     None => log("key     none: save one in the settings panel")
   }
-  log("pi-mb   http://127.0.0.1:\{args.port}")
+  log("wei     http://127.0.0.1:\{args.port}")
   log("model   \{args.model}")
   // Which tools a turn gets, and where the answer came from. A reader who ran `--mode code` and is
   // wondering why the model is behaving differently should be able to see it without opening the

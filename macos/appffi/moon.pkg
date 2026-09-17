@@ -1,8 +1,8 @@
 import {
-  "lindividual/pi-web-shell/agent",
-  "lindividual/pi-web-shell/core",
-  "lindividual/pi-web-shell/md",
-  "lindividual/pi-web-shell/platform",
+  "lindividual/wei/agent",
+  "lindividual/wei/core",
+  "lindividual/wei/md",
+  "lindividual/wei/platform",
   "moonbitlang/async",
   "moonbitlang/core/encoding/utf8",
   "moonbitlang/core/env",

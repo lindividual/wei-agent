@@ -67,7 +67,7 @@ edit_text(text, old, new)           // -> String          old 必须恰好出现
 
 | 项 | 做法 |
 |---|---|
-| staging | 会话级的临时目录 `<home>/.pi-mb/scratch/<session-id>/`，**在工作区之外**（实测 `/tmp` 也能跑，依赖从全局 cache 解析） |
+| staging | 会话级的临时目录 `<home>/.wei/scratch/<session-id>/`，**在工作区之外**（实测 `/tmp` 也能跑，依赖从全局 cache 解析） |
 | 编译产物 | `--target-dir` 指向同一个目录，所以工作区的 `_build` 不受影响 |
 | 热编译 | **复用同一个目录就是缓存**（实测冷 0.27–0.35s、热 0.03s）。不需要 openseek 的 157 行 build cache |
 | cwd | 工作区根目录，相对路径才能落到项目上 |

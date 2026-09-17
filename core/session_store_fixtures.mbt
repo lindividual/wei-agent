@@ -2,9 +2,10 @@
 /// Real session-store facts: directory names paired with the working
 /// directory that produced them, and one small complete session file.
 ///
-/// Generated from `~/.pi/agent/sessions/`. The pairs matter because the
-/// encoding is lossy (`/` and `:` both become `-`), so a round trip cannot be
-/// inferred — it has to be checked against what pi actually wrote.
+/// Captured from a session store written before this project had a name of its
+/// own. The pairs matter because the encoding is lossy (`/` and `:` both become
+/// `-`), so a round trip cannot be inferred — it has to be checked against what
+/// actually got written.
 pub let session_dir_fixtures : Array[(String, String)] = [
   ("/Users/lucas", "--Users-lucas--"),
   ("/Users/lucas/Documents", "--Users-lucas-Documents--"),

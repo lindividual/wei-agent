@@ -152,7 +152,7 @@ test "assemble appends the appendix to the summary" {
 /// A note is stored as a `custom` entry, so it survives in the session without
 /// being replayed to the model as a turn.
 test "notes are stored as custom entries" {
-  let entry = agent_note_entry("the config lives in ~/.pi/agent", None, 0L)
+  let entry = agent_note_entry("the config lives in ~/.wei", None, 0L)
   assert_true(entry.kind is Custom(custom_type="agent-note", ..))
   // And they survive a file round trip like anything else.
   assert_eq(Entry::from_json(entry.to_json()), entry)

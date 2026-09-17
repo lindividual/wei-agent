@@ -1,7 +1,7 @@
 ///|
 /// Session entries: the append-only records that make up a session file.
 ///
-/// The shape matches pi's JSONL format exactly, including its tree structure:
+/// The shape matches upstream's JSONL format exactly, including its tree structure:
 /// every entry names its parent, so a session is a path through a tree rather
 /// than a flat list. That is what makes branching possible without rewriting
 /// history.
@@ -9,7 +9,7 @@
 ///|
 /// Every entry carries these, regardless of kind.
 pub(all) struct Entry {
-  /// Eight hex characters in pi's own files. Only needs to be unique per session.
+  /// Eight hex characters in upstream's own files. Only needs to be unique per session.
   id : String
   /// `None` for the first entry; otherwise the entry this one follows from.
   parent_id : String?
@@ -23,7 +23,7 @@ pub(all) struct Entry {
 ///
 /// Optional fields stay optional so a round trip does not invent values that the
 /// source omitted — `fromHook` in particular is written as `true` or not at all,
-/// and `false` and absent mean the same thing to pi.
+/// and `false` and absent mean the same thing to upstream.
 pub(all) enum EntryKind {
   Message(message~ : Message)
   ModelChange(provider~ : String, model_id~ : String)
@@ -55,7 +55,7 @@ pub(all) enum EntryKind {
   Label(target_id~ : String, label~ : String?)
   SessionInfo(name~ : String?)
   /// A kind this build does not know. The original object is kept verbatim so a
-  /// session written by a newer pi still round trips without losing data.
+  /// session written by a newer upstream still round trips without losing data.
   Unknown(type_name~ : String, raw~ : Json)
 } derive(Eq, Debug)
 

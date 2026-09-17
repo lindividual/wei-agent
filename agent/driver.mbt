@@ -614,7 +614,7 @@ async fn request_model(
         should_stop=stopping,
       )
       // A stream the caller stopped reading is recorded as aborted rather than as a
-      // truncated response, which is what pi writes for the same event.
+      // truncated response, which is what upstream writes for the same event.
       Ok(parser.finish(aborted=stopping()))
     } catch {
       @platform.Transient(message) => Err(message)
@@ -1231,7 +1231,7 @@ pub async fn run_turn(
     None => fn(_handle) { () }
   }
   let level = thinking_level
-  // Record the model and thinking level before anything else. pi derives these
+  // Record the model and thinking level before anything else. upstream derives these
   // from the log rather than from configuration, so a session that does not
   // record them reads back as `off` on whatever model the reader defaults to —
   // the settings would be silently lost on resume.

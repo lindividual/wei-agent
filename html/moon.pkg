@@ -1,5 +1,5 @@
 import {
-  "lindividual/pi-web-shell/core",
+  "lindividual/wei/core",
   "moonbit-community/cmark/cmark_html",
   "moonbitlang/core/env",
   "moonbitlang/core/json",

@@ -16,7 +16,7 @@ spike-native/
 mdspike/
 
 # SwiftPM 的构建产物，以及 `macos/build-moonbit.sh` 生成的 MoonBit 归档
-macos/PiShell/.build/
+macos/WeiShell/.build/
 macos/vendor/
 
 # `macos/make-app.sh` 打出来的 .app。可再生产，而且是一个二进制：要发布就发到 Release，

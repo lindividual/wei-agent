@@ -1,5 +1,5 @@
 ///|
-/// Round trip every entry in the local pi session store and report what survives.
+/// Round trip every entry in the local session store and report what survives.
 ///
 /// Unit tests pin the shapes worth protecting; this walks all of them. Real
 /// sessions contain combinations the samples miss — unusual tool arguments,
@@ -74,7 +74,7 @@ async fn main {
     Some(h) if h != "" => h
     _ => abort("HOME is not set")
   }
-  let root = "\{home}/.pi/agent/sessions"
+  let root = "\{home}/.wei/sessions"
   if !@fs.exists(root) {
     abort("no session store at \{root}")
   }

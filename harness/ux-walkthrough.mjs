@@ -134,20 +134,18 @@ async function observe(cdp, name, note) {
 
 function scratchHome() {
   const home = mkdtempSync(join(tmpdir(), "ux-home-"));
-  const auth = join(homedir(), ".pi/agent/auth.json");
-  if (existsSync(auth)) {
-    mkdirSync(join(home, ".pi/agent"), { recursive: true });
-    copyFileSync(auth, join(home, ".pi/agent/auth.json"));
+  if (process.env.DEEPSEEK_API_KEY) {
+    mkdirSync(join(home, ".wei"), { recursive: true });
+    writeFileSync(
+      join(home, ".wei/settings.json"),
+      JSON.stringify({ saved_api_key: process.env.DEEPSEEK_API_KEY }),
+    );
   }
-  const skill = join(home, ".pi/agent/skills/report-writer");
+  const skill = join(home, ".wei/skills/report-writer");
   mkdirSync(skill, { recursive: true });
   writeFileSync(
     join(skill, "SKILL.md"),
     "---\nname: report-writer\ndescription: Writes a status report from a git log.\n---\n\n# report-writer\n\nBody.\n",
-  );
-  writeFileSync(
-    join(home, ".pi-mb-settings-placeholder"),
-    "",
   );
   return home;
 }

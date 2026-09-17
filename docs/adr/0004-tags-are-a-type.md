@@ -64,7 +64,7 @@ error: Type Mismatch
 它和被替换掉的字符串一样短，拼错就编译不过，而且映射收敛到一处：
 
 ```
-error: The type @lindividual/pi-web-shell/html.Tag does not have the constructor Dvi.
+error: The type @lindividual/wei/html.Tag does not have the constructor Dvi.
 ```
 
 顺带修掉一个不诚实的地方：原来的 `is_void_element` 列了 14 个 void 标签，而实际只会产出 3 个

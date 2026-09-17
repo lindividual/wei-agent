@@ -18,14 +18,14 @@
 /// semantics, and a format that recorded every edit would only give a reader something to
 /// disagree with.
 ///
-/// Everything in this file is pure: the path, the environment and pi's credential store are the
-/// platform's business, and keeping them out makes the decisions — which key wins, whether a
-/// skill is on, which limit is in force — testable without a filesystem.
+/// Everything in this file is pure: the path and the environment are the platform's business, and
+/// keeping them out makes the decisions — which key wins, whether a skill is on, which limit is in
+/// force — testable without a filesystem.
 
 ///|
 /// A saved configuration.
 pub(all) struct AppSettings {
-  /// A key saved from the panel, or empty when the environment or pi provides one.
+  /// A key saved from the panel, or empty when the environment provides one.
   saved_api_key : String
   /// Skill names switched off. Names rather than paths, so a setting survives a skill being
   /// reinstalled elsewhere, and so a name that no longer exists is harmless rather than broken.
@@ -279,15 +279,13 @@ pub fn skill_entries(
 }
 
 ///|
-/// Where the key the process is using came from. Shown in the panel, because "which of the three
+/// Where the key the process is using came from. Shown in the panel, because "which of the two
 /// keys on this machine is actually in use" is the question a key panel exists to answer.
 pub(all) enum KeySource {
   /// `DEEPSEEK_API_KEY`.
   Environment
-  /// `~/.pi-mb/settings.json`, written by this panel.
+  /// `~/.wei/settings.json`, written by this panel.
   Saved
-  /// pi's own credential store.
-  Pi
 } derive(Eq, Debug)
 
 ///|
@@ -300,27 +298,23 @@ pub(all) struct KeyChoice {
 ///|
 /// Pick the key to use.
 ///
-/// The order is the order the process has always used, with the saved key inserted where it
-/// changes nothing for anyone who has not opened the panel: the environment still wins, and
-/// pi's store is still the last resort. Putting the saved key first would have been the obvious
-/// reading of "the UI's key", and it would have silently overridden `DEEPSEEK_API_KEY` — a
-/// variable someone set on purpose, in a shell they are looking at, in favor of a value they
-/// saved once in a browser.
-pub fn choose_api_key(
-  env_key : String,
-  saved_key : String,
-  pi_key : String?,
-) -> KeyChoice? {
+/// Two sources, and the order between them is deliberate: the environment wins. Putting the saved
+/// key first would have been the obvious reading of "the UI's key", and it would have silently
+/// overridden `DEEPSEEK_API_KEY` — a variable someone set on purpose, in a shell they are looking
+/// at, in favor of a value they saved once in the panel.
+///
+/// There used to be a third source: the credential store of the agent this project was forked
+/// from. It is gone deliberately. The app owns the key it sends, so that the panel can always say
+/// where the key in use came from — a key it can read but not explain is a key it has no business
+/// sending.
+pub fn choose_api_key(env_key : String, saved_key : String) -> KeyChoice? {
   if env_key != "" {
     return Some({ key: env_key, source: Environment, })
   }
   if saved_key != "" {
     return Some({ key: saved_key, source: Saved, })
   }
-  match pi_key {
-    Some(key) if key != "" => Some({ key, source: Pi, })
-    _ => None
-  }
+  None
 }
 
 // ── limits ─────────────────────────────────────────────────────────────────
@@ -360,7 +354,7 @@ pub fn default_max_seconds() -> Int {
 pub(all) enum LimitSource {
   /// A command-line flag for this run.
   Flag
-  /// `~/.pi-mb/settings.json`, written by the panel.
+  /// `~/.wei/settings.json`, written by the panel.
   Saved
   /// The built-in default.
   Default
@@ -387,7 +381,7 @@ pub(all) struct Limits {
 pub(all) enum InstructionSource {
   /// The `AGENTS.md` in the session's own working directory.
   File
-  /// `~/.pi-mb/settings.json`, for a workspace that has no file of its own.
+  /// `~/.wei/settings.json`, for a workspace that has no file of its own.
   Saved
   /// Neither: the prompt is the tool list and the catalog, as it was before this existed.
   ///

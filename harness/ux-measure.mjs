@@ -125,10 +125,12 @@ function sessionFile(cwd, label, turns = 1) {
 async function main() {
   const store = mkdtempSync(join(tmpdir(), "uxm-store-"));
   const home = mkdtempSync(join(tmpdir(), "uxm-home-"));
-  const auth = join(homedir(), ".pi/agent/auth.json");
-  if (existsSync(auth)) {
-    mkdirSync(join(home, ".pi/agent"), { recursive: true });
-    copyFileSync(auth, join(home, ".pi/agent/auth.json"));
+  if (process.env.DEEPSEEK_API_KEY) {
+    mkdirSync(join(home, ".wei"), { recursive: true });
+    writeFileSync(
+      join(home, ".wei/settings.json"),
+      JSON.stringify({ saved_api_key: process.env.DEEPSEEK_API_KEY }),
+    );
   }
   const profile = mkdtempSync(join(tmpdir(), "uxm-chrome-"));
   mkdirSync(join(profile, "Default"), { recursive: true });

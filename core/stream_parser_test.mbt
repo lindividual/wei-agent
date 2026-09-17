@@ -2,9 +2,9 @@
 /// Incremental parsing.
 ///
 /// The value of this test is what it inherits: `parse_deepseek_stream` is checked
-/// against pi-ai on every fixture, so if the streaming parser produces the same
-/// message from the same bytes, it inherits that verification rather than needing
-/// its own set of expectations.
+/// against the recorded parse on every fixture, so if the streaming parser
+/// produces the same message from the same bytes, it inherits that verification
+/// rather than needing its own set of expectations.
 ///
 /// The chunk sizes matter as much as the content. A network delivers whatever it
 /// feels like, so the parser has to be correct when a frame is split mid-JSON,

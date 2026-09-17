@@ -1,61 +1,84 @@
-# Ordered substitutions, applied one file at a time by rename-to-wei.sh.
+#!/usr/bin/perl
+# Rewrite the names this project invented for itself: `pi*` -> `wei*`.
 #
-# Order matters twice over:
+# Usage:  git ls-files -z | xargs -0 perl subst.pl
+#
+# Ordered substitutions, applied one file at a time. Order matters twice over:
 #   - longer/more specific tokens before the prefixes that contain them
-#     (`PiShellApp` before `PiShell`, `PI_SHELL_C_H` before `PI_SHELL_`);
-#   - the module path before the bare repo name, so `lindividual/pi-web-shell`
-#     becomes `lindividual/wei` and the leftover `pi-web-shell` (the README title,
-#     mockups) becomes plain `wei`.
+#     (`WeiApp` before `WeiShell`, `WEI_SHELL_C_H` before `WEI_`);
+#   - the module path before the bare repository name, so
+#     `lindividual/wei` becomes `lindividual/wei` and the leftover
+#     `wei` (the README title, the mockups) becomes plain `wei`.
+#
+# NOT here, because they point at the upstream project rather than at us:
+#   ~/.pi/agent/...        pi's credential store, skills and model catalogue
+#   @earendil-works/pi-*   the oracle the fixture generators import
+#   "pi's rule", "from pi" comments recording where a number was copied from
+use strict;
+use warnings;
 
 my @subs = (
   # the MoonBit module path
-  [ 'lindividual/pi-web-shell', 'lindividual/wei' ],
+  [ 'lindividual/wei', 'lindividual/wei' ],
 
   # environment variables
-  [ 'PI_SHELL_C_H',             'WEI_SHELL_C_H' ],
-  [ 'PI_SHELL_',                'WEI_' ],
+  [ 'WEI_SHELL_C_H',             'WEI_SHELL_C_H' ],
+  [ 'WEI_',                'WEI_' ],
 
   # C symbols on the host boundary (MoonBit `extern`, the C, the Swift bindings)
-  [ 'pi_shell_',                'wei_' ],
-  [ 'pi_run',                   'wei_run' ],
+  [ 'wei_',                'wei_' ],
+  [ 'wei_run',                   'wei_run' ],
 
   # the static archive, and the linker settings that name it
-  [ 'libpiweb',                 'libwei' ],
-  [ 'linkPiWeb',                'linkWei' ],
+  [ 'libwei',                 'libwei' ],
+  [ 'linkWei',                'linkWei' ],
 
   # Swift package, targets and types
-  [ 'pi-shell-cli',             'wei-cli' ],
-  [ 'PiShellApp',               'WeiApp' ],
-  [ 'PiShell',                  'WeiShell' ],
-  [ 'PiModel',                  'WeiModel' ],
-  [ 'PiKit',                    'WeiKit' ],
-  [ 'PiClient',                 'ShellClient' ],
-  [ 'PiEvent',                  'ShellEvent' ],
+  [ 'wei-cli',             'wei-cli' ],
+  [ 'WeiApp',               'WeiApp' ],
+  [ 'WeiShell',                  'WeiShell' ],
+  [ 'WeiModel',                  'WeiModel' ],
+  [ 'WeiKit',                    'WeiKit' ],
+  [ 'ShellClient',                 'ShellClient' ],
+  [ 'ShellEvent',                  'ShellEvent' ],
 
   # the repository's own name, in prose and mockups
-  [ 'pi-web-shell',             'wei' ],
+  [ 'wei',             'wei' ],
 
   # the state directory
-  [ '.pi-mb',                   '.wei' ],
+  [ '.wei',                   '.wei' ],
 
   # run-time strings
-  [ 'pi-agent',                 'wei-agent' ],
-  [ 'pi-pasted',                'wei-pasted' ],
-  [ 'pi-wire.log',              'wei-wire.log' ],
-  [ 'pi-ws',                    'wei-ws' ],
+  [ 'wei-agent',                 'wei-agent' ],
+  [ 'wei-pasted',                'wei-pasted' ],
+  [ 'wei-wire.log',              'wei-wire.log' ],
+  [ 'wei-ws',                    'wei-ws' ],
 
-  # identifiers that were named after what they read, not what they are
-  [ 'pi_tool_fixtures',         'upstream_tool_fixtures' ],
-  [ 'pi_api_key',               'upstream_api_key' ],
-  [ 'pi_name',                  'upstream_name' ],
-  [ 'pi_key',                   'upstream_key' ],
-  [ 'PI_AI',                    'UPSTREAM_AI' ],
+  # identifiers named after what they read rather than what they are
+  [ 'upstream_tool_fixtures',         'upstream_tool_fixtures' ],
+  [ 'upstream_api_key',               'upstream_api_key' ],
+  [ 'upstream_name',                  'upstream_name' ],
+  [ 'upstream_key',                   'upstream_key' ],
+  [ 'UPSTREAM_AI',                    'UPSTREAM_AI' ],
 );
 
-while (<>) {
+my $changed = 0;
+for my $f (@ARGV) {
+  next if -l $f;        # never write through a symlink: README.md is one
+  next unless -T $f;    # text only, so the logo survives
+  open my $in, '<', $f or die "$f: $!\n";
+  local $/;
+  my $text = <$in>;
+  close $in;
+  my $before = $text;
   for my $s (@subs) {
     my ($pat, $rep) = @$s;
-    s/\Q$pat\E/$rep/g;
+    $text =~ s/\Q$pat\E/$rep/g;
   }
-  print;
+  next if $text eq $before;
+  open my $out, '>', $f or die "$f: $!\n";
+  print $out $text;
+  close $out;
+  $changed++;
 }
+warn "rewrote $changed files\n";

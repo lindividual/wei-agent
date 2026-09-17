@@ -387,9 +387,9 @@ async test "a message behind a running turn says so, and stays scoped to its ses
 /// and one that does not resolve is passed through as typed.
 async test "a skill command is expanded on the way to the turn" {
   let home = "_build/requests_test/\{@core.new_entry_id()}"
-  @platform.make_dirs("\{home}/.pi/agent/skills/demo")
+  @platform.make_dirs("\{home}/.wei/skills/demo")
   @platform.write_text(
-    "\{home}/.pi/agent/skills/demo/SKILL.md",
+    "\{home}/.wei/skills/demo/SKILL.md",
     "---\nname: demo\ndescription: A skill for tests.\n---\n\nBody text here.\n",
   )
   let h = harness_in(home)

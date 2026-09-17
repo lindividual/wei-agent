@@ -1,7 +1,10 @@
-# pi-web-shell
+# wei
 
-[pi](https://github.com/earendil-works/pi-mono) 的独立复刻：一个 MoonBit 实现的
-agent 内核，加一个服务器渲染的 Web UI，交付形态是单个 native 二进制。
+一个 agent 内核，加一个服务器渲染的 Web UI，交付形态是单个 native 二进制。
+
+它起先是 [pi](https://github.com/earendil-works/pi-mono) 的独立复刻 —— 消息格式、会话格式和
+工具定义都照那份实现写，好两边对拍。现在它读自己的凭据、认自己的 skills 目录、生成自己的
+fixture，那份依赖已经断干净了；留下的是几个格式，和注释里写明的出处。
 
 ```
 core/      纯逻辑：消息模型、DeepSeek 编解码、agent 状态机、会话树、工具、压缩
@@ -11,10 +14,10 @@ md/        markdown → 块/span 树（cmark），两个前端共用
 html/      HTML DSL、转义、渲染、Patch
 server/    HTTP 路由 + SSE 广播
 ui/        可执行：agent + server + Web UI 合一（交付形态）
-pi/ cli/   可执行：命令行跑一次完整 turn / 打一次真实 API
+wei/ cli/   可执行：命令行跑一次完整 turn / 打一次真实 API
 verify/    可执行：拿真实会话全量跑往返验证
 scriptcheck/ 可执行：编译并运行内置的 script 程序
-harness/   Node 脚本：用 pi 当 oracle 生成 fixture、真实浏览器验收
+harness/   Node 脚本：真实浏览器验收与布局测量（fixture 生成器已删，格式留了下来）
 macos/     原生 macOS 壳：MoonBit 事件出口 + SwiftUI 宿主（**主线前端**，见 macos/README.md）
 docs/adr/  架构决策记录：被否决过的方案与理由是承重的，不该被重新讨论
 ```
@@ -29,11 +32,11 @@ docs/adr/  架构决策记录：被否决过的方案与理由是承重的，不
 moon run ui                          # → http://127.0.0.1:8790
 moon run ui -- --continue            # 继续本目录最近写入的会话
 moon run ui -- --resume <id|path>    # 打开指定会话
-moon run ui -- --port 9000 --store ~/.pi-mb/sessions
+moon run ui -- --port 9000 --store ~/.wei/sessions
 moon run ui -- --no-picker           # 侧边栏不放「Add workspace」，只留路径输入
 moon run ui -- --max-cost 0.10 --max-rounds 30 --max-seconds 1800
 moon run ui -- --mode code           # code mode：只有 exec 和 wait 两个工具
-moon run pi -- "prompt"              # 命令行跑一次完整 turn
+moon run wei -- "prompt"            # 命令行跑一次完整 turn
 moon run verify                      # 全量会话往返验证
 moon run scriptcheck                 # 编译并运行内置 script
 
@@ -41,8 +44,8 @@ macos/make-app.sh && open "macos/dist/wei Agent.app"   # 原生 macOS 壳：打�
 # 开发循环（不打包）和终端形态见 macos/README.md
 ```
 
-API key 的取法有优先级：`DEEPSEEK_API_KEY` > 设置面板存的 key > pi 的凭据库
-（`~/.pi/agent/auth.json`）。都没有也能启动 —— 页面照常起来，左下角的设置面板让人现场填。
+API key 只有两个来源：`DEEPSEEK_API_KEY` > 设置面板存的 key。都没有也能启动 —— 页面照常起来，
+左下角的设置面板让人现场填。
 
 每轮的上限同样是三层：flag > 设置面板 > 内置默认（200 次调用 / $1 / 1800s）。默认值取自
 2,280 个真实 turn（中位花费 $0.004、p90 $0.036、最贵 $0.295、最长 165 次调用），拦的是
@@ -121,7 +124,7 @@ interface 上唯一编译期查不到的东西：`el("dvi", …)` 曾经编译�
 ## 会话、工作区、侧边栏
 
 **会话可以命名**：输入框里打 `/name <文字>`（单独打是查看，不会清空）。名字写成 session 格式
-里本来就有的 `session_info` 条目，所以跟着日志走，重启后还在，pi 自己也读得到。**turn 运行中
+里本来就有的 `session_info` 条目，所以跟着日志走，重启后还在，别的读者也读得到。**turn 运行中
 拒绝改名** —— 那时 turn 正按自己的 leaf 追加条目，再塞一条会挂在过期的 parent 上，落到没人走
 的分支里。命令只拦截 `/name` 一个：把每个 `/x` 都当命令会悄悄吞掉真正的消息（路径、除法、正则）。
 
@@ -175,7 +178,7 @@ turn 刷新多少次都不会动它；面板向上展开，宽度限于侧边栏
 
 **工作区指令**（`AGENTS.md`）只有两条规则：工作区有就用它，没有就用设置里那份**后备**。
 后备是**二选一而不是追加** —— 仓库自己的文件才是「在这个仓库里怎么干活」的更具体的权威，两份
-拼在一起只会让读者去猜哪句话赢了；后备存在 `~/.pi-mb/settings.json`，**跟着人而不是跟着仓库**，
+拼在一起只会让读者去猜哪句话赢了；后备存在 `~/.wei/settings.json`，**跟着人而不是跟着仓库**，
 所以「我一贯的偏好」放在那里是诚实的，不用提交进别人的 checkout。**只读工作区根目录那一个文件，
 不向上走**：往上遍历是这个设计开始变贵的地方（哪些目录算数、两个都有怎么办、仓库外面的算不算），
 而且会让 prompt 的内容取决于 checkout 恰好躺在哪里。**每轮重读，不缓存** —— 换来的是改完下一轮
@@ -188,7 +191,7 @@ turn 刷新多少次都不会动它；面板向上展开，宽度限于侧边栏
 
 ## 用量与上下文
 
-**输入框下方那排数字说清整个会话**（口径照 pi 的 footer）：token 进出、cache 读、总花费、
+**输入框下方那排数字说清整个会话**（口径照那个 dashboard 的 footer）：token 进出、cache 读、总花费、
 上下文占用；模型下拉框在这一行上。cache chip 同时给出**缓存命中率**
 （`cache 12.3k · 87% hit` = `cache_read / (input + cache_read + cache_write)`）。部分命中
 **绝不四舍五入成 100%**：整数位会读成满命中时自动补小数（`99.9`、`99.95`、`99.998`…），用
@@ -223,7 +226,7 @@ chips，而 context chip 要算固定开销，于是顺带重读一次 `AGENTS.m
 ## 工具
 
 八个工具：`bash`、`read`、`write`、`edit`、`glob`、`grep`、`note`、`script`。描述与参数名
-照抄 pi 的定义 —— 那是调过的提示文本，照抄既让模型看到同一个工具，也让两边可对拍。
+照抄 upstream 的定义 —— 那是调过的提示文本，照抄既让模型看到同一个工具，也让两边可对拍。
 
 另有一个**只有两个工具的 code mode**（`exec`、`wait`），见下一节。
 
@@ -308,8 +311,8 @@ stdout 封顶 **32KB**，`moon` 自己的构建警告不进 digest（它们是�
   个永不退出的服务器必须能返回，否则它会一直占着这个 turn（turn 自己的时间上限是最后一道）。
 - **一次 `wait` 最多 32KB，并说明还有更多**，因为后台进程可能是个只会写日志的服务器。读的位置
   按「实际交回了多少」前进，所以等两次不会把同一行给两遍。
-- **`wait` 自己看进程表落结算，但只看「调用返回之后」的表**。服务端那个 2 秒的监督循环在 `pi`
-  （一次性 CLI）里不存在，而 `wait` 需要「进程一没就返回」。可是后台命令的 shell 在调用返回前
+- **`wait` 自己看进程表落结算，但只看「调用返回之后」的表**。服务端那个 2 秒的监督循环在一次性
+  CLI 里不存在，而 `wait` 需要「进程一没就返回」。可是后台命令的 shell 在调用返回前
   几毫秒就退出了，那一刻进程表看着已经空了，而记录里的 pid 只有 shell —— 实测三次里有一次把还
   在跑的作业记成「已退出」，记录连同它指向的进程一起消失。所以调用返回前一律不结算
   （`Job.call_open`）。
@@ -373,7 +376,7 @@ System prompt 跟着模式换。「工具」那一节是从声明生成的，所
 **被守卫停下的 turn 会在日志里写下来为什么。** 这是重载后唯一看不到的东西：被成本上限停掉和
 正常跑完，在消息里长得一模一样。所以终点追加一条 `custom` 条目
 （`{"customType":"turn-outcome","data":{"ending":"round_limit",…}}`）。选 `custom` 而不是往
-assistant 消息加字段，是因为消息格式是 pi 的、有别的读者，而「这一轮怎么结束的」是**本 agent
+assistant 消息加字段，是因为消息格式是 upstream 的、有别的读者，而「这一轮怎么结束的」是**本 agent
 怎么跑的**这一事实；`custom` 也不回放给模型。输出被截断（`finish_reason: length`）同样记 ——
 那是最容易被误导的一种：turn 正常结束，别处看不出回答没写完。**正常跑完不写任何东西**。
 
@@ -391,11 +394,10 @@ assistant 消息加字段，是因为消息格式是 pi 的、有别的读者，
 触发，所以这条链路是用 40k 窗口在测试里验证的，而不是等线上触发。压缩写成一个 `compaction`
 entry 带 `first_kept_entry_id`：**被替换的内容仍在文件里**。
 
-**摘要回放必须带 `<summary>` 包装**，而且有个不显眼的前提：**pi-ai 根本不认识
+**摘要回放必须带 `<summary>` 包装**，而且有个不显眼的前提：**请求构造器根本不认识
 `compactionSummary` 这种消息，喂给它会被静默丢掉**（实测：请求体里那条消息直接消失，不报错）。
-所以转换必须发生在请求构造之前（`ContextMessage::to_message`）。包装字符串由
-`harness/gen-llm-message-fixtures.mjs` 从 `convertToLlm` 捕获，不是手写的 —— 这正是那种会被
-人「顺手改整齐」的字符串。
+所以转换必须发生在请求构造之前（`ContextMessage::to_message`）。包装字符串是从 upstream 的
+`convertToLlm` 捕获的，不是手写的 —— 这正是那种会被人「顺手改整齐」的字符串。
 
 **瘦身对前缀缓存的净收益只量出来一次，结论是「维持现状」**（细节见性能账）：裁剪省下约
 $0.95 的 cache-read，而它改写已发送内容造成的重发约 $0.60，净赚 $0.35。试过「没超过压缩阈值
@@ -421,10 +423,10 @@ node harness/ui-browser-check.mjs   # 真实浏览器验收（自己起 headless
 消失、状态行报出花费、侧边栏新建与切换、**跨工作区切换后工具确实在新目录里执行**、**服务器
 重启后页面自愈**、以及全程没有任何未捕获异常。
 
-**对拍是主要手段。** `harness/` 下的脚本把 pi 当 oracle 生成 fixture：SSE 期望值全部来自真的
-`openai-completions` 解析器跑同样的字节，请求体来自 pi 自己的 builder，没有一个是手写的 ——
-所以不一致意味着我们的实现跟 pi 分叉了，而不是某个常量漂了。`harness/record-live.mjs` 录真实
-响应，手写的 fixture 只能覆盖想得到的形状，录下来的能覆盖没想到的。
+**fixture 是一份记录，不是一条活的依赖。** SSE 期望值来自真的 `openai-completions` 解析器跑同样
+的字节，请求体来自 upstream 自己的 builder，没有一个是手写的；生成它们的脚本已经删了，字节和
+期望值都留了下来，所以不一致意味着**我们的实现跟那份记录分叉了**，而不是某个常量漂了。
+`harness/` 下剩下的脚本只做真实浏览器验收。
 
 ## 实测过的性能账
 
@@ -437,7 +439,7 @@ node harness/ui-browser-check.mjs   # 真实浏览器验收（自己起 headless
 | 侧边栏刷新 | 20 工作区 × 10 会话 × 64KB：**88–150ms/次**，一轮刷新两次 | 已修：按 `(路径, mtime)` 缓存标签 + 前缀 64KB→16KB：**冷 82ms、之后 17–22ms**。根因是**读+解析整份日志只为找一个可能不存在的名字**：27MB 的 store 里 80% 的耗时是解析而不是读 |
 | 大会话整页与切换 | 最大真实会话（92 条、257KB）：`GET /` **13ms / 242KB** | 暂不修。随会话线性增长，触发条件是「单会话超过一两 MB 或几百轮」，那时的修法是「只渲染最近 N 轮 + 加载更早」 |
 | **瘦身的前缀缓存账** | 3,500 次调用：不裁剪 prompt 总量是现在的 **1.45×**（省约 339M cache-read = **$0.95**）；被改写的调用 **7%**，多付约 **$0.60** | **净赚 $0.35，维持现状**。「没超阈值就不裁剪」的版本算完净亏 $0.36，回退了 |
-| **请求前缀（`request_drift`）** | 每轮报告每次请求与上次的共同前缀、从哪条消息开始不同 | 修的是**量尺**：账单里唯一能靠读日志发现、又确实属于我们的浪费是「把已发过的内容改写一遍再发」，而此前日志只有 `usage`（记了什么）没有「为什么」。`moon run pi` 会把它打出来 |
+| **请求前缀（`request_drift`）** | 每轮报告每次请求与上次的共同前缀、从哪条消息开始不同 | 修的是**量尺**：账单里唯一能靠读日志发现、又确实属于我们的浪费是「把已发过的内容改写一遍再发」，而此前日志只有 `usage`（记了什么）没有「为什么」。`moon run wei` 会把它打出来 |
 
 **瘦身那条的教训值得单记**：裁剪的动机是省 token，而 cache read 也是 token —— 省掉的要跟
 改写的代价比过才算数。「不要改写已发送的内容」这条设计意图本身**不是结论**。
@@ -572,7 +574,7 @@ macos/appffi/  host 拥有视图 → 线上跑事实（这段文本来了、这�
 不合法同一个分支。
 
 这条边界的验证方式是**两侧钉住同一批 JSON 字面量**：`macos/appffi/app_wbtest.mbt` 从生产侧断言，
-`macos/PiShell/Tests/PiModelTests/` 从消费侧断言。改一个字段名而不改另一边，挂的是一个构建。
+`macos/WeiShell/Tests/WeiModelTests/` 从消费侧断言。改一个字段名而不改另一边，挂的是一个构建。
 
 **线程上有一条硬约束**：`moonbitlang/async` 需要一个线程跑它的事件循环（所有 socket 和定时器），
 macOS 需要主线程跑自己的。两者不能是同一个，所以 MoonBit 跑在自己的线程上，事件经 JSON 行回到

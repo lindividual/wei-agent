@@ -1,5 +1,5 @@
 ///|
-/// Request-body fixtures checked against bodies captured from pi's own builder.
+/// Request-body fixtures checked against bodies captured from upstream's own builder.
 ///
 /// This is a blackbox test, so the JSON accessors below are local: the shared
 /// ones in `message_json.mbt` are package private, and a test that reaches for
@@ -85,7 +85,7 @@ fn spec_of(input : Json) -> RequestSpec raise {
 
 ///|
 /// Every captured request body must be reproduced exactly.
-test "deepseek requests match pi" {
+test "deepseek requests match the recorded bodies" {
   for entry in request_fixtures {
     let (name, about, input_text, expected_text) = entry
     let input = @json.parse(input_text)

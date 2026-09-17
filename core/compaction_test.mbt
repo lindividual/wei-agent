@@ -262,16 +262,16 @@ test "the summarization prompt asks for the expected sections" {
 // ── Settings derived from the window ───────────────────────────────────────
 
 ///|
-/// The tuned case must not move: these are pi's numbers, measured on 200K
+/// The tuned case must not move: these are upstream's numbers, measured on 200K
 /// windows, and a scaling rule that changes them would be a regression.
-test "a 200K window reproduces pi's defaults" {
+test "a 200K window reproduces the tuned defaults" {
   let settings = CompactionSettings::for_window(200000)
   assert_eq(settings.keep_recent_tokens, 20000)
   assert_eq(settings.reserve_tokens, 16384)
 }
 
 ///|
-/// A 1M window keeps a tenth of itself rather than pi's flat 20K, which would be
+/// A 1M window keeps a tenth of itself rather than upstream's flat 20K, which would be
 /// 2% — too little to continue working from.
 test "a 1M window scales the keep up" {
   let settings = CompactionSettings::for_window(1000000)

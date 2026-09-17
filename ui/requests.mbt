@@ -152,7 +152,7 @@ async fn Requests::accept(self : Requests, text : String) -> Unit {
   let app = self.app
   let shown = app.shown()
   // A `/skill:<name>` naming a skill this session can see is expanded here rather than sent on; an
-  // unknown name is left alone and goes to the model, which is what pi does and what keeps a stray
+  // unknown name is left alone and goes to the model, which is what upstream does and what keeps a stray
   // `/skill:` from eating a message.
   let to_send = match expand_skill_command(app, shown, text) {
     Some(expanded) => expanded
@@ -542,7 +542,7 @@ async fn Requests::page(self : Requests) -> String {
     column,
     @html.raw(render_settings_panel(app, shown)),
   ])
-  @html.render_page("pi", @html.stylesheet(), client_script(), [body]).render()
+  @html.render_page("wei", @html.stylesheet(), client_script(), [body]).render()
 }
 
 ///|

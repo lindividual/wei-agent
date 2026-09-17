@@ -1,7 +1,7 @@
 ///|
 /// DeepSeek streaming response parsing.
 ///
-/// Input is the complete SSE body, output is one `AssistantMessage`. pi consumes
+/// Input is the complete SSE body, output is one `AssistantMessage`. upstream consumes
 /// the stream incrementally, but the final state depends only on the accumulated
 /// deltas, so parsing the whole body at once produces the same result while being
 /// far easier to test against recorded fixtures.
@@ -94,7 +94,7 @@ priv struct Accum {
   mut has_finish_reason : Bool
   /// Set when the stream is aborted by a malformed payload.
   mut failed : Bool
-  /// Content blocks in first-appearance order, matching how pi emits them.
+  /// Content blocks in first-appearance order, matching how upstream emits them.
   blocks : Array[Content]
   /// Block index of the single text block, or -1.
   mut text_at : Int
@@ -162,7 +162,7 @@ fn json_number_field(j : Json, key : String) -> Double? {
 
 ///|
 /// Read a token count, treating anything missing or non-numeric as zero. This
-/// mirrors pi's `|| 0` handling: providers omit these fields freely and a missing
+/// mirrors upstream's `|| 0` handling: providers omit these fields freely and a missing
 /// count is legitimately zero, not an error.
 fn token_count(j : Json, key : String) -> Int {
   match json_number_field(j, key) {
@@ -325,7 +325,7 @@ fn Accum::finish_tool_calls(self : Accum) -> Unit {
   for tool in self.tools {
     let arguments = match parse_json_or_none(tool.args_text) {
       Some(j) => j
-      // pi falls back to partial-JSON repair here; a non-object or unparsable
+      // upstream falls back to partial-JSON repair here; a non-object or unparsable
       // buffer is reported by the tool layer as a bad call, so an empty object
       // keeps the shape without inventing arguments.
       None => Json::object(Map([]))
@@ -400,11 +400,11 @@ fn map_stop_reason(reason : String) -> (StopReason, String?) {
 /// Parse a complete SSE response body into an assistant message.
 ///
 /// Failure is reported through the message rather than by raising, because that
-/// is what pi hands to the UI: a stream that dies mid-flight still carries the
+/// is what upstream hands to the UI: a stream that dies mid-flight still carries the
 /// partial content and whatever usage was already reported.
 ///
 /// Two failure modes matter, and both are errors rather than something to paper
-/// over. A payload that is not JSON aborts the stream where pi's JSON decoder
+/// over. A payload that is not JSON aborts the stream where upstream's JSON decoder
 /// would throw. A stream that ends without `finish_reason` is rejected too, since
 /// DeepSeek does report one and its absence means the response was truncated.
 pub fn parse_deepseek_stream(
@@ -427,7 +427,7 @@ pub fn parse_deepseek_stream(
           Some(chunk) => accum.absorb(chunk)
           None => {
             // The exact wording differs between JSON implementations, so only
-            // the fact of the failure is reproduced here; pi surfaces V8's
+            // the fact of the failure is reproduced here; upstream surfaces V8's
             // message, which no other runtime can match byte for byte.
             accum.stop_reason = Error
             accum.error_message = Some("Invalid JSON in stream payload")
@@ -463,7 +463,7 @@ pub fn parse_deepseek_stream(
 // ── Incremental parsing ────────────────────────────────────────────────────
 //
 // The function above consumes a complete body, which is what the fixtures and
-// the differential tests use: comparing a finished parse against pi's is how the
+// the differential tests use: comparing a finished parse against upstream's is how the
 // rules get verified. Streaming needs the same rules applied as bytes arrive, so
 // the parser below wraps the same accumulator.
 //
@@ -660,7 +660,7 @@ pub fn StreamParser::is_done(self : StreamParser) -> Bool {
 /// a cancelled request leave a usable transcript.
 ///
 /// `aborted` says the caller stopped reading on purpose. A stream cut short that
-/// way is recorded the way pi records it — `aborted` with "Operation aborted" —
+/// way is recorded the way upstream records it — `aborted` with "Operation aborted" —
 /// rather than as a transport failure. The distinction is not cosmetic: on resume
 /// an `error` assistant message reads as a broken connection, which invites
 /// retrying work the user deliberately cancelled.

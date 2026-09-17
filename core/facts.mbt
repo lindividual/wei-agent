@@ -231,7 +231,7 @@ pub fn agent_note_type() -> String {
 /// ask the model to continue — and are otherwise unrecoverable once the process exits, because
 /// the messages they left behind say nothing about why writing stopped.
 ///
-/// A `custom` entry rather than a field on the assistant message: the message format is pi's and
+/// A `custom` entry rather than a field on the assistant message: the message format is upstream's and
 /// shared with other readers, while this is a fact about how *this* agent ran the turn. `custom`
 /// entries are not replayed to the model, so recording one cannot change what the model sees, and
 /// a reader that does not know the type skips it.
@@ -469,8 +469,8 @@ pub fn session_name_entry(
 ///|
 /// Build the entry recording which model a session runs on.
 ///
-/// An entry rather than a field on the session header, because pi derives the model from the log
-/// and a session resumed here has to read back the way pi would read it. It is a settings entry,
+/// An entry rather than a field on the session header, because upstream derives the model from the log
+/// and a session resumed here has to read back the way upstream would read it. It is a settings entry,
 /// not a message: it never reaches the model as a turn.
 pub fn model_change_entry(
   provider : String,

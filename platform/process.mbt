@@ -10,7 +10,7 @@ fn text_of(data : &@io.Data) -> String {
 }
 
 ///|
-/// The shell commands are run through. pi uses the user's configured shell;
+/// The shell commands are run through. upstream uses the user's configured shell;
 /// bash is the safe default here, and it is what the tool description promises.
 fn shell() -> String {
   "/bin/bash"

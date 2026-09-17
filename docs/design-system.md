@@ -1,7 +1,7 @@
 # wei Agent 设计规范
 
-**这份文档和代码是同一套数字。** token 在 `macos/PiShell/Sources/PiModel/Design.swift`（值，可测）和
-`macos/PiShell/Sources/PiShell/Design.swift`（`Color` / `Font` / 图形 / 材质），`DesignTests` 把其中**能算**的
+**这份文档和代码是同一套数字。** token 在 `macos/WeiShell/Sources/WeiModel/Design.swift`（值，可测）和
+`macos/WeiShell/Sources/WeiShell/Design.swift`（`Color` / `Font` / 图形 / 材质），`DesignTests` 把其中**能算**的
 部分算出来 —— 对比度、比例顺序、栅格、logo 的对称与出檐。
 
 为什么写成一套而不是继续手写：这份文档诞生前，窗口里有 **11 个字号**（5…22）和 **14 个间距值**。那不是尺度，
@@ -21,7 +21,7 @@
 | 图标 | `macos/make-icon.swift` 画出来的，不是提交进来的 `.icns` |
 
 **名字在三处必须一致**：Finder 显示的是 bundle 的**文件名**（只有 `CFBundleDisplayName` 会留下一个叫
-`pi.app` 的文件配一个写着 "wei Agent" 的窗口）、Dock 和 app 切换器用显示名、`ps` 用可执行文件名。三处同源：
+`wei.app` 的文件配一个写着 "wei Agent" 的窗口）、Dock 和 app 切换器用显示名、`ps` 用可执行文件名。三处同源：
 `make-app.sh` 里的 `NAME` 和 `EXECUTABLE`。
 
 **应用内也出现名字**：最左栏左上角是标志 + 「wei Agent」（`Wei.MarkView` + `Font.control(.medium)`）。这不是
@@ -214,14 +214,14 @@ SwiftUI：`Wei.Font.title()` / `.body()` / `.control()` / `.caption()` / `.micro
 ```
 🟡🟣  wei Agent        ← 标志 + app 名字（12pt 中灰）
 ──────────────        ← 发丝线
-📁 pi-web-shell  ● 7   ← 文件夹图标 + 名字 + 会话数 + 绿点
+📁 wei  ● 7   ← 文件夹图标 + 名字 + 会话数 + 绿点
 📁 Madolumo        1
 ```
 
 ### 中栏
 
 ```
-pi-web-shell        7 sessions  [＋]   ← 栏标题：项目名 + 计数（caption），按钮在最右
+wei        7 sessions  [＋]   ← 栏标题：项目名 + 计数（caption），按钮在最右
 搜索栏：Capsule，Control.regular（32），浮在列表上方
 Today                          ← 分组标题（caption 12 + secondary，缩进 loose）
 macos 版还缺少…停止会话；切换会话。请实现
@@ -229,7 +229,7 @@ macos 版还缺少…停止会话；切换会话。请实现
 ```
 
 - **标题栏归中栏**：三栏 `NavigationSplitView` 里 content 栏赢得标题，detail 栏的 `navigationTitle` 被忽略。
-- **窗口标题栏回到「会话名」**（当初为了修「标题栏永远显示 pi」而让中栏接管过它，那是个临时判断）。
+- **窗口标题栏回到「会话名」**（当初为了修「标题栏永远显示未赋值的默认名」而让中栏接管过它，那是个临时判断）。
   工作区的**名字和计数移到栏内** —— 标题给窗口正在展示的东西，列表的标题给列表。
 - **新建会话按钮在这一栏标题的最右端**，而且**直接建，不弹选择**：加会话就是加到**这个工作区**。需要选目录的
   那个变体仍在 File 菜单（"New Session in Folder…"）。第一次点击还要回答一个问题，就是一次点击做了两件事。
@@ -310,7 +310,7 @@ Wei.MarkView(height: 18)
 改在 `Design.swift` 并让 `DesignTests` 重新算对比度，不是在调用点写一个 7。
 
 ```bash
-cd macos/PiShell && swift test --filter DesignTests   # 对比度、比例顺序、栅格、标志几何
+cd macos/WeiShell && swift test --filter DesignTests   # 对比度、比例顺序、栅格、标志几何
 ```
 
 **这套规范没做到的**（老实说）：

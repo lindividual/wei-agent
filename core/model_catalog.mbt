@@ -8,9 +8,11 @@
 /// has a denominator. `AgentContext` already existed to keep them together for a single model;
 /// this is the same idea extended to the set of models a session can be switched between.
 ///
-/// The numbers are pi's, and the file they come from is worth naming so the next person can
-/// re-derive rather than guess: `~/.pi/agent/models-store.json`, the catalog pi itself resolves
-/// `--model` against. Two things about it are worth knowing before reading the table.
+/// The numbers are upstream's, and where they come from is worth naming so the next person can
+/// re-derive rather than guess. They were read from the catalogue of the agent this project was
+/// forked from, which resolved `--model` against a file of its own. That file is not read here —
+/// this table is the copy, and keeping the provenance is what lets someone check it. Two things
+/// are worth knowing before reading the table.
 ///
 /// First, the same model can appear under two ids. `deepseek-v4-flash` is the id this repository's
 /// recorded fixtures were captured with, and its rates (0.14 / 0.28 / 0.0028) are what those
@@ -36,7 +38,7 @@ pub(all) struct ModelSpec {
   pricing : Pricing
   /// Tokens of conversation the model accepts, from the same catalog as the pricing.
   context_window : Int
-  /// The most it will emit in one response. Not sent — pi does not send it either — so it is
+  /// The most it will emit in one response. Not sent — upstream does not send it either — so it is
   /// only a bound to reason about.
   max_tokens : Int
   /// Which thinking levels this model has, and what each is called on the wire.
@@ -160,8 +162,8 @@ fn deepseek_v4_flash_spec() -> ModelSpec {
     context_window: deepseek_v4_flash_context_window(),
     max_tokens: deepseek_v4_flash_max_tokens(),
     thinking_levels: deepseek_v4_thinking_levels(),
-    // pi's catalog lists this model's input as text *and* image, so a screenshot read with it is
-    // sent rather than replaced.
+    // The upstream catalogue lists this model's input as text *and* image, so a screenshot read
+    // with it is sent rather than replaced.
     vision: true,
   }
 }
@@ -170,7 +172,7 @@ fn deepseek_v4_flash_spec() -> ModelSpec {
 /// `deepseek-flash`: what `deepseek-v4-flash` is called now, at current prices.
 ///
 /// A separate entry rather than a rename, because the id is recorded in a session's log and a log
-/// is history. Rates from `~/.pi/agent/models-store.json` (input 0.3, output 1.2, cache read
+/// is history. Rates from the same catalogue as the entry above (input 0.3, output 1.2, cache read
 /// 0.006 — a cache read at a fiftieth of input, the same ratio the flash entry uses).
 fn deepseek_flash_spec() -> ModelSpec {
   {

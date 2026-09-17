@@ -1,0 +1,11 @@
+import {
+  "lindividual/wei/agent",
+  "lindividual/wei/core",
+  "lindividual/wei/platform",
+  "moonbitlang/async",
+  "moonbitlang/core/env",
+}
+
+supported_targets = "+native"
+
+pkgtype(kind: "executable")

@@ -2,8 +2,8 @@
 /// The model a session runs on.
 ///
 /// Per session rather than per process, so two sessions side by side can use different models. The
-/// choice is an entry in the session's own log (`model_change`, pi's format), which is what makes it
-/// survive a restart and read back the way pi would read it.
+/// choice is an entry in the session's own log (`model_change`, upstream's format), which is what makes it
+/// survive a restart and read back the way upstream would read it.
 ///
 /// The catalog itself is `@core.model_catalog` — one table holding the id, the price and the window
 /// together, because they are three facts about one model and separating them is how the window of
@@ -28,10 +28,9 @@ fn report_model(shown : Runner) -> String {
 /// Switch a session's model, and record it in the session's log.
 ///
 /// Appends a `model_change` entry rather than only changing the field, so the choice survives a
-/// restart and is pi-compatible: pi derives a session's model from its log, and a session whose
-/// log says one model while it runs another would come back wrong. The in-memory session is
-/// updated too, so the next turn's `run_turn` sees the entry already there and does not append a
-/// second, contradictory one.
+/// restart: the log is what a session is rebuilt from, and a session whose log says one model
+/// while it runs another would come back wrong. The in-memory session is updated too, so the next
+/// turn's `run_turn` sees the entry already there and does not append a second, contradictory one.
 ///
 /// Does not re-render anything by itself: the caller passes the region list, because the same
 /// change can arrive from the composer and from the picker.

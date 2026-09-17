@@ -94,7 +94,7 @@ pub(all) struct Routes {
   /// Switches the displayed session to the model named in the body, which is one id.
   ///
   /// Its own route rather than a settings form: the model is a property of a session, not of the
-  /// process, so it is not something `~/.pi-mb/settings.json` holds and it must not go through the
+  /// process, so it is not something `~/.wei/settings.json` holds and it must not go through the
   /// panel's settings lock.
   set_model : async (String) -> Unit
   /// Resumes the interrupted turn of the displayed session.

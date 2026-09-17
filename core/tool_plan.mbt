@@ -10,7 +10,7 @@
 /// when batches are large and mixed. Measured against real sessions, 88.7% of
 /// batches hold a single call and only 1.9% mix the two kinds, so a rolling pool
 /// would add machinery for a case that barely occurs. What does occur is
-/// `[read, bash, read]`, where treating the batch as uniformly exclusive — pi's
+/// `[read, bash, read]`, where treating the batch as uniformly exclusive — upstream's
 /// rule — serializes two reads that have no reason to wait.
 
 ///|

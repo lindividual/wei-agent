@@ -1,5 +1,5 @@
 ///|
-/// Real messages lifted verbatim from `~/.pi/agent/sessions/`, one per
+/// Real messages lifted verbatim from `~/.upstream/agent/sessions/`, one per
 /// shape worth protecting.
 ///
 /// Generated, not hand written: each string is the inner `message` object

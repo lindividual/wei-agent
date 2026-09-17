@@ -6,7 +6,7 @@
 /// compaction records what its summarization call cost. Totals are therefore the same whether
 /// a session was just resumed or has been running for hours.
 ///
-/// pi's footer counts the same three sources — assistant responses, usage reported by tools
+/// upstream's footer counts the same three sources — assistant responses, usage reported by tools
 /// (nothing here reports any), and summary generation.
 
 ///|
@@ -49,7 +49,7 @@ pub fn Usage::billed_input(self : Usage) -> Int {
 /// `path()` rather than `context_entries()` on purpose. What a compaction replaces stops being
 /// sent to the model, but it was still paid for, and a total that shrank when the context was
 /// compacted would be a total nobody could trust. Branches the conversation left behind are not
-/// counted: they belong to a different story, and pi's `/tree` is where they are accounted for.
+/// counted: they belong to a different story, and upstream's `/tree` is where they are accounted for.
 pub fn Session::usage(self : Session) -> SessionUsage {
   let mut total : SessionUsage = {
     input: 0,

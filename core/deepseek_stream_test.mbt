@@ -26,10 +26,10 @@ fn without_key(j : Json, key : String) -> Json {
 }
 
 ///|
-/// Compare a parse result against pi's, treating `errorMessage` as
+/// Compare a parse result against upstream's, treating `errorMessage` as
 /// presence-only.
 ///
-/// Its text comes from the runtime: pi surfaces the host JSON decoder's wording
+/// Its text comes from the runtime: upstream surfaces the host JSON decoder's wording
 /// (`Unexpected token 'o', "not-json" is not valid JSON`), which no other
 /// implementation can reproduce. Whether an error is reported is behaviour;
 /// the sentence describing it is not.
@@ -52,8 +52,8 @@ fn compare_stream_result(actual : Json, expected : Json) -> String? {
 }
 
 ///|
-/// Every recorded SSE body must parse to exactly what pi-ai produces for it.
-test "deepseek SSE matches pi-ai" {
+/// Every recorded SSE body must parse to exactly the message recorded beside it.
+test "deepseek SSE matches the recorded parse" {
   for entry in sse_fixtures {
     let (name, about, body, expected_text) = entry
     let expected = @json.parse(expected_text)

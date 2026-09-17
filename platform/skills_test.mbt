@@ -35,22 +35,22 @@ fn index_of(values : Array[String], wanted : String) -> Int? {
 }
 
 ///|
-/// The roots are pi's, global first and project last, so a project skill shadows a global one.
+/// The roots are ours, global first and project last, so a project skill shadows a global one.
 test "skill roots put the project last" {
   let roots = skill_roots("/work/project/sub", "/home/u")
-  assert_eq(roots[0], "/home/u/.pi/agent/skills")
+  assert_eq(roots[0], "/home/u/.wei/skills")
   assert_eq(roots[1], "/home/u/.agents/skills")
   // The project root and its ancestors, nearest first.
   assert_true(
-    roots.contains("/work/project/sub/.pi/skills"),
+    roots.contains("/work/project/sub/.wei/skills"),
     msg=roots.join(", "),
   )
-  assert_true(roots.contains("/work/project/.pi/skills"), msg=roots.join(", "))
+  assert_true(roots.contains("/work/project/.wei/skills"), msg=roots.join(", "))
   assert_true(roots.contains("/work/.agents/skills"), msg=roots.join(", "))
   // The last entry is the outermost project root, so it is `contains` order that matters for
   // shadowing, not the position of any single root.
-  let project_at = index_of(roots, "/work/project/.pi/skills").unwrap()
-  let global_at = index_of(roots, "/home/u/.pi/agent/skills").unwrap()
+  let project_at = index_of(roots, "/work/project/.wei/skills").unwrap()
+  let global_at = index_of(roots, "/home/u/.wei/skills").unwrap()
   assert_true(global_at < project_at, msg=roots.join(", "))
 }
 
@@ -58,9 +58,9 @@ test "skill roots put the project last" {
 async test "a bundle and a flat file are both discovered" {
   let home = skill_scratch("bundles")
   let cwd = skill_scratch("bundles-cwd")
-  write_skill("\{home}/.pi/agent/skills", "alpha", "First skill.")
+  write_skill("\{home}/.wei/skills", "alpha", "First skill.")
   write_text(
-    "\{home}/.pi/agent/skills/beta.md",
+    "\{home}/.wei/skills/beta.md",
     "---\nname: beta\ndescription: Second skill.\n---\n",
   )
   let found = discover_skills(cwd, home)
@@ -73,7 +73,7 @@ async test "a bundle and a flat file are both discovered" {
 async test "files that are not skills are skipped, and dotfiles are ignored" {
   let home = skill_scratch("skip")
   let cwd = skill_scratch("skip-cwd")
-  let root = "\{home}/.pi/agent/skills"
+  let root = "\{home}/.wei/skills"
   make_dirs(root)
   // A README with no frontmatter, a header missing a description, an unclosed fence, and a
   // hidden directory: none is a catalog entry.
@@ -92,8 +92,8 @@ async test "files that are not skills are skipped, and dotfiles are ignored" {
 async test "a project skill shadows the global one of the same name" {
   let home = skill_scratch("shadow-home")
   let cwd = skill_scratch("shadow-cwd")
-  write_skill("\{home}/.pi/agent/skills", "shared", "Global version.")
-  write_skill("\{cwd}/.pi/skills", "shared", "Project version.")
+  write_skill("\{home}/.wei/skills", "shared", "Global version.")
+  write_skill("\{cwd}/.wei/skills", "shared", "Project version.")
   let found = discover_skills(cwd, home)
   // Both are discovered — the shadowing is `dedup_skills`'s job, and it keeps the last.
   assert_eq(found.length(), 2)

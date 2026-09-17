@@ -39,7 +39,7 @@ test "exclusive calls each get their own segment" {
 }
 
 ///|
-/// The case pi handles badly: a safe call on either side of an exclusive one.
+/// The case upstream handles badly: a safe call on either side of an exclusive one.
 /// Here the two reads overlap and only the command runs alone.
 test "safe calls are not serialized by a neighbouring exclusive call" {
   let calls = [call("read", true), call("bash", false), call("read", true)]

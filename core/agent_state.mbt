@@ -7,7 +7,7 @@
 /// in-flight work, when a turn actually ends) are then testable without a model,
 /// a filesystem, or a clock, and the async driver becomes a thin dispatcher.
 ///
-/// The two queues are pi's, not dsh's single inbox: "interject while it is
+/// The two queues are upstream's, not dsh's single inbox: "interject while it is
 /// working" and "append after it finishes" are different user intentions and
 /// deserve different timing.
 

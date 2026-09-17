@@ -38,7 +38,7 @@ fn pad(value : Int, width : Int) -> String {
 }
 
 ///|
-/// Format epoch milliseconds as pi writes them: UTC, millisecond precision,
+/// Format epoch milliseconds as upstream writes them: UTC, millisecond precision,
 /// trailing `Z`.
 pub fn format_iso_utc(ms : Int64) -> String {
   let total_seconds = ms / 1000

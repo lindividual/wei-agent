@@ -1,5 +1,5 @@
 ///|
-/// Real session lines lifted verbatim from `~/.pi/agent/sessions/`.
+/// Real session lines lifted verbatim from `~/.upstream/agent/sessions/`.
 ///
 /// Generated, not hand written: each string is one real line, picked as the
 /// shortest example of its kind. Regenerate rather than edit.

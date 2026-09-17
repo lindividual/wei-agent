@@ -61,9 +61,9 @@ fn limit_view(
 /// The key this process should use, and where it came from.
 ///
 /// The decision is `@core.choose_api_key`, so the precedence is pinned by a test instead of by
-/// the order of three `if`s.
+/// the order of two `if`s.
 fn App::resolve_key(self : App) -> @core.KeyChoice? {
-  @core.choose_api_key(self.env_key, self.settings.saved_api_key, self.pi_key)
+  @core.choose_api_key(self.env_key, self.settings.saved_api_key)
 }
 
 ///|
@@ -78,7 +78,6 @@ fn key_source_name(choice : @core.KeyChoice?) -> String {
       match chosen.source {
         @core.Environment => "environment"
         @core.Saved => "saved"
-        @core.Pi => "pi"
       }
     None => "none"
   }
@@ -93,7 +92,6 @@ fn key_source_name(choice : @core.KeyChoice?) -> String {
 fn key_source_label(source : String) -> String {
   match source {
     "environment" => "DEEPSEEK_API_KEY"
-    "pi" => "pi's stored key"
     "saved" => "the saved key"
     _ => "no key"
   }
@@ -225,7 +223,7 @@ async fn settings_view(app : App, shown : Runner) -> @html.SettingsView {
 ///
 /// The phrase for each source names the directory it is read from, because that is the question
 /// the reader is answering when they are puzzled: a workspace file is read from the workspace, and
-/// the saved one is read from `~/.pi-mb/settings.json` and applies everywhere.
+/// the saved one is read from `~/.wei/settings.json` and applies everywhere.
 fn instruction_source_label(source : @core.InstructionSource) -> String {
   match source {
     @core.File => "AGENTS.md in this workspace"
@@ -283,7 +281,7 @@ async fn apply_settings_post(
     ok => ok
   }
   if !saved {
-    return "could not write ~/.pi-mb/settings.json"
+    return "could not write ~/.wei/settings.json"
   }
   app.settings = next
   // Re-derived before the message, so what the status line reports is what the next turn will use
@@ -299,8 +297,6 @@ async fn apply_settings_post(
       if clear {
         if app.key_source == "environment" {
           "saved key cleared; DEEPSEEK_API_KEY is still in use"
-        } else if app.key_source == "pi" {
-          "saved key cleared; pi's key is still in use"
         } else {
           "saved key cleared: no key is set now"
         }

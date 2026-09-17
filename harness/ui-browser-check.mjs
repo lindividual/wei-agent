@@ -113,20 +113,22 @@ function tagOf(path) {
 }
 
 /// The settings panel writes a file under `$HOME`, and a check must not edit the real one: run
-/// the server with a scratch home, and give it the credential store so real turns still work.
+/// the server with a scratch home, and save the environment's key into it so real turns still work.
 ///
 /// This is also what makes the check hermetic: the skills the panel lists come from `$HOME`, so a
 /// machine with a large collection would otherwise see a different panel than a fresh checkout.
 function scratchHome() {
   const home = mkdtempSync(join(tmpdir(), "pws-home-"));
-  const auth = join(homedir(), ".pi/agent/auth.json");
-  if (existsSync(auth)) {
-    mkdirSync(join(home, ".pi/agent"), { recursive: true });
-    copyFileSync(auth, join(home, ".pi/agent/auth.json"));
+  if (process.env.DEEPSEEK_API_KEY) {
+    mkdirSync(join(home, ".wei"), { recursive: true });
+    writeFileSync(
+      join(home, ".wei/settings.json"),
+      JSON.stringify({ saved_api_key: process.env.DEEPSEEK_API_KEY }),
+    );
   }
   // One skill, so the panel has something to switch: an empty list renders an explanation
   // instead, and neither state would be exercised.
-  const skill = join(home, ".pi/agent/skills/browser-demo");
+  const skill = join(home, ".wei/skills/browser-demo");
   mkdirSync(skill, { recursive: true });
   writeFileSync(
     join(skill, "SKILL.md"),
@@ -2134,7 +2136,7 @@ async function main() {
       "the panel reports the new state, not the submitted one",
       `${await count()}`,
     );
-    const settingsFile = join(home, ".pi-mb/settings.json");
+    const settingsFile = join(home, ".wei/settings.json");
     check(
       existsSync(settingsFile) &&
         JSON.parse(readFileSync(settingsFile, "utf8")).disabled_skills.includes(

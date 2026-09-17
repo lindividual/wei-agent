@@ -26,8 +26,8 @@ let script_timeout_ms : Int = 120000
 /// system temporary directory so nothing lands in the project.
 fn script_dir(cwd : String) -> String {
   let root = match @env.get_env_var("TMPDIR") {
-    Some(dir) if dir != "" => "\{dir}/pi-web-shell/scripts"
-    _ => "/tmp/pi-web-shell/scripts"
+    Some(dir) if dir != "" => "\{dir}/wei/scripts"
+    _ => "/tmp/wei/scripts"
   }
   "\{root}/\{@core.session_dir_name(cwd)}"
 }

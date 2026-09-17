@@ -1,19 +1,19 @@
 ///|
 /// Context messages that are not conversation, and how they reach the model.
 ///
-/// The interesting assertions here are not about our code but about pi's: the
+/// The interesting assertions here are not about our code but about upstream's: the
 /// `<summary>` framing and the custom-message handling are compared against
 /// `convertToLlm` output captured in `llm_message_fixtures.mbt`. A hand-written
 /// expectation could not tell us that the wrapper changed under us.
 ///
 /// The one thing that is *not* verifiable this way is the layer at which the
-/// conversion happens. pi-ai drops a `compactionSummary` message silently, so a
-/// design that handed summaries to the request builder would lose them entirely
-/// and no fixture comparison would catch it — hence the direct test that the
-/// conversion produces a user turn.
+/// conversion happens. A request builder that does not know `compactionSummary`
+/// drops it silently, so a design that handed summaries straight to the builder
+/// would lose them entirely and no fixture comparison would catch it — hence the
+/// direct test that the conversion produces a user turn.
 
 ///|
-test "context messages reach the model the way pi sends them" {
+test "context messages reach the model the way the request builder expects" {
   for fixture in llm_message_fixtures {
     let (name, input, expected) = fixture
     let j = @json.parse(input)
@@ -53,9 +53,9 @@ test "context messages reach the model the way pi sends them" {
 ///|
 /// A summary is a user turn, not a record the request builder has to know about.
 ///
-/// This is the guard against the mistake the fixtures cannot see: pi-ai has no
-/// case for `compactionSummary`, so anything that reaches it in that shape is
-/// dropped from the request without an error.
+/// This is the guard against the mistake the fixtures cannot see: the request
+/// builder has no case for `compactionSummary`, so anything that reaches it in
+/// that shape is dropped from the request without an error.
 test "a summary is converted before the request is built" {
   let context : SessionContext = {
     messages: [
@@ -308,8 +308,8 @@ test "session names come from the log, newest wins" {
 }
 
 ///|
-/// The entry is written the way pi writes it, since pi is the other reader of this file.
-test "a name entry matches pi's shape" {
+/// The entry is written the way upstream writes it, since upstream is the other reader of this file.
+test "a name entry matches the recorded shape" {
   let entry = session_name_entry(
     Some("Refactor auth module"),
     Some("j0k1l2m3"),
@@ -318,7 +318,7 @@ test "a name entry matches pi's shape" {
   let json = entry.to_json()
   assert_true(json is Object(_))
   let encoded = json.stringify()
-  // The fields pi's session-format documentation shows, and no others.
+  // The fields upstream's session-format documentation shows, and no others.
   for
     key in [
       "\"type\":\"session_info\"", "\"name\":\"Refactor auth module\"", "\"parentId\":\"j0k1l2m3\"",

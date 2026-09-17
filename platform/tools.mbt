@@ -392,7 +392,7 @@ let poll_interval_ms : Int = 250
 ///
 /// The server's own supervisor does the same thing on a two-second timer. Doing it per poll as well
 /// is what lets a `wait` return when the process actually goes rather than up to two seconds later,
-/// and it is the only settlement a `pi` run — which has no supervisor — would ever get.
+/// and it is the only settlement a `upstream` run — which has no supervisor — would ever get.
 async fn settle_if_gone(jobs : @core.JobStore, job : @core.Job) -> Unit {
   if !job.is_live() {
     return
@@ -471,7 +471,7 @@ async fn read_image(
   }
   let mime = kind.mime_type()
   let content : Array[@core.Content] = [
-    // Same shape pi writes, so a reader of either log sees the same thing.
+    // Same shape upstream writes, so a reader of either log sees the same thing.
     @core.Content::Text(
       "Read image file [\{mime}] \{name} (\{bytes.length()} bytes)",
     ),

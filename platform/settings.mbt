@@ -11,13 +11,13 @@
 /// silenced again in every checkout.
 
 ///|
-/// The settings file: `~/.pi-mb/settings.json`.
+/// The settings file: `~/.wei/settings.json`.
 ///
-/// Beside the sessions rather than under `~/.pi/`, for the same reason the session store is:
-/// this is a second implementation reading and writing its own state, and sharing pi's
+/// Beside the sessions rather than under `~/.upstream/`, for the same reason the session store is:
+/// this is a second implementation reading and writing its own state, and sharing upstream's
 /// credential or config files invites two processes editing one file.
 pub fn settings_path(home : String) -> String {
-  "\{home}/.pi-mb/settings.json"
+  "\{home}/.wei/settings.json"
 }
 
 ///|
@@ -44,7 +44,7 @@ pub async fn load_settings(home : String) -> @core.AppSettings {
 /// Written beside the real file and renamed over it, because a reader who opens the panel twice
 /// in a hurry can otherwise catch a half-written file: the rename is atomic, so the file is
 /// always either the old settings or the new ones. Renaming is also why this creates the parent
-/// directory first — the first save is the one that has to make `~/.pi-mb/`.
+/// directory first — the first save is the one that has to make `~/.wei/`.
 pub async fn save_settings(home : String, settings : @core.AppSettings) -> Unit {
   let path = settings_path(home)
   let temp = "\{path}.tmp"

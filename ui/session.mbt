@@ -87,7 +87,7 @@ struct Runner {
   /// expensive one for the one that matters.
   ///
   /// Mutable, and written through to the session's log as a `model_change` entry, so a restart
-  /// finds the same model. Seeded from the log when one is opened (`Runner::new`) — pi derives
+  /// finds the same model. Seeded from the log when one is opened (`Runner::new`) — upstream derives
   /// this from the session rather than from configuration, and a session that did not record it
   /// would silently come back on whatever the process defaults to.
   mut model_id : String
@@ -386,17 +386,15 @@ struct App {
   mut key_hint : String
   /// `DEEPSEEK_API_KEY` as the process found it at startup, or empty.
   ///
-  /// Kept here rather than read per turn, so the precedence — environment, then saved, then pi —
-  /// is a pure function of the process's own state and can be tested without an environment.
+  /// Kept here rather than read per turn, so the precedence — environment, then saved — is a pure
+  /// function of the process's own state and can be tested without an environment.
   env_key : String
-  /// pi's credential, read once at startup. The last resort when nothing else is set.
-  pi_key : String?
   /// Whether the environment provided a key. Separate from `env_key` only for the panel, which
   /// says so: otherwise "I saved a key and nothing changed" reads as a bug rather than as a
   /// variable that is doing what it says.
   env_key_set : Bool
   /// What the reader has changed: a saved key, and the skills switched off. Kept in memory as
-  /// the source the panel renders and written through to `~/.pi-mb/settings.json`.
+  /// the source the panel renders and written through to `~/.wei/settings.json`.
   mut settings : @core.AppSettings
   /// One writer of the settings file at a time. Two panels open in two tabs is a normal thing to
   /// do, and read-modify-write of one file from two tasks is how the second edit disappears.

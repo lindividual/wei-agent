@@ -237,23 +237,23 @@ fn no_last_turn() -> LastTurn {
 ///|
 /// Where the session log lives, unless the host says otherwise.
 fn store_root(home : String) -> String {
-  match @env.get_env_var("PI_SHELL_STORE") {
+  match @env.get_env_var("WEI_STORE") {
     Some(value) if value != "" => value
-    _ => "\{home}/.pi-mb/sessions"
+    _ => "\{home}/.wei/sessions"
   }
 }
 
 ///|
 /// The key a turn will send, and where it came from.
 ///
-/// The precedence is `@core.choose_api_key` rather than the order of three `if`s, so a variable
-/// still overrules the saved key and the panel and the turn cannot disagree about which is in use.
+/// The precedence is `@core.choose_api_key` rather than the order of two `if`s, so a variable still
+/// overrules the saved key and the panel and the turn cannot disagree about which is in use.
 ///
-/// pi's credential store is deliberately not consulted. The panel saves a key where this shell can
-/// write it, and a third source that came from somewhere else — pi's own files, which this shell
-/// cannot read back to describe — would be a key the panel could not explain.
+/// There is no third source. The panel saves a key where this shell can read it back, so the panel
+/// can always explain what is being sent; a key that came from somewhere this shell cannot describe
+/// would be a key the panel could not explain.
 fn resolve_key(settings : @core.AppSettings) -> @core.KeyChoice? {
-  @core.choose_api_key(env_key(), settings.saved_api_key, None)
+  @core.choose_api_key(env_key(), settings.saved_api_key)
 }
 
 ///|
@@ -277,7 +277,7 @@ fn working_dir(cwd : String, home : String) -> String {
 }
 
 ///|
-/// Open the session this process should show: the file named by `PI_SHELL_SESSION`, or a new one
+/// Open the session this process should show: the file named by `WEI_SESSION`, or a new one
 /// in the current directory.
 ///
 /// Resuming is the whole of the persistence work paying off — the file was written by whatever ran
@@ -286,7 +286,7 @@ async fn open_session(
   shell_root : String,
   cwd : String,
 ) -> (@core.Session, String) {
-  match @env.get_env_var("PI_SHELL_SESSION") {
+  match @env.get_env_var("WEI_SESSION") {
     Some(path) if path != "" => {
       guard @platform.path_exists(path) else {
         raise Failure::Failure("no session file at \{path}")
@@ -338,7 +338,7 @@ async fn Shell::open() -> Shell {
   let settings = @platform.load_settings(home)
   let root = store_root(home)
   let (session, path) = open_session(root, working_dir(cwd, home))
-  // A resumed session brings its own directory with it: `PI_SHELL_SESSION` can name a file written
+  // A resumed session brings its own directory with it: `WEI_SESSION` can name a file written
   // somewhere else, and running its tools in the directory this process happens to have been started
   // in would be a different session's workspace. An empty one is a header nobody filled in, and the
   // process's own directory is the better guess.
@@ -1199,7 +1199,7 @@ fn Shell::api_key(self : Shell) -> String {
 
 // ── skills ─────────────────────────────────────────────────────────────────
 //
-// pi's `/skill:<name>`: the reader naming a skill rather than hoping the model picks it. The catalog
+// upstream's `/skill:<name>`: the reader naming a skill rather than hoping the model picks it. The catalog
 // in the system prompt tells the model what exists; this is the same text arriving because the
 // *reader* decided it was relevant, which matters when a one-line description is not enough to
 // persuade anyone.
@@ -1241,7 +1241,7 @@ async fn Shell::enabled_skills(
 ///
 /// `None` covers three cases the caller treats identically — not a skill command, no such name, and
 /// a file that has since been deleted — and all three send the text on as the reader typed it. That
-/// is pi's behaviour, and it is what keeps a stray `/skill:` from eating a message.
+/// is upstream's behaviour, and it is what keeps a stray `/skill:` from eating a message.
 async fn Shell::expand_skill(
   self : Shell,
   open : Open,
@@ -1286,7 +1286,7 @@ async fn Shell::list_skills(self : Shell, open : Open) -> Unit {
   if skills.length() == 0 {
     say_status(
       open.path,
-      "no skills here — a skill is a directory with SKILL.md in ~/.pi/skills or .pi/skills",
+      "no skills here — a skill is a directory with SKILL.md in ~/.wei/skills or .wei/skills",
     )
     return
   }
@@ -1314,7 +1314,7 @@ fn command_of(line : String) -> Command {
     "abort" => Abort
     "quit" => Quit
     // The four words that are not slash commands, spelled both ways. The host sends the bare word —
-    // they are about the process rather than about a session — but a reader driving `pi-shell-cli` by
+    // they are about the process rather than about a session — but a reader driving `wei-cli` by
     // hand writes a slash, and a word that means one thing with one and something else with the other
     // is a word nobody can remember.
     "continue" | "/continue" => ContinueTurn
@@ -1533,12 +1533,11 @@ async fn Shell::serve(self : Shell) -> Unit {
       match c.source {
         @core.Environment => "DEEPSEEK_API_KEY"
         @core.Saved => "saved"
-        @core.Pi => "pi"
       }
     None => "missing"
   }
   say_ready(self.shown(), key_source)
-  // A session that was resumed — by `PI_SHELL_SESSION`, or by whatever ran last — has a transcript
+  // A session that was resumed — by `WEI_SESSION`, or by whatever ran last — has a transcript
   // already, and the host has never seen any of it. The same replay a switch gets, because it is the
   // same situation: a conversation the reader is looking at and the window is not. The call also
   // carries what it has spent, which model it runs on and whether one can be sent a picture — every
@@ -1732,7 +1731,7 @@ async fn start() -> Unit {
 /// `run_async_main` is `moonbitlang/async`'s own entry point — the runtime's event loop setup, the
 /// signal handling and the cleanup after the last task — spelled out here rather than left to the
 /// compiler because this package has no `main` to hang it on.
-#export_name("pi_run")
+#export_name("wei_run")
 pub fn run() -> Unit {
   @async.run_async_main(start)
 }

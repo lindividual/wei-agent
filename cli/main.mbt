@@ -9,40 +9,16 @@
 ///   moon run cli -- "explain what a monad is in one sentence"
 
 ///|
-fn field(j : Json, key : String) -> Json? {
-  match j {
-    Object(m) => m.get(key)
-    _ => None
-  }
-}
-
-///|
-fn string_field(j : Json, key : String) -> String? {
-  match field(j, key) {
-    Some(String(s)) => Some(s)
-    _ => None
-  }
-}
-
-///|
-/// Read the DeepSeek key from pi's credential store, falling back to the
-/// environment so the tool works outside a configured pi install.
+/// The DeepSeek key, from the environment or the settings file.
 async fn api_key(home : String) -> String? {
-  let from_env = @env.get_env_var("DEEPSEEK_API_KEY")
-  match from_env {
-    Some(k) if k != "" => return Some(k)
-    _ => ()
+  match @env.get_env_var("DEEPSEEK_API_KEY") {
+    Some(k) if k != "" => Some(k)
+    _ =>
+      match @platform.load_settings(home).saved_api_key {
+        key if key != "" => Some(key)
+        _ => None
+      }
   }
-  let path = "\{home}/.pi/agent/auth.json"
-  if !@fs.exists(path) {
-    return None
-  }
-  let store = @json.parse(@fs.read_file(path).text())
-  let provider = match field(store, "deepseek") {
-    Some(p) => p
-    None => return None
-  }
-  string_field(provider, "key")
 }
 
 ///|
@@ -71,7 +47,10 @@ async fn main {
   }
   let key = match api_key(home) {
     Some(k) => k
-    None => abort("no DeepSeek key: set DEEPSEEK_API_KEY or log in with pi")
+    None =>
+      abort(
+        "no DeepSeek key: set DEEPSEEK_API_KEY, or save one in the settings panel",
+      )
   }
 
   let spec : @core.RequestSpec = {

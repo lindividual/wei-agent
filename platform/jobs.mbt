@@ -38,8 +38,8 @@ pub(all) struct ExecOutcome {
 /// the pruner does.
 pub fn tree_dir() -> String {
   match @env.get_env_var("TMPDIR") {
-    Some(dir) if dir != "" => "\{dir}/pi-web-shell"
-    _ => "/tmp/pi-web-shell"
+    Some(dir) if dir != "" => "\{dir}/wei"
+    _ => "/tmp/wei"
   }
 }
 
@@ -396,12 +396,12 @@ pub async fn live_of(pids : Array[Int]) -> Array[Int] {
 // ── Persistence ────────────────────────────────────────────────────────────
 
 ///|
-/// Where the job records live: `~/.pi-mb/jobs.json`.
+/// Where the job records live: `~/.wei/jobs.json`.
 ///
 /// Beside the session store and the settings, for the same reason both are there: this is a
-/// second implementation keeping its own state, and it does not write into pi's directories.
+/// second implementation keeping its own state, and it does not write into upstream's directories.
 pub fn jobs_path(home : String) -> String {
-  "\{home}/.pi-mb/jobs.json"
+  "\{home}/.wei/jobs.json"
 }
 
 ///|

@@ -52,7 +52,7 @@ pub fn SessionHeader::to_line(self : SessionHeader) -> String {
 }
 
 ///|
-/// The directory name pi derives from a working directory: the leading separator
+/// The directory name upstream derives from a working directory: the leading separator
 /// is dropped, path separators and colons become dashes, and the result is
 /// wrapped in double dashes so it cannot collide with a real directory name.
 pub fn session_dir_name(cwd : String) -> String {
@@ -95,7 +95,7 @@ pub fn cwd_of_session_file(text : String) -> String? {
 }
 
 ///|
-/// A fresh entry id: eight hex characters, matching the shape pi writes.
+/// A fresh entry id: eight hex characters, matching the shape upstream writes.
 ///
 /// Ids only need to be unique within a session, and collisions across sessions
 /// are harmless, so four random bytes are plenty.
@@ -116,7 +116,7 @@ pub fn new_entry_id() -> String {
 
 ///|
 /// Where a session file lives under a store root:
-/// `<root>/<encoded-cwd>/<timestamp>_<id>.jsonl`, matching pi's layout so an
+/// `<root>/<encoded-cwd>/<timestamp>_<id>.jsonl`, matching upstream's layout so an
 /// existing store can be read.
 pub fn session_file_path(
   root : String,
@@ -125,7 +125,7 @@ pub fn session_file_path(
   id : String,
 ) -> String {
   let stamp = format_iso_utc(timestamp)
-  // Colons are not portable in filenames; pi substitutes dashes and keeps the
+  // Colons are not portable in filenames; upstream substitutes dashes and keeps the
   // trailing Z, which is what makes the name sort in time order.
   let safe_stamp = replace_all(stamp, ":", "-")
   "\{root}/\{session_dir_name(cwd)}/\{safe_stamp}_\{id}.jsonl"

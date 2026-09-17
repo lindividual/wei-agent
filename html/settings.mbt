@@ -32,7 +32,7 @@ pub(all) struct SettingsView {
   store : String
   /// The workspace the agent is currently in.
   cwd : String
-  /// Which provider the key in use came from: `environment`, `saved`, `pi` or `none`.
+  /// Which provider the key in use came from: `environment`, `saved`, `upstream` or `none`.
   key_source : String
   /// The key in use, identified but not revealed: `sk-…4f2a`, or empty when there is none.
   key_hint : String
@@ -528,7 +528,6 @@ fn render_key_block(view : SettingsView) -> Node {
   let state = match view.key_source {
     "environment" => "in use, from DEEPSEEK_API_KEY"
     "saved" => "in use, saved by this panel"
-    "pi" => "in use, from pi's credential store"
     _ => "no key: the first turn will fail"
   }
   let rows : Array[Node] = [
@@ -585,7 +584,7 @@ fn render_key_block(view : SettingsView) -> Node {
     },
     el(P, attrs=[cls("hint")], children=[
       txt(
-        "Stored in ~/.pi-mb/settings.json, readable only by you. It is never sent back to the browser.",
+        "Stored in ~/.wei/settings.json, readable only by you. It is never sent back to the browser.",
       ),
     ]),
   ])
@@ -603,7 +602,7 @@ fn render_skills_block(view : SettingsView) -> Node {
       el(H3, children=[txt("skills")]),
       el(P, attrs=[cls("hint")], children=[
         txt(
-          "none found. A skill is <dir>/SKILL.md or <name>.md under ~/.pi/agent/skills, ~/.agents/skills, or .pi/skills in this project.",
+          "none found. A skill is a folder with a SKILL.md inside it, under ~/.wei/skills, ~/.agents/skills, or .wei/skills in this project.",
         ),
       ]),
     ])

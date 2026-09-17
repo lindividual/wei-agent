@@ -129,7 +129,7 @@ fn prefix_of(text : String, limit : Int) -> String {
 ///
 /// The name lives at the end of a log, so finding it means reading the whole file — once per change,
 /// since the result is cached. The parse goes through the same entry decoder as everything else, so a
-/// name written by pi is read here too; pattern-matching the JSON would stop working the day a field
+/// name written by upstream is read here too; pattern-matching the JSON would stop working the day a field
 /// moves.
 fn session_name_of(text : String) -> String? {
   let session = try @core.parse_session_file(text) catch {
@@ -854,7 +854,7 @@ fn history_rows(session : @core.Session) -> Array[Json] {
 /// Give a session a name of its own, or take one away.
 ///
 /// Written as a `session_info` entry in the log rather than into some side table, because that is
-/// where pi keeps it and a name has to survive being read back by another front end. It also means
+/// where upstream keeps it and a name has to survive being read back by another front end. It also means
 /// the rename is part of the conversation's own file, so a session carried to another machine keeps
 /// the name its reader gave it.
 ///

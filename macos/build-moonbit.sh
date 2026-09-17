@@ -64,10 +64,10 @@ mkdir -p "$VENDOR"
 # `libmoonbitrun.o` is the allocator the runtime was compiled against, and `libbacktrace.a` is the
 # stack unwinder it reports panics with. Neither is a MoonBit package, which is why they come from
 # the toolchain rather than from `_build`.
-xcrun libtool -static -o "$VENDOR/libpiweb.a" \
+xcrun libtool -static -o "$VENDOR/libwei.a" \
   "$LINKED" \
   "${STUBS[@]}" \
   "$MOON/lib/libmoonbitrun.o" \
   "$MOON/lib/libbacktrace.a"
 
-echo "$VENDOR/libpiweb.a"
+echo "$VENDOR/libwei.a"

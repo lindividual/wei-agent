@@ -1,8 +1,8 @@
 ///|
 /// Session storage and context derivation.
 ///
-/// The fixtures are real lines from `~/.pi/agent/sessions/`, so these tests fail
-/// if the model drifts from the format pi actually wrote.
+/// The fixtures are real lines from `~/.upstream/agent/sessions/`, so these tests fail
+/// if the model drifts from the format upstream actually wrote.
 
 // ── Timestamps ─────────────────────────────────────────────────────────────
 
@@ -71,7 +71,7 @@ test "real session header round trips" {
 }
 
 ///|
-/// A session written by a newer pi must stay readable: an unrecognised kind is
+/// A session written by a newer upstream must stay readable: an unrecognised kind is
 /// kept whole rather than dropped or rejected.
 test "unknown entry kinds are preserved verbatim" {
   let line = "{\"type\":\"future_thing\",\"id\":\"abcd1234\",\"parentId\":null,\"timestamp\":\"2026-06-06T11:17:21.709Z\",\"payload\":{\"nested\":[1,2]},\"flag\":true}"

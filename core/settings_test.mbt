@@ -116,8 +116,8 @@ test "toggling a skill off and on again returns to enabled" {
 /// able to shadow a global one with a single switch.
 test "the disabled names filter the catalog, one name for all paths" {
   let discovered = [
-    skill("alpha", "/home/u/.pi/agent/skills/alpha/SKILL.md"),
-    skill("alpha", "/work/proj/.pi/skills/alpha/SKILL.md"),
+    skill("alpha", "/home/u/.wei/skills/alpha/SKILL.md"),
+    skill("alpha", "/work/proj/.wei/skills/alpha/SKILL.md"),
     skill("beta", "/home/u/.agents/skills/beta.md"),
   ]
   assert_eq(enabled_skills(discovered, []).length(), 2)
@@ -462,8 +462,8 @@ test "a nonsense limit in the file is no opinion, not a disabled bound" {
 }
 
 ///|
-test "the environment key wins over everything" {
-  let choice = choose_api_key("sk-env", "sk-saved", Some("sk-pi"))
+test "the environment key wins over the saved key" {
+  let choice = choose_api_key("sk-env", "sk-saved")
   match choice {
     Some(chosen) => {
       assert_eq(chosen.key, "sk-env")
@@ -475,7 +475,7 @@ test "the environment key wins over everything" {
 
 ///|
 test "a saved key is used when the environment has none" {
-  match choose_api_key("", "sk-saved", Some("sk-pi")) {
+  match choose_api_key("", "sk-saved") {
     Some(chosen) => {
       assert_eq(chosen.key, "sk-saved")
       assert_eq(chosen.source, Saved)
@@ -485,16 +485,8 @@ test "a saved key is used when the environment has none" {
 }
 
 ///|
-test "pi's store is the last resort, and nothing set is not a choice" {
-  match choose_api_key("", "", Some("sk-pi")) {
-    Some(chosen) => {
-      assert_eq(chosen.key, "sk-pi")
-      assert_eq(chosen.source, Pi)
-    }
-    None => fail("a stored key is a choice")
-  }
-  // An empty string is absence, not a key: all three providers can hand one over when they
-  // have nothing, and treating it as a value would send `Bearer ` to the model.
-  assert_true(choose_api_key("", "", None) is None)
-  assert_true(choose_api_key("", "", Some("")) is None)
+test "nothing set is not a choice" {
+  // An empty string is absence, not a key: a caller that read a file with nothing in it can hand
+  // one over, and treating it as a value would send `Bearer ` to the model.
+  assert_true(choose_api_key("", "") is None)
 }

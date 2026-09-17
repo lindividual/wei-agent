@@ -75,7 +75,7 @@ fn command_hints(app : App, shown : Runner) -> Array[@html.CommandHint] {
 /// The scan is by `cwd` because skills are per working directory, and a session that moved to
 /// another repository must see that repository's skills — the same reason the catalog is keyed
 /// that way. `None` covers three cases the caller treats identically (send the text as-is): not a
-/// skill command, no such name, and a file that has since been deleted. The first is pi's
+/// skill command, no such name, and a file that has since been deleted. The first is upstream's
 /// behaviour; the other two are that behaviour applied to the two ways a name can stop resolving,
 /// and passing the text through is better than either silence or an error, because a reader who
 /// typed a message beginning with `/skill:` may well have meant it literally.

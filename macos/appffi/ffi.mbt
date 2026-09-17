@@ -15,17 +15,17 @@
 /// Hand one event to the host.
 ///
 /// `#borrow` because the host copies: the bytes belong to MoonBit and must not outlive this
-/// call. Nothing here defines `pi_shell_emit` — the host does, and `host_stub.c` is only a weak
+/// call. Nothing here defines `wei_emit` — the host does, and `host_stub.c` is only a weak
 /// default so that `moon test` links without one.
 pub fn emit(event : Json) -> Unit {
   let line = event.stringify() + "\n"
   let bytes = @utf8.encode(line)
-  pi_shell_emit(bytes, bytes.length())
+  wei_emit(bytes, bytes.length())
 }
 
 ///|
 #borrow(bytes)
-extern "C" fn pi_shell_emit(bytes : Bytes, len : Int) -> Unit = "pi_shell_emit"
+extern "C" fn wei_emit(bytes : Bytes, len : Int) -> Unit = "wei_emit"
 
 ///|
 /// Read the oldest command, or the empty string when there is none.
@@ -35,7 +35,7 @@ extern "C" fn pi_shell_emit(bytes : Bytes, len : Int) -> Unit = "pi_shell_emit"
 /// call into the host.
 pub fn take_command() -> String {
   let buffer = Bytes::new(65536)
-  let len = pi_shell_recv(buffer, buffer.length())
+  let len = wei_recv(buffer, buffer.length())
   if len <= 0 {
     ""
   } else {
@@ -45,4 +45,4 @@ pub fn take_command() -> String {
 
 ///|
 #borrow(buffer)
-extern "C" fn pi_shell_recv(buffer : Bytes, capacity : Int) -> Int = "pi_shell_recv"
+extern "C" fn wei_recv(buffer : Bytes, capacity : Int) -> Int = "wei_recv"

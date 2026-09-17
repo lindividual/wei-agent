@@ -6,7 +6,7 @@
 /// a model, which is the driver's job — this module answers "should we, and from
 /// where", so those questions are testable without a model or a clock.
 ///
-/// This is the minimal version: one summary of everything before the cut. pi also
+/// This is the minimal version: one summary of everything before the cut. upstream also
 /// retries a failed summarization call, and dsh additionally prunes oversized tool
 /// output before summarizing so there is less to condense. Neither is needed to
 /// make long sessions work.
@@ -36,7 +36,7 @@ pub(all) struct CompactionSettings {
 ///|
 /// Derive settings from the model's context window.
 ///
-/// pi uses fixed values — 16,384 and 20,000 — which were tuned on 200K windows.
+/// upstream uses fixed values — 16,384 and 20,000 — which were tuned on 200K windows.
 /// Applied to a 1M-token window those numbers keep only 2% of the conversation
 /// verbatim, so a compaction throws away history it could have afforded to keep.
 ///
@@ -50,7 +50,7 @@ pub fn CompactionSettings::for_window(
   // Never more than a quarter: the summary and the next exchange have to fit in
   // whatever is left, and the point of compacting is to make room.
   let affordable = context_window / 4
-  // pi's value becomes the floor where the window can afford it, and the ceiling
+  // upstream's value becomes the floor where the window can afford it, and the ceiling
   // where it cannot — a 32K window cannot spare 20K for history.
   let floor = if affordable < 20000 { affordable } else { 20000 }
   let keep = if scaled < floor {
@@ -90,7 +90,7 @@ pub fn CompactionSettings::should_compact(
 /// What a summarization prompt is asked to produce. Structured rather than free
 /// prose so the next model can find the parts it needs.
 ///
-/// Copied from pi: the section list is the difference between a summary that
+/// Copied from upstream: the section list is the difference between a summary that
 /// keeps file paths and error messages and one that says "we discussed the code".
 pub fn summarization_prompt() -> String {
   "The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.\n\nUse this EXACT format:\n\n## Goal\n[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned by user]\n- [Or \"(none)\" if none were mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Current work]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [Ordered list of what should happen next]\n\n## Critical Context\n- [Any data, examples, or references needed to continue]\n- [Or \"(none)\" if not applicable]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages."
@@ -99,7 +99,7 @@ pub fn summarization_prompt() -> String {
 // ── Estimation ─────────────────────────────────────────────────────────────
 
 ///|
-/// Approximate token cost of an image attachment, from pi. Images are counted by
+/// Approximate token cost of an image attachment, from upstream. Images are counted by
 /// a flat figure because the real cost depends on resolution and tiling.
 fn estimated_image_chars() -> Int {
   4800
@@ -135,7 +135,7 @@ fn utf8_bytes(text : String) -> Int {
 ///|
 /// Estimate the token cost of one context message.
 ///
-/// Characters divided by four, which is pi's rule. It is a heuristic, not a
+/// Characters divided by four, which is upstream's rule. It is a heuristic, not a
 /// tokenizer: it over-counts ASCII slightly and under-counts CJK, because three
 /// UTF-8 bytes stand for one character there. That is acceptable for a threshold
 /// with sixteen thousand tokens of headroom — the question being answered is

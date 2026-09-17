@@ -1,5 +1,5 @@
 import {
-  "lindividual/pi-web-shell/html",
+  "lindividual/wei/html",
   "moonbitlang/async",
   "moonbitlang/async/aqueue",
   "moonbitlang/async/http",

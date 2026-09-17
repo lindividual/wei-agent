@@ -137,7 +137,7 @@ fn prefix_of(text : String, limit : Int) -> String {
 ///
 /// The name lives at the end of a log and the label at the beginning, so finding it means reading
 /// the whole file — once per change, since the result is cached. Parsing goes through the same entry
-/// decoder as everything else, so a name written by pi is read here too; pattern-matching the JSON
+/// decoder as everything else, so a name written by upstream is read here too; pattern-matching the JSON
 /// would stop working the day a field moves.
 ///
 /// If a store of very many large sessions ever makes that visible, the fix is an index beside the

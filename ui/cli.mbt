@@ -1,9 +1,9 @@
 ///|
-/// Starting a process: the command line, the credentials, and opening the first session.
+/// Start a process: the command line, the credentials, and opening the first session.
 ///
 /// Everything here runs once, before the server exists, and nothing here is reachable from a
-/// request. The interface is `parse_args` and `open_session`; the rest is the key resolution order
-/// (the decision is `@core.choose_api_key`; this file only reads the three sources it chooses
+/// request. The interface is `parse_args` and `open_session`; the rest is reading the two key
+/// sources (the decision is `@core.choose_api_key`; this file only reads the values it chooses
 /// between) and the file layout a new session gets.
 
 ///|
@@ -217,31 +217,7 @@ async fn offers_picker(args : Args) -> Bool {
 }
 
 ///|
-fn field(j : Json, key : String) -> Json? {
-  match j {
-    Object(fields) => fields.get(key)
-    _ => None
-  }
-}
-
-///|
-async fn pi_api_key(home : String) -> String? {
-  let path = "\{home}/.pi/agent/auth.json"
-  if !@platform.path_exists(path) {
-    return None
-  }
-  let store = @json.parse(@platform.read_text(path))
-  let provider = match field(store, "deepseek") {
-    Some(value) => value
-    None => return None
-  }
-  match field(provider, "key") {
-    Some(String(key)) => Some(key)
-    _ => None
-  }
-}
-
-///|
+///
 /// `DEEPSEEK_API_KEY`, or empty when it is not set.
 ///
 /// Read once, at startup, and kept: whether a saved key is the one in use depends on this, and a
@@ -307,7 +283,7 @@ async fn open_path(path : String) -> @core.Session {
 /// Open the session the command line asked for, creating one when needed.
 ///
 /// Resuming is where the format work pays off: the file was written by whatever ran last
-/// — this process, an older build, or pi itself — and it is read back through the same
+/// — this process, an older build, or upstream itself — and it is read back through the same
 /// parser the round-trip verifier exercises.
 async fn open_session(
   args : Args,

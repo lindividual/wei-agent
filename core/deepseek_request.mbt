@@ -11,7 +11,7 @@
 /// How much reasoning to ask for.
 ///
 /// `Disabled` is not the same as omitting the field: DeepSeek distinguishes an
-/// explicit off from a default, and pi always sends one or the other.
+/// explicit off from a default, and upstream always sends one or the other.
 pub(all) enum Thinking {
   Disabled
   Enabled(effort~ : String?)
@@ -38,7 +38,7 @@ pub fn ThinkingLevels::resolve(
   match level {
     None => Disabled
     Some(name) =>
-      // pi resolves the provider value as `map[level] ?? level`, so a level the
+      // upstream resolves the provider value as `map[level] ?? level`, so a level the
       // catalog maps to null falls back to the level name rather than to off.
       match self.map.get(name) {
         Some(Some(effort)) => Enabled(effort=Some(effort))
@@ -69,7 +69,7 @@ pub fn deepseek_v4_flash_context_window() -> Int {
 ///|
 /// The most the model will emit in one response, from the same catalog.
 ///
-/// Not sent as `max_tokens`: pi does not send it either (the captured request
+/// Not sent as `max_tokens`: upstream does not send it either (the captured request
 /// bodies have no such field), so it is only a bound to reason about.
 pub fn deepseek_v4_flash_max_tokens() -> Int {
   384000
@@ -169,7 +169,7 @@ fn text_or_image(block : Content) -> Json? {
 ///|
 /// The assistant's visible text: only non-blank text blocks, concatenated.
 ///
-/// pi sends this as a plain string rather than an array of parts. Sending the
+/// upstream sends this as a plain string rather than an array of parts. Sending the
 /// array form causes some models to mirror the block structure back in their
 /// output.
 fn assistant_text(content : Array[Content]) -> String {
@@ -186,7 +186,7 @@ fn assistant_text(content : Array[Content]) -> String {
 ///|
 /// Reasoning text, joined across blocks, or `None` when there is nothing to
 /// send. Blank-only thinking is dropped, since an empty `reasoning_content`
-/// carries no information and pi omits it in that case (setting it only when
+/// carries no information and upstream omits it in that case (setting it only when
 /// the replay contract requires the key to be present at all).
 fn assistant_reasoning(content : Array[Content]) -> String? {
   let parts : Array[String] = []
@@ -265,7 +265,7 @@ fn tool_result_text(content : Array[Content]) -> String {
 ///
 /// A plain string unless the result actually carries an image.
 ///
-/// The string form is the default for a reason: it is what pi sends, it is what every recorded
+/// The string form is the default for a reason: it is what upstream sends, it is what every recorded
 /// request fixture pins byte for byte, and it is what DeepSeek's own examples use. Breaking that on
 /// every tool call to serve the occasional screenshot would churn the prompt — and the prompt
 /// *prefix*, which is what the provider's cache is keyed on.
@@ -417,7 +417,7 @@ pub(all) struct RequestSpec {
 /// Render one tool in the wire format.
 ///
 /// `strict: false` is always sent: DeepSeek supports strict schema sampling, and
-/// pi includes the flag whenever the provider does, defaulting it to false for
+/// upstream includes the flag whenever the provider does, defaulting it to false for
 /// tools that do not opt in. Omitting it would be rejected as an unknown-shape
 /// request by some gateways. A tool that opts into strict sampling would need
 /// its schema rewritten too, which none of the built-in tools do.

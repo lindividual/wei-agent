@@ -11,7 +11,7 @@
 /// through the ordinary `read` tool only when a task matches one. Loading every body into the
 /// system prompt would spend the tokens on skills the turn never uses.
 ///
-/// The format is pi's, so a skill written for pi works here unchanged. Parsing is pure: it
+/// The format is upstream's, so a skill written for upstream works here unchanged. Parsing is pure: it
 /// takes the text of a file and a path to name it by, and touches nothing else, which is why
 /// it is testable without a filesystem.
 
@@ -97,7 +97,7 @@ pub fn parse_skill_header(text : String, path : String) -> Skill? {
 /// byte-for-byte what it was before skills existed, so a machine that has none pays nothing —
 /// not even a changed prefix that would invalidate a cached prompt.
 ///
-/// The XML shape is pi's, which is the Agent Skills convention, and the escaping is not
+/// The XML shape is upstream's, which is the Agent Skills convention, and the escaping is not
 /// optional: a description is arbitrary text from a file, and one containing `<` must not
 /// turn into markup the model reads as structure.
 pub fn skill_catalog_prompt(skills : Array[Skill]) -> String {
@@ -304,7 +304,7 @@ fn xml_escape(text : String) -> String {
 /// chooses, which matters when the model's judgement is not what you want: a skill the reader
 /// knows is relevant should not depend on a one-line description persuading anyone.
 ///
-/// The syntax and the expansion are pi's, so a habit formed there works here: `/skill:<name>`
+/// The syntax and the expansion are upstream's, so a habit formed there works here: `/skill:<name>`
 /// with optional text after it. The name is the frontmatter `name`, not the directory, and the
 /// block carries the file's location so relative references inside it keep working.
 
@@ -342,7 +342,7 @@ pub fn is_skill_list_command(text : String) -> Bool {
 ///|
 /// A skill's instruction file with its frontmatter removed, and newlines normalized.
 ///
-/// pi's `stripFrontmatter`, reproduced deliberately rather than approximated: the frontmatter is
+/// upstream's `stripFrontmatter`, reproduced deliberately rather than approximated: the frontmatter is
 /// what the catalog read, and re-sending it to the model spends tokens on YAML it has already
 /// been told the meaning of. The exact rules are its rules —
 ///
@@ -375,7 +375,7 @@ pub fn strip_skill_frontmatter(text : String) -> String {
 }
 
 ///|
-/// One skill's body, framed as the block pi sends.
+/// One skill's body, framed as the block upstream sends.
 ///
 /// `<skill name="…" location="…">` with the preamble about relative references, because a skill
 /// bundle is a directory of documents and the body may well say `./reference.md`. The location is
@@ -383,10 +383,10 @@ pub fn strip_skill_frontmatter(text : String) -> String {
 /// `/skill:pdf-report from the numbers in data.csv` reads as the skill plus an instruction rather
 /// than two unrelated paragraphs.
 ///
-/// The two attribute values are escaped. pi does not escape them, and escaping is a strict
+/// The two attribute values are escaped. upstream does not escape them, and escaping is a strict
 /// improvement: a name is arbitrary text from a file, and one containing a quote would otherwise
 /// end the attribute and turn the rest of the name into markup the model reads as structure. For
-/// an ordinary name the output is byte-identical to pi's.
+/// an ordinary name the output is byte-identical to upstream's.
 pub fn skill_expansion(skill : Skill, body : String, args : String) -> String {
   // Escaped into locals first: an interpolation placed immediately after an escaped quote is
   // easy to misread, and an unescaped attribute here is exactly the bug this function must not
@@ -414,7 +414,7 @@ pub fn skill_expansion(skill : Skill, body : String, args : String) -> String {
 ///|
 /// The directory a skill's relative references resolve against: the one holding its instruction
 /// file. For a bundle that is `<name>/`, for a flat skill the directory it sits in — which is what
-/// pi calls the skill's base directory, and the same directory `read` was told to resolve against
+/// upstream calls the skill's base directory, and the same directory `read` was told to resolve against
 /// in the catalog prompt.
 pub fn skill_dir(skill : Skill) -> String {
   parent_of(skill.path)

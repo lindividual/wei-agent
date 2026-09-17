@@ -46,7 +46,7 @@ async test "settings round trip through a file" {
 ///|
 async test "a corrupt settings file decodes to the empty settings" {
   let home = settings_scratch()
-  make_dirs("\{home}/.pi-mb")
+  make_dirs("\{home}/.wei")
   write_text(settings_path(home), "this is not json\n")
   let loaded = load_settings(home)
   assert_eq(loaded.saved_api_key, "")
@@ -59,5 +59,5 @@ async test "a corrupt settings file decodes to the empty settings" {
 
 ///|
 test "the settings file sits beside the session store" {
-  assert_eq(settings_path("/home/u"), "/home/u/.pi-mb/settings.json")
+  assert_eq(settings_path("/home/u"), "/home/u/.wei/settings.json")
 }

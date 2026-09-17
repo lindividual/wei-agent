@@ -19,7 +19,7 @@ extern void moonbit_runtime_init(int argc, char **argv);
 extern void moonbit_init(void);
 // The entry point, defined in `app.mbt`. Runs on the host's worker thread and does not
 // return until the app is asked to quit.
-extern void pi_run(void);
+extern void wei_run(void);
 
 typedef struct Message {
   char *text;
@@ -33,10 +33,10 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 // ── called from the host ───────────────────────────────────────────────────
 
-void pi_shell_boot(int32_t argc, const char **argv) {
+void wei_boot(int32_t argc, const char **argv) {
   // A host that has no arguments — a GUI app, say — should not have to invent an argv just to
   // satisfy the runtime, which reads the program name out of it.
-  static const char *fallback[] = { "pi-shell", NULL };
+  static const char *fallback[] = { "wei", NULL };
   if (argv == NULL) {
     argc = 1;
     argv = fallback;
@@ -45,7 +45,7 @@ void pi_shell_boot(int32_t argc, const char **argv) {
   moonbit_init();
 }
 
-void pi_shell_post(const char *text, int32_t len) {
+void wei_post(const char *text, int32_t len) {
   if (text == NULL || len <= 0) {
     return;
   }
@@ -76,7 +76,7 @@ void pi_shell_post(const char *text, int32_t len) {
 
 // Copies the oldest message into `buffer`, or returns 0 when there is none. The queue
 // hands over its own copy, so the caller never sees a buffer it does not own.
-int32_t pi_shell_recv(uint8_t *buffer, int32_t capacity) {
+int32_t wei_recv(uint8_t *buffer, int32_t capacity) {
   if (buffer == NULL || capacity <= 0) {
     return 0;
   }

@@ -4,7 +4,7 @@
 #
 #     macos/make-app.sh [debug|release]        → macos/dist/wei Agent.app   (default: release)
 #
-# What this does that `swift run PiShell` does not:
+# What this does that `swift run WeiShell` does not:
 #
 #   - the icon, the version and the identifier, which a bare executable cannot carry — a bare
 #     executable in the Dock is a generic document icon with a name taken from its file;
@@ -30,10 +30,10 @@ esac
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MACOS="$ROOT/macos"
-SHELL_DIR="$MACOS/PiShell"
+SHELL_DIR="$MACOS/WeiShell"
 DIST="$MACOS/dist"
 # The bundle is named for what Finder shows: an app's name in the Dock and in the Finder is its *file*
-# name, so `CFBundleDisplayName` alone would leave a file called `pi.app` behind a window titled
+# name, so `CFBundleDisplayName` alone would leave a file called `upstream.app` behind a window titled
 # "wei Agent". The product is one name everywhere or it is two names.
 NAME="wei Agent"
 APP="$DIST/$NAME.app"
@@ -48,7 +48,7 @@ VERSION="${VERSION:-0.0.0}"
 # The identifier is reversed-DNS by convention and this one is a placeholder: a real release sets it
 # to a domain the project controls, because changing it later is what makes macOS forget which app a
 # document or a saved window belongs to.
-BUNDLE_ID="${PI_SHELL_BUNDLE_ID:-io.github.lindividual.wei-agent}"
+BUNDLE_ID="${WEI_BUNDLE_ID:-io.github.lindividual.wei-agent}"
 
 echo "==> MoonBit side ($PROFILE)"
 "$MACOS/build-moonbit.sh" "$PROFILE"
@@ -61,7 +61,7 @@ LOG="$(mktemp)"
 # else is a real build message and is printed. Quietly, because a packaging step that prints a
 # thousand lines of link warnings is a step whose real errors nobody reads. The build's own exit
 # status is what decides: a failure here prints everything it said and stops.
-if ! swift build -c "$PROFILE" --product PiShell >"$LOG" 2>&1; then
+if ! swift build -c "$PROFILE" --product WeiShell >"$LOG" 2>&1; then
   cat "$LOG"
   rm -f "$LOG"
   echo "swift build failed" >&2
@@ -69,14 +69,14 @@ if ! swift build -c "$PROFILE" --product PiShell >"$LOG" 2>&1; then
 fi
 grep -v "^ld: warning: object file" "$LOG" | grep -v "^$" || true
 rm -f "$LOG"
-BIN_DIR="$(swift build -c "$PROFILE" --product PiShell --show-bin-path)"
-BINARY="$BIN_DIR/PiShell"
-# Removed and rebuilt rather than trusted: SwiftPM has no idea that `libpiweb.a` changed — the archive
+BIN_DIR="$(swift build -c "$PROFILE" --product WeiShell --show-bin-path)"
+BINARY="$BIN_DIR/WeiShell"
+# Removed and rebuilt rather than trusted: SwiftPM has no idea that `libwei.a` changed — the archive
 # is MoonBit's output, in MoonBit's build directory, and nothing in the package graph points at it —
 # so a MoonBit-side change can leave the old executable in place while reporting a successful build.
 # The symptom is the worst kind: the app behaves exactly like the version before the fix.
 rm -f "$BINARY"
-swift build -c "$PROFILE" --product PiShell >>"$LOG" 2>&1 || {
+swift build -c "$PROFILE" --product WeiShell >>"$LOG" 2>&1 || {
   cat "$LOG"
   echo "swift build failed" >&2
   exit 1

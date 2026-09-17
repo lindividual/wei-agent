@@ -36,7 +36,7 @@ pub fn script_max_output_bytes() -> Int {
 pub fn script_prelude() -> String {
   (
     #|// ── prelude ──────────────────────────────────────────────────────────────
-    #|// Provided by pi-web-shell. Do not redefine these; call them.
+    #|// Provided by wei. Do not redefine these; call them.
     #|
     #|/// Names of files under `dir`, skipping build output and VCS metadata.
     #|pub async fn list(dir : String) -> Array[String] {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rename every name this project invented for itself from `pi*` to `wei*`.
+# Rename every name this project invented for itself from `upstream*` to `wei*`.
 #
 # Run from the repository root of a *copy*: it rewrites files in place and moves
 # directories with `git mv`, so it wants a tree it is allowed to change.
@@ -9,9 +9,9 @@
 #
 # Deliberately NOT touched here — these point at the upstream project, not at us,
 # and are handled by hand or left alone:
-#   ~/.pi/agent/...        pi's credential store, skills and model catalogue
-#   @earendil-works/pi-*   the oracle the fixture generators import
-#   "pi's rule", "from pi" comments that record where a number was copied from
+#   ~/.upstream/agent/...        upstream's credential store, skills and model catalogue
+#   @earendil-works/upstream-*   the oracle the fixture generators import
+#   "upstream's rule", "from upstream" comments that record where a number was copied from
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -23,24 +23,24 @@ fi
 
 # ── 1. moves ───────────────────────────────────────────────────────────────
 
-# The module's CLI package: `moon run pi` → `moon run wei`.
+# The module's CLI package: `moon run upstream` → `moon run wei`.
 git mv pi wei
 
 # The Swift package, and the targets inside it.
-git mv macos/PiShell macos/WeiShell
-git mv macos/WeiShell/Sources/PiShell macos/WeiShell/Sources/WeiShell
-git mv macos/WeiShell/Sources/PiModel macos/WeiShell/Sources/WeiModel
-git mv macos/WeiShell/Sources/PiKit macos/WeiShell/Sources/WeiKit
-git mv macos/WeiShell/Sources/PiShellC macos/WeiShell/Sources/WeiShellC
-git mv macos/WeiShell/Sources/pi-shell-cli macos/WeiShell/Sources/wei-cli
-git mv macos/WeiShell/Tests/PiModelTests macos/WeiShell/Tests/WeiModelTests
-git mv macos/WeiShell/Tests/PiShellTests macos/WeiShell/Tests/WeiShellTests
+git mv macos/WeiShell macos/WeiShell
+git mv macos/WeiShell/Sources/WeiShell macos/WeiShell/Sources/WeiShell
+git mv macos/WeiShell/Sources/WeiModel macos/WeiShell/Sources/WeiModel
+git mv macos/WeiShell/Sources/WeiKit macos/WeiShell/Sources/WeiKit
+git mv macos/WeiShell/Sources/WeiShellC macos/WeiShell/Sources/WeiShellC
+git mv macos/WeiShell/Sources/wei-cli macos/WeiShell/Sources/wei-cli
+git mv macos/WeiShell/Tests/WeiModelTests macos/WeiShell/Tests/WeiModelTests
+git mv macos/WeiShell/Tests/WeiShellTests macos/WeiShell/Tests/WeiShellTests
 
 # Files whose *name* carries the old brand.
-git mv macos/WeiShell/Sources/WeiShell/PiShellApp.swift macos/WeiShell/Sources/WeiShell/WeiApp.swift
-git mv macos/WeiShell/Sources/WeiKit/PiClient.swift macos/WeiShell/Sources/WeiKit/ShellClient.swift
-git mv macos/WeiShell/Sources/WeiShellC/PiShellC.c macos/WeiShell/Sources/WeiShellC/WeiShellC.c
-git mv macos/WeiShell/Sources/WeiShellC/include/PiShellC.h macos/WeiShell/Sources/WeiShellC/include/WeiShellC.h
+git mv macos/WeiShell/Sources/WeiShell/WeiApp.swift macos/WeiShell/Sources/WeiShell/WeiApp.swift
+git mv macos/WeiShell/Sources/WeiKit/ShellClient.swift macos/WeiShell/Sources/WeiKit/ShellClient.swift
+git mv macos/WeiShell/Sources/WeiShellC/WeiShellC.c macos/WeiShell/Sources/WeiShellC/WeiShellC.c
+git mv macos/WeiShell/Sources/WeiShellC/include/WeiShellC.h macos/WeiShell/Sources/WeiShellC/include/WeiShellC.h
 
 # ── 2. substitutions ───────────────────────────────────────────────────────
 

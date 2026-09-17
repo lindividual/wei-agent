@@ -20,18 +20,18 @@ macos/make-app.sh                   # → macos/dist/wei Agent.app
 open "macos/dist/wei Agent.app"
 
 # 2. 开发循环：改一次跑一次，不打包
-macos/build-moonbit.sh release      # → macos/vendor/libpiweb.a
-cd macos/PiShell && swift run PiShell
+macos/build-moonbit.sh release      # → macos/vendor/libwei.a
+cd macos/WeiShell && swift run WeiShell
 
 # 3. 终端：同一套 agent，打的是线上字节，没有窗口
-cd macos/PiShell && swift run pi-shell-cli
-cd macos/PiShell && swift test       # 线格式（PiModel）+ 边界本身（PiShellTests，真 boot runtime）
+cd macos/WeiShell && swift run wei-cli
+cd macos/WeiShell && swift test       # 线格式（WeiModel）+ 边界本身（WeiShellTests，真 boot runtime）
 ```
 
 ```
 macos/appffi/       MoonBit：agent + 会话 + 会话列表 + 设置 + 事件出口（这一层是新的）
-macos/build-moonbit.sh  把上面那个包编译成 host 能链接的 libpiweb.a
-macos/PiShell/      Swift：窗口、三栏（Projects / Sessions / 对话）、设置面板、边界
+macos/build-moonbit.sh  把上面那个包编译成 host 能链接的 libwei.a
+macos/WeiShell/      Swift：窗口、三栏（Projects / Sessions / 对话）、设置面板、边界
 macos/make-icon.swift   图标（画出来的，不是提交进来的）
 macos/make-app.sh       打包成 .app（图标、Info.plist、签名）
 ```
@@ -57,7 +57,7 @@ MoonBit 侧的测试是 `moon test macos/appffi --target native`。
 宿主手上有两样东西是 Web 版没有的：一份「我看到过的全部事件」的记忆，和一个**它没看过**的会话。
 
 - 自己开的会话，逐步重放事件就对了 —— 它本来就是这么画出来的。
-- 换过去的会话（以及 `PI_SHELL_SESSION` 恢复的那个），事件早就发生完了，宿主一条都没收到。
+- 换过去的会话（以及 `WEI_SESSION` 恢复的那个），事件早就发生完了，宿主一条都没收到。
   所以 `history` 事件发的是**行**，不是 delta：整段对话一行 JSON，每行都是 `complete`。
 
 行而不是事件，是因为历史没有时间：把一段已经结束的对话重放成一串 delta，是在编造一个所有事情
@@ -85,17 +85,17 @@ MoonBit 的 async 是单线程协作式的，它需要一个线程来跑事件�
 macOS 需要主线程跑自己的事件循环。**两者不能是同一个线程**，所以：
 
 ```
-主线程                        pi-agent 线程
+主线程                        wei-agent 线程
   NSApplication run loop         @async.run_async_main
   SwiftUI 渲染                     turn / HTTP / 工具进程
        │                                 │
-       │  pi_shell_post(文本)             │  pi_shell_emit(JSON 行)
+       │  wei_post(文本)             │  wei_emit(JSON 行)
        └──────────► inbox.c 队列 ─────────┘
 ```
 
 - 命令往一个方向走：C 里的队列 + pthread mutex。C 是因为它要跨线程加锁，而且 host 的字节
   不是 MoonBit 引用，不能当引用碰。
-- 事件往另一个方向走：`pi_shell_emit` 在 MoonBit 侧是 FFI、在 host 侧由你自己定义。
+- 事件往另一个方向走：`wei_emit` 在 MoonBit 侧是 FFI、在 host 侧由你自己定义。
   这个方向没有锁，因为 `Emit` 在 Swift 里拿一把。
 - 命令循环是**轮询**的（50ms），不是被唤醒的。唤醒需要一个 pipe 加一个注册到事件循环上的
   reader，那是第二个线程和第二种失败模式，换来的是一个已经足够快的按键。空队列时轮询是两个
@@ -132,7 +132,7 @@ macOS 需要主线程跑自己的事件循环。**两者不能是同一个线程
 
 `md/` 是 cmark —— **和 Web 版渲染用的是同一个引擎**，这是它作为共享包存在的全部理由：两个前端
 对同一段 markdown 要有同一个意见。Swift 侧只负责画：`Block`/`Span` 的 tagged JSON 在
-`PiModel/Sidebar.swift` 里解码，`RootView.swift` 里逐种块画（表格、围栏、列表、引用各自成视图）。
+`WeiModel/Sidebar.swift` 里解码，`RootView.swift` 里逐种块画（表格、围栏、列表、引用各自成视图）。
 
 ## 答案里的图：范围由 shell 判，字节由宿主读
 
@@ -140,7 +140,7 @@ macOS 需要主线程跑自己的事件循环。**两者不能是同一个线程
 loader，破图框比一句话更糟」）的正面回答：宿主**有** loader 了 —— 和附件缩略图同一套解码。
 
 **能画什么，只在 `md/walk.mbt` 里判一次**（`drawable_image`），宿主只负责「这条目标该怎么读」
-（`PiModel/Picture.swift`，有单测）。判两次是这个仓库里已经写下来的失败形状（宿主一份格式清单、
+（`WeiModel/Picture.swift`，有单测）。判两次是这个仓库里已经写下来的失败形状（宿主一份格式清单、
 shell 一份），所以不判第二次：
 
 | 目标 | 画不画 | 为什么 |
@@ -171,12 +171,12 @@ shell 一份），所以不判第二次：
 macos/make-app.sh release           # → macos/dist/wei Agent.app（约 3.7MB）
 ```
 
-打包前会 `rm` 掉旧的宿主可执行文件再重建：SwiftPM 不知道 `vendor/libpiweb.a` 变了（那个归档不在
+打包前会 `rm` 掉旧的宿主可执行文件再重建：SwiftPM 不知道 `vendor/libwei.a` 变了（那个归档不在
 依赖图里），所以 MoonBit 侧改完之后它可能报「构建成功」而留下旧二进制 —— 症状是最坏的一种：App 的
 行为和修复前一模一样。
 
 脚本做四件事：跑 `build-moonbit.sh`，`swift build -c release`，组装 bundle（可执行文件改名叫
-`pi`，写 `Info.plist`，生成图标），最后 `codesign --sign -`。
+`wei`，写 `Info.plist`，生成图标），最后 `codesign --sign -`。
 
 几个决定：
 
@@ -186,13 +186,13 @@ macos/make-app.sh release           # → macos/dist/wei Agent.app（约 3.7MB�
   谁都不能改的二进制；写成几行 CoreGraphics，改个颜色就是改一行。
 - **版本号读 `moon.mod`。** 打包脚本自带一个版本常量，就是一个没人记得改的数字。
 - **签名是 ad-hoc 的**（`codesign --sign -`），够本机跑，也够诚实地说明「别人从网上下载会被
-  Gatekeeper 挡住」。真要发布得换成 Developer ID 加公证；`PI_SHELL_BUNDLE_ID` 环境变量可以
+  Gatekeeper 挡住」。真要发布得换成 Developer ID 加公证；`WEI_BUNDLE_ID` 环境变量可以
   覆盖 bundle id，因为 identifier 一旦变了，macOS 就会忘记哪个 App 对应哪个文档/窗口。
 
 **为什么必须打包，而不只是「方便」**：`.app` 是一个身份 —— 名字、图标、一个稳定不变的
 identifier，以及 `LSApplicationCategoryType` 这类让系统知道它是什么的东西。裸可执行文件在
 Dock 里是一个通用文档图标，名字取自文件名，`applicationShouldTerminateAfterLastWindowClosed`
-之类的行为也没有立场。`PiShellApp.swift` 里那句 `setActivationPolicy(.regular)` 就是给裸二进制
+之类的行为也没有立场。`WeiApp.swift` 里那句 `setActivationPolicy(.regular)` 就是给裸二进制
 写的补丁，打包之后它是 no-op。
 
 **Working directory 的坑**：双击启动的 `.app`，cwd 是 `/` —— Finder 不传目录，内核默认是根。
@@ -269,8 +269,8 @@ Dock 里是一个通用文档图标，名字取自文件名，`applicationShould
 
 ```
 Projects             Sessions                    （对话）
-[Search all sessions]│ pi-web-shell  7 sessions
-folder pi-web-shell 7│ Today
+[Search all sessions]│ wei  7 sessions
+folder wei 7│ Today
                       │   macos 版还缺少… ◐
                       │ Previous 30 Days
                       │   优化一下 macos 端…
@@ -402,7 +402,7 @@ folder pi-web-shell 7│ Today
   `What it did`（web UI 的兜底文案）。
 - **正在跑的那一轮不折**：要展开才能看它在干什么的折叠，会在每一轮被开合一次。
 
-规则在 `PiModel/Turns.swift`（纯函数，10 条测试），视图只负责画。
+规则在 `WeiModel/Turns.swift`（纯函数，10 条测试），视图只负责画。
 
 ### 浏览 ≠ 打开 —— 这是三栏带来的**新**状态
 
@@ -584,15 +584,15 @@ GUI 什么都不打印，所以 app 出问题时（面板一直转、窗口一�
 「回答没回来」，还是「回答回来了但视图没用它」—— 这三种症状长得一模一样。
 
 ```bash
-PI_SHELL_DEBUG=/tmp/pi-wire.log open "macos/dist/wei Agent.app"
-tail -f /tmp/pi-wire.log
+WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
+tail -f /tmp/wei-wire.log
 ```
 
 两个方向各一行，`→` 是宿主发的，`←` 是 MoonBit 发的。`/key` 的内容会被替换成
 `<42 characters>`，长度留着（「字段本不该是空的」正是看日志要找的那类事）。默认关闭：一个没被要求
 就在旁边写日志的文件是意外，而且里面会有 user 的 prompt。
 
-`pi-shell-cli` 打的是同一条线（不脱敏，它本来就是干这个的），所以两者对照着看能分辨「MoonBit 没发」
+`wei-cli` 打的是同一条线（不脱敏，它本来就是干这个的），所以两者对照着看能分辨「MoonBit 没发」
 和「Swift 没收到」。
 
 ## 还有一类高频失败：exec 的字段名
@@ -612,7 +612,7 @@ tools mode 跑了很久的会话切到 code mode 后，历史里全是 `bash` �
 ## 设计规范
 
 **`docs/design-system.md`** 是这一套的规格：颜色、字体、间距、圆角、材质、组件。它和代码是同一些数字 ——
-token 在 `macos/PiShell/Sources/PiModel/Design.swift`（值，可测）和 `macos/PiShell/Sources/PiShell/Design.swift`
+token 在 `macos/WeiShell/Sources/WeiModel/Design.swift`（值，可测）和 `macos/WeiShell/Sources/WeiShell/Design.swift`
 （`Color` / `Font` / 浮层），`DesignTests` 把能算的部分算出来。
 
 它存在的原因是具体的：写之前窗口里有 **11 个字号**和 **14 个间距值**，那不是尺度是历史。
@@ -652,7 +652,7 @@ Composer(draft: $draft, onSend: { client.send(draft); draft = "" })
 
 ```
 key return, draft=[first]        ← 处理器确实被调用了
-PiClient.send text=[] trimmed=[] ← 传给 shell 的是一个空串
+ShellClient.send text=[] trimmed=[] ← 传给 shell 的是一个空串
 onSend returned, draft=[first]   ← 而且没清掉
 ```
 
@@ -671,19 +671,19 @@ client.send(text)
 **引用类型或 binding 本身**，不是读它们的闭包。
 
 - `swift build` 会刷一屏 `was built for newer 'macOS' version` 的警告：MoonBit 用本机 SDK
-  编译 `libpiweb.a`，而 Swift 包声明的最低版本更低。是警告，不是错误。
+  编译 `libwei.a`，而 Swift 包声明的最低版本更低。是警告，不是错误。
 - 归档要手动重建：改了 `macos/appffi/` 得再跑一次 `build-moonbit.sh`，SwiftPM 不知道它。
   更阴的一点是 SwiftPM 也可能不重链：`touch` 一个 Swift 文件未必让可执行文件重链，于是新的
   `.a` 被写着旧二进制。症状是「MoonBit 侧明明改了，线上没变」。`rm` 掉可执行文件再 build 一定对。
-  已经踩到两次的产品：`PiShellPackageTests.xctest`（`touch` 测试文件也没用，得 `rm -rf` 那个
-  `.xctest`）和 `pi-shell-cli`。两者的症状一模一样：**旧的 shell 用旧的线格式回答，于是新加的字段
+  已经踩到两次的产品：`WeiShellPackageTests.xctest`（`touch` 测试文件也没用，得 `rm -rf` 那个
+  `.xctest`）和 `wei-cli`。两者的症状一模一样：**旧的 shell 用旧的线格式回答，于是新加的字段
   在日志里根本不存在** —— 这比报错难查，因为一切看起来都在正常工作。`swift test` 里那条真启 runtime
   的测试就是为这一类事存在的。
-- **`PiClient` 和 `pi_shell_set_emit` 是一件事**，写第二条就等于把 app 弄成聋子：宿主装了 reader
-  却没在 C 侧注册回调时，`emit_sink` 是 NULL，每一行都被丢掉，而 `pi_shell_emit` 不报错。症状是
-  「窗口起来、什么都不发生」。现在 `Emit.install` 同时做这两件事，`PiShellTests` 里有一条真启
+- **`ShellClient` 和 `wei_set_emit` 是一件事**，写第二条就等于把 app 弄成聋子：宿主装了 reader
+  却没在 C 侧注册回调时，`emit_sink` 是 NULL，每一行都被丢掉，而 `wei_emit` 不报错。症状是
+  「窗口起来、什么都不发生」。现在 `Emit.install` 同时做这两件事，`WeiShellTests` 里有一条真启
   runtime 的测试守着它（把那段注册删掉，测试会以 `state=starting` 失败）。
-- `swift run PiShell` 是裸可执行文件，不是 .app。`AppDelegate` 里那句
+- `swift run WeiShell` 是裸可执行文件，不是 .app。`AppDelegate` 里那句
   `setActivationPolicy(.regular)` 就是为它写的 —— 否则有窗口、没菜单栏、不聚焦，看起来像卡死。
   真正打包时它是个 no-op。
 
@@ -705,7 +705,7 @@ delta 到达 ──────────────► 不变（关键：内
 发出提问 ───────────────► 恢复跟随
 ```
 
-规则本身在 `PiModel/ScrollFollow.swift`，可测；视图只负责两件它该负责的事：量（几何）和听
+规则本身在 `WeiModel/ScrollFollow.swift`，可测；视图只负责两件它该负责的事：量（几何）和听
 （`NSEvent` 的本地滚动监视器 —— SwiftUI 14 上没有「用户滚了」的回调，而测量分不出「读者在动」
 和「内容在长」，那正是这条规则的全部内容）。
 
@@ -763,7 +763,7 @@ Kill、以及本会话十个槽位里少一个。`call_open` 正是「这次调�
 
 行 id 也因此变成**每会话**的：两个会话都可能把自己的第一块叫 `reply-1-1`。这在「一次只看一份」的时候完全没事，一旦某份的重放能落进另一份就出事了 —— 所以 `session` 不是可选的。
 
-**host 侧**（`PiClient`）从「一份转录」变成「**每会话一份转录** `transcripts`」：事件按 `session` 分派，屏幕上那份进 `conversation`，其余进各自的。切过去是**换一份**，不是重新开始 —— 所以一个正在流式输出的 turn，切走再切回来，**半截答案还在**，接着长。
+**host 侧**（`ShellClient`）从「一份转录」变成「**每会话一份转录** `transcripts`」：事件按 `session` 分派，屏幕上那份进 `conversation`，其余进各自的。切过去是**换一份**，不是重新开始 —— 所以一个正在流式输出的 turn，切走再切回来，**半截答案还在**，接着长。
 
 **历史只发一次。** `show` 对一个**没见过**的会话发 `history`，对一个**见过**的只发 `say_show`（会话 + 用量 + 模型 + 附件）。原因是硬的：跑着的 turn 的行在 host 上、还没进 shell 那份 `session`，重放日志会**用更少的覆盖掉更多的** —— 读者看到的就是「切回来那一轮的回答没了」。
 
@@ -775,7 +775,7 @@ Kill、以及本会话十个槽位里少一个。`call_open` 正是「这次调�
 
 ### 怎么验的
 
-假模型（本地 SSE，`SLOW` 就慢速流）+ `pi-shell-cli`，一份 `cp` 出来的 scratch store，**永远不碰 `~/.pi-mb/sessions/`**（见 `docs/macos-pitfalls.md` 里那条纪律）。三种场景各跑一遍：
+假模型（本地 SSE，`SLOW` 就慢速流）+ `wei-cli`，一份 `cp` 出来的 scratch store，**永远不碰 `~/.wei/sessions/`**（见 `docs/macos-pitfalls.md` 里那条纪律）。三种场景各跑一遍：
 
 ```
 concurrent    A 跑着 → 切 B → B 也跑 → 两条流按 session 交替到达 → 切回 A
@@ -785,7 +785,7 @@ switch-back   离开 A 半截 → B 问一句 → 切回 A：A 的 delta 一直�
 
 侧边栏那一行也确实据此打点：切到 B 时侧边栏是 `['AAAA!', 'BBBB*']` —— A 在后台跑。
 
-host 侧的分派有单元测试（`PiShellTests/TranscriptRoutingTests.swift`）：拿 wire 字面量直接驱动 `PiClient.receive`，断言「B 的回答没落进 A」「切回来半截答案还在」「不在看的那份被留着而不是丢掉」。
+host 侧的分派有单元测试（`WeiShellTests/TranscriptRoutingTests.swift`）：拿 wire 字面量直接驱动 `ShellClient.receive`，断言「B 的回答没落进 A」「切回来半截答案还在」「不在看的那份被留着而不是丢掉」。
 
 ## 停止，和换一个会话
 
@@ -817,10 +817,10 @@ host 侧的分派有单元测试（`PiShellTests/TranscriptRoutingTests.swift`�
 实测（`/tmp` → `/private/tmp`）：
 
 ```
-/new-in /tmp/pi-ws/target
-→ session cwd = /private/tmp/pi-ws/target
-→ status    = workspace added: /private/tmp/pi-ws/target
-→ store 里只有一个 --private-tmp-pi-ws-target-- 切片
+/new-in /tmp/wei-ws/target
+→ session cwd = /private/tmp/wei-ws/target
+→ status    = workspace added: /private/tmp/wei-ws/target
+→ store 里只有一个 --private-tmp-wei-ws-target-- 切片
 ```
 
 另外三件事：
@@ -837,7 +837,7 @@ host 侧的分派有单元测试（`PiShellTests/TranscriptRoutingTests.swift`�
 
 技能在 macOS 侧原来只有一半：设置面板能开关它们，但**调用那条路根本没有** —— 输入 `/skill:demo`
 会被当成普通消息原样发给模型（`/skill:demo …` 的原文），而 `/skill` 那个「这里有什么」的问题，答案
-是弹出一个设置面板。pi 的语法、展开、framing 都在 `core`（`skill_command_parts` /
+是弹出一个设置面板。技能的语法、展开、framing 都在 `core`（`skill_command_parts` /
 `skill_expansion`）和 `platform`（`expand_skill_command`）里，Web 版一直在用 —— 缺的只是「谁决定
 调用它们」。
 
@@ -847,7 +847,7 @@ host 侧的分派有单元测试（`PiShellTests/TranscriptRoutingTests.swift`�
 |---|---|
 | `/skill:demo 做那件事` | 展开成技能自己的文本（带 `location`，所以技能内部的相对路径还能用）+ 读者原话跟在后面，**作为 user 消息**写入日志 |
 | `/skill` 或 `/skill:` | 就地回答：一行一个 `/skill:<名字> — 描述`，**不开 turn**、不花钱 |
-| `/skill:不存在` | 原样发给模型（pi 的行为）。三种情况共用一个 `None`：不是技能命令、没有这个名字、文件已被删 |
+| `/skill:不存在` | 原样发给模型（其他前端的行为）。三种情况共用一个 `None`：不是技能命令、没有这个名字、文件已被删 |
 
 两点值得记下来：
 

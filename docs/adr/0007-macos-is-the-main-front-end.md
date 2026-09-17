@@ -76,10 +76,10 @@ submit、`Group` 装不了 `Section`、嵌套 `Section` 会遮蔽平台类型）
 **要付的代价**
 
 - **「两个前端必须一致」这个验证机制变弱了。** 原来它是真的在干活：两侧各自钉住同一批 JSON 字面量
-  （`macos/appffi/app_wbtest.mbt` ↔ `macos/PiShell/Tests/PiModelTests`），改一个字段名而只改一边，挂的是一个构建。
-  这对**线格式**仍然成立（契约测试还在，`pi-shell-cli` 还是那股线上的第二个消费者），但「同一段
+  （`macos/appffi/app_wbtest.mbt` ↔ `macos/WeiShell/Tests/WeiModelTests`），改一个字段名而只改一边，挂的是一个构建。
+  这对**线格式**仍然成立（契约测试还在，`wei-cli` 还是那股线上的第二个消费者），但「同一段
   markdown 两边画得一样」这类**观感**上的一致性检查没有了。以后 `md/` 或事件字段的改动，要靠契约
-  测试和 `pi-shell-cli` 兜，不能靠「反正 Web 版也会发现」。
+  测试和 `wei-cli` 兜，不能靠「反正 Web 版也会发现」。
 - `core/` 「不许碰 IO」这条硬约束的重要性上升了：它以前由两个后端（js/wasm-gc 的 `moon check`）
   守着，现在它是**唯一**那条把内核和界面分开的线。
 - `html/`、`server/`、`ui/` 会慢慢腐烂。看到它们的代码时默认它可能已经过时。

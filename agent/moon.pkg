@@ -1,6 +1,6 @@
 import {
-  "lindividual/pi-web-shell/core",
-  "lindividual/pi-web-shell/platform",
+  "lindividual/wei/core",
+  "lindividual/wei/platform",
   "moonbitlang/async",
   "moonbitlang/core/env",
   "moonbitlang/core/json",

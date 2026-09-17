@@ -1,7 +1,7 @@
 ///|
 /// The tests assert on the JSON, not on the value, because the JSON is the contract: the host
 /// decodes these names, and a rename here that the host does not know about is two builds that
-/// disagree about the same answer. `macos/PiShell/Tests/PiModelTests/SidebarTests.swift` pins the
+/// disagree about the same answer. `macos/WeiShell/Tests/WeiModelTests/SidebarTests.swift` pins the
 /// same literals from the consuming side.
 
 ///|

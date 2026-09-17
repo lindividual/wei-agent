@@ -61,7 +61,7 @@ async fn run_script(probe : Probe, cwd : String) -> (Int, String) {
     Some(text) => text
     None => abort("no such script: \{probe.name}")
   }
-  let dir = @fs.tmpdir(prefix="pi-mb-scriptcheck")
+  let dir = @fs.tmpdir(prefix="wei-scriptcheck")
   let path = "\{dir}/script.mbtx"
   @fs.write_file(
     path,

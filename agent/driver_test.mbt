@@ -404,7 +404,7 @@ async test "a tool that fails does not end the turn" {
 ///
 /// The distinction is what a resumed session depends on: an `error` assistant
 /// message reads as a broken connection and invites retrying work the user
-/// deliberately cancelled. pi writes `aborted`, and this is the one place the
+/// deliberately cancelled. upstream writes `aborted`, and this is the one place the
 /// driver can know it — the stop is decided by the caller, mid-stream.
 async test "a stopped stream is logged as aborted" {
   let dir = scratch("abort")
@@ -463,7 +463,7 @@ async test "a stopped stream is logged as aborted" {
 /// This is the whole compaction path in one test: the decision (`should_compact`),
 /// the cut, the extra model call, the entry that records it, and — the part that
 /// would be easiest to get wrong — the framing the next request uses. A summary
-/// replayed without pi's `<summary>` wrapper is a summary the model cannot tell
+/// replayed without upstream's `<summary>` wrapper is a summary the model cannot tell
 /// apart from something the user said.
 async test "a long conversation is compacted before the next call" {
   let dir = scratch("compact")

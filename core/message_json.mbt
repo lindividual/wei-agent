@@ -26,7 +26,7 @@ fn obj(fields : Array[(String, Json)]) -> Json {
 
 ///|
 /// Build an object while dropping absent keys. Field order follows the array,
-/// which the callers keep aligned with pi's own ordering.
+/// which the callers keep aligned with upstream's own ordering.
 fn obj_opt(fields : Array[(String, Json?)]) -> Json {
   let out : Array[(String, Json)] = []
   for entry in fields {

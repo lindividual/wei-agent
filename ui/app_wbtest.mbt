@@ -99,7 +99,6 @@ fn test_app_in(home : String) -> App {
     key_source: "environment",
     key_hint: "k",
     env_key: "k",
-    pi_key: None,
     env_key_set: true,
     settings: @core.AppSettings::new(),
     settings_lock: @async.Mutex(),
@@ -781,9 +780,9 @@ test "the transcript marks its session without inviting a switch" {
 /// its own project-local skills, so the answer cannot be global.
 async test "skills are loaded once per working directory" {
   let home = "_build/app_skill_test/\{@core.new_entry_id()}"
-  @platform.make_dirs("\{home}/.pi/agent/skills/demo")
+  @platform.make_dirs("\{home}/.wei/skills/demo")
   @platform.write_text(
-    "\{home}/.pi/agent/skills/demo/SKILL.md",
+    "\{home}/.wei/skills/demo/SKILL.md",
     "---\nname: demo\ndescription: A skill for tests.\n---\n",
   )
   let app = test_app_in(home)
@@ -807,9 +806,9 @@ async test "skills are loaded once per working directory" {
 /// without a rescan, because the file never moved.
 async test "a disabled skill leaves the catalog the model receives" {
   let home = "_build/app_skill_test/\{@core.new_entry_id()}"
-  @platform.make_dirs("\{home}/.pi/agent/skills/demo")
+  @platform.make_dirs("\{home}/.wei/skills/demo")
   @platform.write_text(
-    "\{home}/.pi/agent/skills/demo/SKILL.md",
+    "\{home}/.wei/skills/demo/SKILL.md",
     "---\nname: demo\ndescription: A skill for tests.\n---\n",
   )
   let app = test_app_in(home)
@@ -926,14 +925,14 @@ async test "the panel and the prompt agree about the instructions" {
 /// the skills of *that* directory rather than of wherever the server started.
 async test "the settings panel describes the displayed session's workspace" {
   let home = "_build/app_skill_test/\{@core.new_entry_id()}"
-  @platform.make_dirs("\{home}/.pi/agent/skills/global-one")
+  @platform.make_dirs("\{home}/.wei/skills/global-one")
   @platform.write_text(
-    "\{home}/.pi/agent/skills/global-one/SKILL.md",
+    "\{home}/.wei/skills/global-one/SKILL.md",
     "---\nname: global-one\ndescription: Everywhere.\n---\n",
   )
-  @platform.make_dirs("/tmp/project/.pi/skills/local-one")
+  @platform.make_dirs("/tmp/project/.wei/skills/local-one")
   @platform.write_text(
-    "/tmp/project/.pi/skills/local-one/SKILL.md", "---\nname: local-one\ndescription: Only in the project.\n---\n",
+    "/tmp/project/.wei/skills/local-one/SKILL.md", "---\nname: local-one\ndescription: Only in the project.\n---\n",
   )
   let app = test_app_in(home)
   let runner = runner_at("/store/a.jsonl", 0)
@@ -1534,9 +1533,9 @@ test "opening a session reports why its last turn ended" {
 /// directory that was just added.
 async test "a skill can be switched off before any turn has run" {
   let home = "_build/app_skill_apply/\{@core.new_entry_id()}"
-  @platform.make_dirs("\{home}/.pi/agent/skills/demo")
+  @platform.make_dirs("\{home}/.wei/skills/demo")
   @platform.write_text(
-    "\{home}/.pi/agent/skills/demo/SKILL.md",
+    "\{home}/.wei/skills/demo/SKILL.md",
     "---\nname: demo\ndescription: A skill for tests.\n---\n",
   )
   let app = test_app_in(home)
@@ -1564,9 +1563,9 @@ async test "a skill can be switched off before any turn has run" {
 /// not take.
 async test "command hints list enabled skills only" {
   let home = "_build/app_hints_test/\{@core.new_entry_id()}"
-  @platform.make_dirs("\{home}/.pi/agent/skills/demo")
+  @platform.make_dirs("\{home}/.wei/skills/demo")
   @platform.write_text(
-    "\{home}/.pi/agent/skills/demo/SKILL.md",
+    "\{home}/.wei/skills/demo/SKILL.md",
     "---\nname: demo\ndescription: A skill for tests.\n---\n",
   )
   let app = test_app_in(home)

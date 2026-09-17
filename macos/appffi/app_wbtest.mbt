@@ -3,7 +3,7 @@
 ///
 /// These assert on the JSON rather than on a log or a golden file, and they are the only place the
 /// field names exist twice: the host decodes them by name, so a rename here that the host does not
-/// know about is a pair of builds that disagree. `macos/PiShell/Tests` pins the same names from the
+/// know about is a pair of builds that disagree. `macos/WeiShell/Tests` pins the same names from the
 /// consuming side, and between them the contract has no unwatched edge.
 
 ///|
@@ -164,7 +164,7 @@ test "a session's id is the last part of its file name" {
     short_id("/store/--tmp--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl"),
     "01a02d4c",
   )
-  // A file that is not named the way pi names them still gets an id rather than a crash.
+  // A file that is not named the way upstream names them still gets an id rather than a crash.
   assert_eq(short_id("/tmp/plain.jsonl"), "plain")
   assert_eq(short_id("/tmp/nothing"), "nothing")
 }
@@ -251,10 +251,6 @@ test "the settings event names the key source and never the key" {
     key_source_name(Some({ key: "sk-secret", source: @core.Saved, })),
     content="saved",
   )
-  inspect(
-    key_source_name(Some({ key: "sk-secret", source: @core.Pi, })),
-    content="pi",
-  )
   inspect(key_source_name(None), content="none")
 }
 
@@ -298,7 +294,7 @@ test "the panel's commands parse to what they say" {
 ///|
 /// The settings event as the host's decoder sees it, pinned from the producing side.
 ///
-/// The same literal `PiModelTests/SettingsTests.swift` decodes. `path` is the one field a reader acts
+/// The same literal `WeiModelTests/SettingsTests.swift` decodes. `path` is the one field a reader acts
 /// on when they would rather edit the file, so it is asserted rather than left to the schema.
 test "settings carry the key source, the flags, the mode and the file" {
   let json = event("settings", [
@@ -306,11 +302,11 @@ test "settings carry the key source, the flags, the mode and the file" {
     ("env", Json::boolean(true)),
     ("saved", Json::boolean(true)),
     ("mode", Json::string("code")),
-    ("path", Json::string("/Users/me/.pi-mb/settings.json")),
+    ("path", Json::string("/Users/me/.wei/settings.json")),
   ])
   inspect(
     json.stringify(),
-    content="{\"kind\":\"settings\",\"key\":\"environment\",\"env\":true,\"saved\":true,\"mode\":\"code\",\"path\":\"/Users/me/.pi-mb/settings.json\"}",
+    content="{\"kind\":\"settings\",\"key\":\"environment\",\"env\":true,\"saved\":true,\"mode\":\"code\",\"path\":\"/Users/me/.wei/settings.json\"}",
   )
 }
 
@@ -701,8 +697,8 @@ test "an empty jobs event is still an event" {
 /// A pasted image is disposed of by the shell, once, and only when it was told to.
 test "temporary attachments are deleted, kept ones are not" {
   assert_true(
-    command_of("/attach-temp /tmp/pi-pasted/paste-1.png")
-    is AttachTemp("/tmp/pi-pasted/paste-1.png"),
+    command_of("/attach-temp /tmp/wei-pasted/paste-1.png")
+    is AttachTemp("/tmp/wei-pasted/paste-1.png"),
   )
   assert_true(command_of("/attach-temp") is AttachTemp(""))
   assert_true(command_of("/attach /tmp/keep.png") is Attach("/tmp/keep.png"))
@@ -836,7 +832,8 @@ test "the bare skill command is recognised, and prose is not" {
 test "new-in keeps the path whole, and a bare one is not a prompt" {
   assert_true(command_of("/new-in /Users/me/src") is NewIn("/Users/me/src"))
   assert_true(
-    command_of("/new-in /Users/me/my work/pi") is NewIn("/Users/me/my work/pi"),
+    command_of("/new-in /Users/me/my work/wei")
+    is NewIn("/Users/me/my work/wei"),
   )
   // A chooser prints a trailing separator; the shell's `canonical_dir` settles both forms into one.
   assert_true(command_of("/new-in /Users/me/src/") is NewIn("/Users/me/src/"))

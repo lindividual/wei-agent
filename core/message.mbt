@@ -1,7 +1,7 @@
 ///|
 /// One block inside a message's `content` array.
 ///
-/// The shapes mirror pi's session file format exactly; `message_json.mbt` is
+/// The shapes mirror upstream's session file format exactly; `message_json.mbt` is
 /// the only place that translates between these and JSON.
 pub(all) enum Content {
   /// Plain text.
@@ -42,7 +42,7 @@ pub(all) struct Usage {
 } derive(Eq, Debug)
 
 ///|
-/// Per-model token pricing in USD per million tokens, mirroring how pi stores
+/// Per-model token pricing in USD per million tokens, mirroring how upstream stores
 /// `model.cost`. Cache reads are billed separately and are far cheaper than
 /// fresh input on providers that support prompt caching.
 pub(all) struct Pricing {
@@ -55,7 +55,7 @@ pub(all) struct Pricing {
 ///|
 /// Fill in `cost` from a price table.
 ///
-/// pi supports tiered pricing (a second rate above a token threshold); DeepSeek
+/// upstream supports tiered pricing (a second rate above a token threshold); DeepSeek
 /// has a single tier, so the simpler form is implemented here. The tier case can
 /// be added when a model actually needs it.
 pub fn Usage::with_cost(self : Usage, pricing : Pricing) -> Usage {
@@ -85,7 +85,7 @@ pub fn Usage::zero() -> Usage {
     cache_read: 0,
     cache_write: 0,
     // Absent rather than zero: before a provider reports usage there is no
-    // reasoning count, and pi's own default omits the field entirely.
+    // reasoning count, and upstream's own default omits the field entirely.
     reasoning: None,
     total_tokens: 0,
     cost: {
@@ -129,7 +129,7 @@ pub(all) struct UserMessage {
 } derive(Eq, Debug)
 
 ///|
-/// The optional fields are the ones pi itself writes conditionally: a message
+/// The optional fields are the ones upstream itself writes conditionally: a message
 /// that came from a cache hit has no `responseId`, an aborted turn has no
 /// `responseModel`, and so on. They are kept optional so a round trip does not
 /// invent fields.

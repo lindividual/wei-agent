@@ -9,7 +9,7 @@
 //   "moonbitlang/x@0.4.6",
 // }
 
-name = "lindividual/pi-web-shell"
+name = "lindividual/wei"
 
 version = "0.1.0"
 

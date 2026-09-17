@@ -5,8 +5,8 @@
 /// for its arguments, and how it may be scheduled. The bodies live in `platform/`
 /// because they touch the filesystem and spawn processes.
 ///
-/// The descriptions, parameter names, and required lists are copied from pi's
-/// definitions verbatim. They are prompt text that pi has tuned, and matching them
+/// The descriptions, parameter names, and required lists are copied from upstream's
+/// definitions verbatim. They are prompt text that upstream has tuned, and matching them
 /// means a model sees the same tool it would see there — as well as making the two
 /// directly comparable.
 ///
@@ -81,7 +81,7 @@ fn array_prop(items : Json, description : String) -> Json {
 ///|
 /// An object schema.
 ///
-/// No `additionalProperties: false`: pi does not set it either, and rejecting a
+/// No `additionalProperties: false`: upstream does not set it either, and rejecting a
 /// parameter the model was never told about produces a confusing error rather
 /// than a correction.
 fn object_schema(
@@ -96,7 +96,7 @@ fn object_schema(
 }
 
 ///|
-/// Output limits, matching pi's so truncation behaves identically.
+/// Output limits, matching upstream's so truncation behaves identically.
 pub fn default_max_lines() -> Int {
   2000
 }
@@ -215,7 +215,7 @@ fn edit_tool() -> ToolDef {
 }
 
 ///|
-/// Named `glob` rather than pi's `find`; the parameter schema is pi's.
+/// Named `glob` rather than upstream's `find`; the parameter schema is upstream's.
 fn glob_tool() -> ToolDef {
   {
     name: "glob",
@@ -289,7 +289,7 @@ fn grep_tool() -> ToolDef {
 ///|
 /// Record a fact the agent wants kept verbatim across compaction.
 ///
-/// This one has no counterpart in pi, which relies on the summarization prompt
+/// This one has no counterpart in upstream, which relies on the summarization prompt
 /// asking the model to preserve paths and decisions. That is a request; a note is
 /// the model choosing to make something durable, and `facts.mbt` appends notes to
 /// every summary without passing them through the model again.

@@ -22,7 +22,7 @@ fn view() -> SettingsView {
     base_url: "https://api.deepseek.com",
     context_window: 1000000,
     address: "127.0.0.1:8790",
-    store: "/home/u/.pi-mb/sessions",
+    store: "/home/u/.wei/sessions",
     cwd: "/work/proj",
     key_source: "saved",
     key_hint: "sk-a…1234",
@@ -367,7 +367,7 @@ test "the key panel names the provider, and the control asks for attention when 
 /// as the process resolved them — a store with a `~` still in it would be a lie.
 test "the panel reports the real paths and the real launch flags" {
   let html = render_settings(view()).render()
-  assert_true(html.contains("/home/u/.pi-mb/sessions"), msg=html)
+  assert_true(html.contains("/home/u/.wei/sessions"), msg=html)
   assert_true(html.contains("127.0.0.1:8790"), msg=html)
   assert_true(html.contains("/work/proj"), msg=html)
   assert_true(html.contains("--model"), msg="the model says how to change it")

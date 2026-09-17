@@ -1,13 +1,13 @@
 ///|
-/// Tool declarations checked against pi's.
+/// Tool declarations checked against upstream's.
 ///
 /// Descriptions and schemas are prompt text, so a drift here changes how the
 /// model behaves rather than merely failing a build.
 
 ///|
-test "tool declarations match pi" {
-  for entry in pi_tool_fixtures {
-    let (name, pi_name, description, parameters_text) = entry
+test "tool declarations match the recorded ones" {
+  for entry in upstream_tool_fixtures {
+    let (name, upstream_name, description, parameters_text) = entry
     let tool = match builtin_tool(name) {
       Some(t) => t
       None => fail("missing tool: \{name}")
@@ -15,22 +15,22 @@ test "tool declarations match pi" {
     assert_eq(
       tool.description,
       description,
-      msg="description of \{name} (pi: \{pi_name})",
+      msg="description of \{name} (upstream: \{upstream_name})",
     )
     assert_eq(
       tool.parameters,
       @json.parse(parameters_text),
-      msg="parameters of \{name} (pi: \{pi_name})",
+      msg="parameters of \{name} (upstream: \{upstream_name})",
     )
   }
 }
 
 ///|
-/// Every tool pi has must exist here with the same declaration. The reverse is
+/// Every tool upstream has must exist here with the same declaration. The reverse is
 /// not required: `note` is this project's addition.
-test "every pi tool has a counterpart here" {
+test "every upstream tool has a counterpart here" {
   let names : Array[String] = builtin_tools().map(t => t.name)
-  for entry in pi_tool_fixtures {
+  for entry in upstream_tool_fixtures {
     let (name, _, _, _) = entry
     assert_true(names.contains(name), msg="missing tool: \{name}")
   }
