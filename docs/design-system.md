@@ -115,28 +115,30 @@ pine 够暗（白底 5.86:1）所以浅色外观用它当 accent，mint 够亮�
 
 | token | 字号 | 职务 |
 |---|---|---|
-| `Size.title` | **20** | 列表栏标题、对话栏标题 |
+| `Size.title` | **20** | 对话栏标题（我们自己画的标题） |
 | `Size.body` | **15** | 内容：转录、通知、要读的段落 |
 | `Size.control` | **13** | 控件和列表行。**= `NSFont.systemFontSize`** |
-| `Size.caption` | **12** | 计数、时间、状态行、胶囊（含列表栏那个条数）。可读的下限 |
+| `Size.caption` | **12** | 计数、时间、状态行、胶囊。可读的下限 |
 | `Size.micro` | **11** | 紧贴图标的数字，不用于正文 |
 
 **三栏的层级**（「三栏字号看起来一样」就是这一条改的）：栏标题 20 / 会话行标题 15 / 行内时间与状态 12 /
 控件 13。
 
-**三个标题现在都是我们自己画的，都取 `title`(20)。** 这不总是如此：中间栏那一个原来是平台画的
-（`navigationTitle`），而**平台的标题字号没有 API 可设** —— `NSWindow` 只有 `title`/`subtitle` 两个字符串，
-AppKit 里没有任何 title font / attributed title，SwiftUI 的 `toolbarTitleDisplayMode` 文档原话是
-"This modifier has no effect on macOS"。量过：平台画的是 **13 semibold**（标题）和 **11**（计数），
-规范要 20。所以现在的做法是 `toolbar(removing: .title)` 把平台那枚去掉、自己画 —— 顺带把这一栏的
-「新建会话」按钮也放进了同一个 item（见 `macos/README.md`）。窗口仍然有名字（`navigationTitle` 还在），
-Window 菜单和辅助功能读到的照旧。
+**平台画的字不在这套 token 里，也改不了。** 窗口标题（中间栏那一行）是 `navigationTitle` /
+`navigationSubtitle` 画的，而**它的字号没有 API 可设**：`NSWindow` 只有 `title`/`subtitle` 两个字符串，
+AppKit 里没有任何 title font / attributed title，SwiftUI 的 `toolbarTitleDisplayMode` 文档明说
+"This modifier has no effect on macOS"。量出来平台用的是 **13 semibold**（标题）和 **11**（计数）。
+
+试过自己画（`toolbar(removing: .title)` + 自己的 item），**已回退**：那样画出来的是「窗口标题的照片」，
+Window 菜单 / Mission Control / 辅助功能读到的仍是平台那份，两处会不一致 —— 而当初要自己画的理由
+（把按钮放进这一栏）也不需要它：两个会话动作现在都在窗口尾端（见 `macos/README.md`）。
+
+所以那张表要这样读：**`title`(20) 指的是我们画的标题**（现在只有对话栏那一个），平台画的窗口标题不在其中。
 
 | 标题 | 谁画 | 字号 | 符合规范？ |
 |---|---|---|---|
-| 中间栏（列表栏）标题 | 我们 | `title` **20** semibold（实测宽 118.5pt，与标尺 20pt 的 118.5 完全一致） | ✅ |
-| 中间栏副标题（计数） | 我们 | `caption` **12**（它是「计数」，caption 的职务之一） | ✅ |
-| 对话栏标题 | 我们 | `title` **20** semibold | ✅ |
+| 中间栏（列表栏）标题 + 计数 | 平台 | 13 semibold / 11 | **不适用**：不是我们的 token，也改不了 |
+| 对话栏标题 | 我们 | `title` **20** semibold（实测宽 118.5pt，与标尺 20pt 的 118.5 一致） | ✅ |
 
 会话行的**标题**取 `body`(15) 而不是 `control`(13) —— 行是读者**挑**的内容，不是他们**操作**的控件，
 而且一个两行的行如果第一行和第二行一样大，就没有第一行。

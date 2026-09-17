@@ -102,10 +102,6 @@ struct RootView: View {
                 browsing: browsed,
                 sections: sections,
                 searching: searching,
-                // Handed down rather than recomputed: the window's title and the one drawn over this column
-                // are the same two strings, and two places computing one fact is how they drift apart.
-                title: sessionListTitle,
-                subtitle: sessionListSubtitle,
                 onBrowse: { browsing = $0 },
                 onRename: { startRenaming($0) }
             )
@@ -132,6 +128,7 @@ struct RootView: View {
             // elects the window's title and the detail column's is ignored. Verified by asking the window what
             // it was called (`NSWindow.title`, read from inside the process — no permission needed).
             .navigationTitle(sessionListTitle)
+            .navigationSubtitle(sessionListSubtitle)
         } detail: {
             ConversationView(
                 client: client,
@@ -481,10 +478,6 @@ private struct SessionList: View {
     /// and the query belongs to the window now (the field is in the workspace column), so this column is
     /// told it rather than deriving it from a binding it no longer holds.
     let searching: Bool
-    /// What this list is and how much of it there is — the window's own title and subtitle, drawn here
-    /// instead (see the `toolbar` below).
-    let title: String
-    let subtitle: String
     /// Called when a search result is clicked, so the first column can follow the reader into the project
     /// they just reached into — otherwise the two columns would disagree about where they are.
     let onBrowse: (String) -> Void
@@ -528,71 +521,13 @@ private struct SessionList: View {
         // No field here any more: the query spans every project, so its control lives in the workspace
         // column. What is left in this one is the list that query produces.
         list
-        // **The column's own action, in the column's own toolbar region.** Every control in this app
-        // appears over the column it acts on — Notes' arrangement, and the reason its three columns are
-        // legible from the titlebar alone. This button was in the detail column's toolbar, which put the
-        // one control that adds a row to *this* list over the transcript instead: the top of the window
-        // then read as two regions (a sidebar, and an everything-else that happened to be split), which
-        // is exactly what a reader of this window reported seeing.
-        //
-        // **Where this button cannot go, measured.** `.primaryAction` is not "this column's action" — it is
-        // the window's trailing edge, so the button sits over the *conversation* column (measured:
-        // `x=872…917` of 921) even though this column ends at 466. But `.navigation` here is not the fix
-        // either: it puts the button at this column's leading edge (`x=230…271`) and **the window's own
-        // title moves out of the way** — from `x=230…864` to `x=391…551`, i.e. out of the list column and
-        // over the boundary. That is not a preference to trade away: the title names the list, and it is
-        // over the list for that reason (see `macos/README.md`, "标题栏归中间那栏"). So the declaration
-        // stays here and the placement stays `.primaryAction`; what "over the column it acts on" means for
-        // this control is the toolbar's trailing edge, where every Mac app puts an add button for the
-        // thing the window is showing.
-        // **The platform's title item is removed and the title is drawn here instead.** Not a preference:
-        // there is no font for it. `NSWindow` carries `title`/`subtitle` as strings and nothing else — no
-        // attributed title, no title font anywhere in AppKit — and SwiftUI's `toolbarTitleDisplayMode` is
-        // documented as having no effect on macOS. So the size of the titlebar's own text is the system's,
-        // and the only way to set it is to draw the title yourself. Measured, the system drew it at 13
-        // where this window's scale says 20 (`docs/design-system.md`: `title` = 列表栏标题).
-        //
-        // `navigationTitle` stays: the window still has a name, so the Window menu, the window list and
-        // accessibility read what they always read.
-        //
-        // **One item holding everything this column needs in the bar**: the title, the count, and the
-        // button that adds a row to the list. That is what makes the button sit over *this* column —
-        // `.primaryAction` is the window's trailing edge (measured `x=872…917`, i.e. over the conversation
-        // column), and `.navigation` alone displaced the window's title out of the list column
-        // (`x=230…864` → `x=397…557`). With the platform title removed there is nothing to displace, and
-        // one item means the platform has no second item to re-flow the row around.
-        .toolbar(removing: .title)
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                HStack(spacing: Wei.Space.regular) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(title)
-                            .font(Wei.Font.title())
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        Text(subtitle)
-                            // A count, so `caption` — the token whose job is "计数、时间、状态行". The design
-                            // system's table lists 窗口副标题 under `title`, which is only true while the
-                            // platform is the one drawing it (at 11, as measured).
-                            .font(Wei.Font.caption())
-                            .foregroundStyle(Wei.Palette.secondary)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    // The glyph alone, as the toolbar drew it: a `Label` in a view of our own draws its
-                    // words too. The words stay as the accessible name and in the tooltip.
-                    Button {
-                        client.newSession()
-                    } label: {
-                        Image(systemName: "square.and.pencil")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("New session in this project (⌘N)")
-                    .accessibilityLabel("New Session")
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
+        // **And no toolbar of its own any more.** The button that adds a row to this list is at the window's
+        // trailing edge, in `ConversationView`'s toolbar, next to the one that renames the session on screen:
+        // `.primaryAction` is the window's trailing edge *whatever column declares it* (measured: `x=872…917`
+        // of 921), so declaring it here never put it over this column — and declaring it at this column's
+        // leading position (`.navigation`) displaced the window's own title out of the column
+        // (`x=230…864` → `x=397…557`). Two session actions on the window's right is the arrangement both
+        // measurements point at.
     }
 
     private var list: some View {
@@ -876,59 +811,70 @@ private struct ConversationView: View {
             /// soft behind the name as it scrolls under it.
             .safeAreaBar(edge: .top, alignment: .leading) {
                 if let name = sessionName {
-                    HStack(spacing: Wei.Space.cozy) {
-                        Text(name)
-                            .font(Wei.Font.title())
-                            // One line, and the end of it if it does not fit: a question can be long, and a
-                            // title that wraps to four lines is a title that has become the first paragraph.
-                            // The tail rather than the middle, so what the reader sees is how the question
-                            // *begins* — which is how they would recognize it in the list — and so the
-                            // ellipsis is where they expect one. The width has to be flexible for that:
-                            // truncation happens when there is a limit to truncate against.
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            // The whole question on hover, since the row may be showing a third of it.
-                            .help(name)
-                        // **Beside the name it changes.** It is the same dialog the row's own context menu
-                        // starts — one dialog, in `RootView`, because two copies is two places for the
-                        // wording and the button order to drift apart.
-                        // The glyph alone: a `Label` in a bar draws its words too, and a button reading
-                        // "Rename Session" next to the name it renames is a sentence where a control belongs.
-                        // The words stay as the accessible name.
-                        Button(action: onRename) {
-                            Image(systemName: "pencil")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Rename this session")
-                        .accessibilityLabel("Rename Session")
-                    }
-                    .padding(.leading, Wei.Space.section)
-                    // Room at the trailing end for the toolbar's own control, which is on this row once the
-                    // bar is lifted: measured, it occupies the last 49 points of the window.
-                    .padding(.trailing, Wei.Space.section + Self.titleClearance)
-                    .padding(.vertical, Wei.Space.tiny)
-                    // `offset` rather than padding: this moves what is *drawn* without changing the bar's
-                    // height, and the bar's height is what the first row of the conversation has to clear.
-                    .offset(y: -Self.titleLift)
-                    .background(
-                        GeometryReader { geometry in
-                            Color.clear.preference(
-                                key: ConversationTitleHeightKey.self,
-                                value: geometry.size.height
-                            )
-                        }
-                    )
+                    Text(name)
+                        .font(Wei.Font.title())
+                        // One line, and the end of it if it does not fit: a question can be long, and a title
+                        // that wraps to four lines is a title that has become the first paragraph. The tail
+                        // rather than the middle, so what the reader sees is how the question *begins* — which
+                        // is how they would recognize it in the list — and so the ellipsis is where they expect
+                        // one. The width has to be flexible for that: truncation happens when there is a limit
+                        // to truncate against.
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        // The whole question on hover, since the row may be showing a third of it.
+                        .help(name)
+                        .padding(.leading, Wei.Space.section)
+                        // Room at the trailing end for the toolbar's own buttons, which are on this row once the
+                        // bar is lifted: measured, they occupy the last 49 points of the window.
+                        .padding(.trailing, Wei.Space.section + Self.titleClearance)
+                            .padding(.vertical, Wei.Space.tiny)
+                        // `offset` rather than padding: this moves what is *drawn* without changing the bar's
+                        // height, and that height is what the first row of the conversation has to clear.
+                        .offset(y: -Self.titleLift)
+                        .background(
+                            GeometryReader { geometry in
+                                Color.clear.preference(
+                                    key: ConversationTitleHeightKey.self,
+                                    value: geometry.size.height
+                                )
+                            }
+                        )
                 }
             }
             .onPreferenceChange(ConversationTitleHeightKey.self) { height in
                 titleHeight = height
             }
-        // What this column's toolbar holds is **the name of what is in it and the pencil that renames it** —
-        // one control, over the thing it acts on. What used to be here instead — the running-jobs register and
-        // Settings — is in the workspace column, which is where the web UI keeps both and where they describe
-        // something that spans the window rather than this column: jobs run in *any* session, and settings
-        // belong to the app.
+        // **Both session actions live here, as ordinary toolbar items**: rename the one on screen, and start a
+        // new one. `.primaryAction` is the window's trailing edge *whatever column declares it* — measured, a
+        // button declared over the session list still lands at `x=872…917` of 921 — so this is where they go;
+        // and declaring them together keeps one row's arrangement in one place. Hand-drawn buttons in the bar
+        // above were tried for the pencil and reverted: a toolbar item is the platform's own control, with its
+        // own style, spacing and behaviour, and a second one does not squeeze the title out of its column any
+        // more now that the title is a drawn bar rather than a toolbar item.
+        //
+        // What used to be here instead — the running-jobs register and Settings — is in the workspace column,
+        // which is where the web UI keeps both and where they describe something that spans the window rather
+        // than this column: jobs run in *any* session, and settings belong to the app.
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    client.newSession()
+                } label: {
+                    Label("New Session", systemImage: "square.and.pencil")
+                }
+                .help("New session in this project (⌘N)")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: onRename) {
+                    Label("Rename Session", systemImage: "pencil")
+                }
+                .help("Rename this session")
+                // Nothing to rename until the store has listed the session: a session created a moment ago has
+                // no name yet, and a pencil that opened a dialog on nothing would be a lie.
+                .disabled(sessionName == nil)
+            }
+        }
     }
 
     /// What the session on screen is called: the reader's own name for it, else its first question, else
