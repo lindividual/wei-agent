@@ -723,6 +723,24 @@ private struct ConversationView: View {
     /// margin below the toolbar has to be told about it rather than recomputing it.
     @State private var titleHeight: CGFloat = 0
 
+    /// How far the title is lifted out of the bar's own row and onto the toolbar's centre line, so that the
+    /// name shares a row with the toolbar's controls instead of sitting a line below them.
+    ///
+    /// A safe-area bar is drawn *below* the toolbar, so sharing that row means moving the type up by the
+    /// toolbar's height less the half-line the platform centres its own items on. The same amount is given
+    /// back as bottom padding, so the bar's own height — and with it the clearance the first row of the
+    /// conversation needs — is unchanged. **Measured against a running window**: 46 puts the text's centre on
+    /// the toolbar's, 26, for this font at `Wei.Control.toolbar`. Re-measure if either changes.
+    private static let titleLift: CGFloat = 46
+
+    /// Room on the trailing side for the toolbar's own control.
+    ///
+    /// A toolbar item sits in the last stretch of its column, and this column ends where the session button
+    /// is: measured on a running window, that button occupies the last 49 points of the width. 64 clears it
+    /// with a gap on the 4-point grid — and it is also where a long name gets its ellipsis, which is why the
+    /// title is truncated rather than running underneath the button.
+    private static let titleTrailingInset: CGFloat = 64
+
     var body: some View {
         TranscriptView(
             conversation: client.conversation,
@@ -781,12 +799,20 @@ private struct ConversationView: View {
                 if let name = sessionName {
                     Text(name)
                         .font(Wei.Font.title())
-                        // One line, and the id of the file if it comes to that: a question can be long, and a
+                        // One line, and the end of it if it does not fit: a question can be long, and a
                         // title that wraps to four lines is a title that has become the first paragraph.
+                        // The tail rather than the middle, so what the reader sees is how the question
+                        // *begins* — which is how they would recognize it in the list — and so the
+                        // ellipsis is where they expect one.
                         .lineLimit(1)
-                        .truncationMode(.middle)
-                        .padding(.horizontal, Wei.Space.section)
-                        .padding(.vertical, Wei.Space.cozy)
+                        .truncationMode(.tail)
+                        // The width is the room there is, not the width of the words: this is what makes
+                        // the platform truncate, rather than the text being clipped by its neighbours.
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, Wei.Space.section)
+                        .padding(.trailing, Self.titleTrailingInset)
+                        .padding(.top, Wei.Space.cozy - Self.titleLift)
+                        .padding(.bottom, Wei.Space.cozy + Self.titleLift)
                         .background(
                             GeometryReader { geometry in
                                 Color.clear.preference(
@@ -795,6 +821,8 @@ private struct ConversationView: View {
                                 )
                             }
                         )
+                        // The whole question on hover, since the line above may be showing a third of it.
+                        .help(name)
                 }
             }
             .onPreferenceChange(ConversationTitleHeightKey.self) { height in

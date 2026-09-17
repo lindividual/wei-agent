@@ -97,6 +97,9 @@ PI_SHELL_DEBUG=/tmp/pi-wire.log open "macos/dist/wei Agent.app"
 | 看不见 `Settings…` 菜单项；或者想切设置窗左边的某一项，AX 里翻不到 | 主菜单在**主线程忙的时候还会重建**（启动早期能看到的菜单项，几秒后又一次 `NSApp.mainMenu` 就变了）；而列表行的 `AXPress` 返回 **-25206**（不支持该动作） | 菜单项拿不准就不要猜选择器（`sendAction(showSettingsWindow:)` 返回 `true` 却什么都不做）：按 desc 找主窗左下角那个 `Settings` 按钮按下去。切换左栏那一项用**设 `kAXSelectedAttribute`**（不是 `AXPress`） |
 | 想把窗口改小，好看清滚动边缘效果 | `kAXSizeAttribute` 写入返回 **-25200**（不可设） | 改小不行就换成**内容长的那一项**（Skills 会列一长串技能）再滚；或者去 `/tmp` 写一个只含布局的壳子（第六节） |
 | 把 `safeAreaBar` 的 bar 摆在 `ScrollView` 上面，第一行文字**和标题重叠** | `safeAreaBar` insets safe area，但挡住第一行的不是它 —— 是转录自己的 content margin，而那个数是从**窗口顶边**量的（`Wei.Control.toolbar`）。两个机制各懂一半 | bar 的实际高度量出来加进 content margin（`ConversationTitleHeightKey`），别写常数 |
+| 想把标题和工具条的按钮放成**同一行**，把标题放进 `ToolbarItem` | 工具条 item 的宽度是固定的：**长度超过可用宽度的 item 会被收进溢出菜单**（右端出现 `»`），并且把同一行其它 item 的位置挤乱 —— 长标题的结果是「标题不见了 + 按钮移位 + 多了个 chevron」，而不是省略号。顺带它还会破坏顶部那层边缘效果。见下一条 | 别往工具条里塞长文本：`safeAreaBar` 画在工具条下方（那样才有模糊和 inset），再把**文字**抬到工具条的中心线上（`ConversationView.titleLift`），抬起的量在下面补回去，bar 高度不变 |
+| 想让 `Text` 末尾出现省略号，写了 `lineLimit(1)` + `truncationMode(.tail)`，结果没有省略号 | 省略只发生在**宽度被约束**的时候：一个自然宽度的 `Text` 会要多少给多少，超出部分被邻居裁掉而不是变成 `…` | 加 `.frame(maxWidth: .infinity, alignment: .leading)`（或别的上限），让平台知道可用宽度是多少 —— 再用**尾部内边距**给它让开右边的按钮 |
+| 想量「标题在不在工具条那一行」，靠看截图估 | 截图能量，但估不准 | **读 AX 的 frame**：`axframe`（第六节）把整棵树连 `y=.. x=..` 打出来。工具条是 `AXToolbar y=0..52`，按钮 `x=872..917`，标题 `y=14..38` —— 两行是不是同一行，一眼就有数字 |
 | 想看「内容从 bar 下面穿过去被模糊」的效果，滚了半天没反应 | 那一栏的内容不够长，压根没有可滚的东西（设置面板的 API Key 那页就装得下） | 换内容长的一页（Skills）或长会话；也可以只写布局的壳子（第六节）。注意合成滚轮事件 `wheel1` 是 `Int32`：传负数给 `Int()` 再装回 `Int32` 会 crash（`Range requires lowerBound <= upperBound`） |
 | 改了「换会话」相关的代码，测完用户说他打了一半的字跟着跑 | 我**拿用户正在用的会话做了测试**，进程真的把新 turn 写进了他的日志 | **纪律**：测试先 `cp` 一份会话到临时目录，用 `PI_SHELL_SESSION` 指过去。永远不碰 `~/.pi-mb/sessions/` |
 | 手写一条 `.jsonl` 造演示会话，app 只回一句 `could not start: missing field: timestamp` —— 没有别的线索，看起来像 store 没发现、像路径不对、像编码不对 | `Entry::from_json` 要的**每一层都有 `timestamp`**：entry 一层，`message` 一层也是（真实日志里 assistant 的 message 自带 `timestamp`/`usage`/`model`/…）。只写 `role`+`content` 的 message 不是一条能读的记录 | 别手写：`cp` 一条真会话，**只替换 assistant 那条的 `content[].text`**，其余字段照搬（一轮就通）。再配 `PI_SHELL_SESSION=<那条文件的路径>` 直接打开它 —— 会话标题会变成它的 id，不必让 store 发现工作区 |
@@ -148,3 +151,11 @@ PI_SHELL_DEBUG=/tmp/pi-wire.log open "macos/dist/wei Agent.app"
   返回空表（同一个查询里有 `onscreen=true` 的窗口，只换 flag 却什么都拿不到）。
 - **演示一段对话不需要一行模型**：`cp` 一条真会话、换掉 assistant 的正文、`PI_SHELL_SESSION=` 指
   过去，窗口里就是那段对话。验证「答案里的图」这种纯渲染的事，这样一轮几秒钟，且不花 token。
+- **量布局用 AX 的 frame，不靠截图估**：`/tmp/pi-shell-probe/axframe <pid>` 把整棵 AX 树连
+  `y=.. x=..`（窗口相对坐标）打出来 —— 工具条是 `AXToolbar y=0..52`、按钮 `x=872..917`、
+  标题 `y=14..38`，于是「标题和按钮在不在同一行」是一个数字问题。同一套工具里还有：
+  `wininfo <pid>`（按 PID 列窗口号）、`axdump`（树，不带坐标）、`scroll <pid> x y ticks [delta]`
+  （**先把 app 置前**再发合成滚轮事件，否则事件穿过一个不活跃的窗口）、`axrow <pid> 'Tools'`
+  （设 `kAXSelectedAttribute` 切换设置面板左栏，行不支持 `AXPress`）、`axpress`（按主窗左下的
+  `Settings` 按钮）、`leftedge <png> y0:y1:label...`（量某条横带里最靠左的深色像素，用来对左边缘）。
+  它们都是十几行 Swift、`swiftc` 直接编，不用建工程。
