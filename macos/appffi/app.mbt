@@ -74,7 +74,67 @@ priv struct Open {
   /// next one to end — the log knows the totals, but nothing in it says which of them were the last
   /// turn's.
   mut last_turn : LastTurn
+  /// The tool this session's turn is running, and the way to stop it.
+  ///
+  /// **Kept because a stop has to reach the child process, and a flag cannot.** `aborting` is read by the
+  /// turn between steps, and the step in progress *is* the tool: a `bash` command asked to run a test suite
+  /// runs for minutes, and until this was kept, pressing Stop during one did nothing at all — the turn was
+  /// marked, and the reader waited for a command they had already asked to end. The handle is the driver's
+  /// own (it cancels the task the tool runs in, which is what escalates to killing the process), so this is
+  /// where it has to be held for a command arriving from the host to reach it.
+  ///
+  /// Cleared when the tool reports, and when the turn ends, so a stale handle cannot stop something else.
+  mut running_tool : @agent.ToolHandle?
+  /// The rendering of the block that is still arriving here.
+  ///
+  /// Kept because it is the one thing that makes live markdown affordable: every frame after the
+  /// first is a diff against what has already been sent, so the work is proportional to what is *new*
+  /// rather than to the length of the answer. See `LiveMarkdown`.
+  mut live : LiveMarkdown?
 }
+
+///|
+/// One growing block, and what the host has been told about it so far.
+///
+/// The rules that make this correct are worth stating, because they are what the two fields are for:
+///
+/// - the shell sends the host **suffixes** of a block's parse, each naming the index it starts at.
+///   `sent` is the shell's record of what those suffixes add up to, and `diff_prefix(sent, ...)` is
+///   how the next suffix is found.
+/// - the two sides therefore have to stay in step, which holds because the host keeps one transcript
+///   per session and the shell replays a session's history only for a host that has never seen it —
+///   and because nothing in the emit path drops a line. A `from` the host cannot apply is documented
+///   as a no-op on its side rather than as corruption.
+/// - `at_length` and `at_ms` are the two gates on how often a frame is worth sending at all. Both are
+///   needed: characters alone let a slow model's *every* delta pay for a parse, and time alone lets a
+///   fast one pile up a second of text and then send it all at once — which is a stall in the middle
+///   of a stream, the one thing streaming exists to avoid.
+priv struct LiveMarkdown {
+  /// The row this belongs to. A frame for one block is never diffed against another's.
+  id : String
+  /// Every block sent for this row so far, in order.
+  mut sent : Array[@md.Block]
+  /// The block's length when the last frame went out.
+  mut at_length : Int
+  /// When the last frame went out.
+  mut at_ms : UInt64
+}
+
+///|
+/// How long a growing block waits between frames.
+///
+/// Measured against what it costs: parsing the tail of a block is tens of microseconds, and a frame a
+/// pixel taller is what redraws the transcript. Six a second is under what a reader can see change,
+/// and it is the same cadence the web UI's flush timer landed on for the same reason.
+const LIVE_MARKDOWN_MS : UInt64 = 150
+
+///|
+/// How much new text makes a frame worth sending before the timer says so.
+///
+/// Without it, a model streaming one character at a time would still pay the parse on every delta
+/// that passed the clock — which is the case this whole feature is *not* for: a reader watches a
+/// block arrive a line at a time, not a character at a time.
+const LIVE_MARKDOWN_CHARS : Int = 64
 
 ///|
 /// Mark a session as no longer running a turn.
@@ -84,6 +144,32 @@ priv struct Open {
 /// raises, which is what a `defer` is for.
 fn clear_busy(open : Open) -> Unit {
   open.busy = false
+}
+
+///|
+/// Forget the tool this session's turn was running.
+///
+/// A closure because `defer` needs a value, for the same reason `clear_busy` is one.
+fn clear_running_tool(open : Open) -> Unit {
+  open.running_tool = None
+}
+
+///|
+/// Stop the command this session's turn is running, if there is one.
+///
+/// **The flag is not enough, and this is the whole of that.** `aborting` is read between steps, and the
+/// step in progress is the tool — so a reader who pressed Stop during a two-minute test suite watched it
+/// run to the end. Cancelling the task the tool runs in is what reaches the child process.
+///
+/// Taken rather than read, so that a second Stop — or one arriving after the tool has already reported —
+/// is a no-op instead of cancelling whatever the turn started next.
+fn stop_running_tool(open : Open) -> Unit {
+  let running = open.running_tool
+  open.running_tool = None
+  match running {
+    Some(handle) => (handle.stop)()
+    None => ()
+  }
 }
 
 ///|
@@ -105,6 +191,8 @@ fn Open::new(
     aborting: { val: false, },
     attached: [],
     last_turn: no_last_turn(),
+    running_tool: None,
+    live: None,
   }
 }
 
@@ -470,25 +558,182 @@ fn say_piece(path : String, kind : String, id : String, delta : String) -> Unit 
 ///|
 /// A block that has stopped growing, and how to draw it.
 ///
-/// The parse is sent when the block is over rather than with every delta, and the reason is the one
-/// the web UI paid for first: re-parsing a growing block on each frame is quadratic, and 40KB of
-/// reasoning arriving 64 characters at a time is the measurement. A row that is still arriving is
-/// plain text on the host, which is cheap and always right; this is what it becomes when it stops.
-///
 /// The shell does the parsing because the host cannot: `AttributedString(markdown:)` takes the source
 /// rather than a parse, so a table arrives as its own punctuation and a fenced block loses its
 /// language. `md/` is cmark — the same engine the web UI renders with — so both front ends have the
 /// same opinion about the same answer, which is the whole reason it is a shared package.
-fn say_blocks(path : String, id : String, text : String) -> Unit {
+///
+/// The parse is done here and *diffed*: the host keeps the blocks it has already been given, so what
+/// crosses is the part that changed. The web UI sent the whole block once, at the end, because a host
+/// that cannot keep a parse has to be given one; this one can, which is what makes rendering the
+/// answer while it arrives affordable.
+///
+/// This is called where a block stops being the newest thing that happened — a tool call, the other
+/// kind of text, or the end of the turn — which are exactly the moments the host stops appending to
+/// that row. It is the one parse of the whole block; everything before it was the tail.
+fn say_blocks(
+  path : String,
+  id : String,
+  text : String,
+  live : LiveMarkdown?,
+) -> Unit {
   if id == "" || text == "" {
     return
+  }
+  let blocks = @md.parse(text)
+  let from = match live {
+    Some(state) if state.id == id => @md.diff_prefix(state.sent, blocks)
+    _ => 0
+  }
+  say_blocks_from(path, id, from, blocks)
+}
+
+///|
+/// Blocks `from` onwards, for a row the host already has the head of.
+///
+/// `from` is the number of leading blocks the host is holding, and it is a protocol field rather than
+/// an implementation detail: a host that does not know about it would append the tail to a document
+/// it never received the head of. The field is therefore required to be understood, and a host that
+/// cannot apply it drops the frame rather than guessing (`WeiModel`'s `Conversation.apply`).
+///
+/// An **empty** tail is a real frame and is sent as one: it is how a block that turned out shorter
+/// than its own prefix is corrected. Nothing in the live path sends one — `live_frame` refuses a frame
+/// with nothing new — so this is the shape only the end of a block has.
+fn say_blocks_from(
+  path : String,
+  id : String,
+  from : Int,
+  blocks : Array[@md.Block],
+) -> Unit {
+  if id == "" {
+    return
+  }
+  let tail : Array[Json] = []
+  for index in from..<blocks.length() {
+    tail.push(blocks[index].to_json())
   }
   emit(
     session_event(path, "blocks", [
       ("id", Json::string(id)),
-      ("blocks", @md.blocks_json(text)),
+      ("from", Json::number(from.to_double(), repr=from.to_string())),
+      ("blocks", Json::array(tail)),
     ]),
   )
+}
+
+///|
+/// Refresh the rendering of a block that is still arriving.
+///
+/// Called on every delta and refused most of the time — see `LiveMarkdown` for the two gates — so the
+/// cost of a long answer is one parse every `LIVE_MARKDOWN_MS` of a block's *tail* rather than one
+/// parse of the whole of it per delta.
+///
+/// `length` is the block's length so far, counted as the deltas arrive rather than read off the
+/// buffer: materialising the whole of a growing block to ask how long it is would be the same
+/// quadratic the rest of this exists to avoid.
+fn live_blocks(
+  path : String,
+  open : Open,
+  text : StringBuilder,
+  length : Int,
+  now : UInt64,
+) -> Unit {
+  match open.live {
+    None => ()
+    Some(state) =>
+      // **The gate is asked before the string is built**, and the order is the difference between O(n)
+      // and O(n²): `to_string` on a growing buffer copies everything arrived so far, and a block that
+      // arrives in sixty-four character deltas would copy its own length hundreds of times. Refused
+      // frames are the common case — most deltas — so they must cost nothing.
+      if live_due(state, length, now) {
+        match live_frame(state, text.to_string(), length, now) {
+          Some(frame) => emit(session_event(path, "blocks", frame.fields()))
+          None => ()
+        }
+      }
+  }
+}
+
+///|
+/// Whether this delta is worth a frame at all.
+///
+/// Two gates, and both are needed. The clock alone would let a fast model pile up a second of text and
+/// then send it all at once — a stall in the middle of a stream, which is the one thing streaming
+/// exists to avoid. The size alone would make a slow model's every delta pay for a parse, and a model
+/// trickling out one character at a time is exactly the case this is *not* for.
+fn live_due(state : LiveMarkdown, length : Int, now : UInt64) -> Bool {
+  now - state.at_ms >= LIVE_MARKDOWN_MS ||
+  length - state.at_length >= LIVE_MARKDOWN_CHARS
+}
+
+///|
+/// One live frame, or nothing when it is too soon to be worth one.
+///
+/// The decision, the parse and the diff, separated from the emission so that they can be asserted:
+/// what a frame says is a fact about a protocol two builds share, and a fact that is worth a test is
+/// worth a function that can be called one.
+///
+/// Only the part up to the last blank line is parsed, and only the part that has changed is sent.
+/// Everything after that boundary is one block that is still being written, and what the reader has
+/// already read never moves — see `@md.safe_boundary`.
+fn live_frame(
+  state : LiveMarkdown,
+  source : String,
+  length : Int,
+  now : UInt64,
+) -> LiveFrame? {
+  // Recorded before the work: a frame that turns out to have nothing new in it still moves the clock,
+  // so the next delta is judged against *this* attempt rather than the last frame that happened to
+  // send something. Nothing is recorded on the other path — a refused delta is refused again next
+  // time, which is what makes the size gate work.
+  state.at_length = length
+  state.at_ms = now
+  let at = @md.safe_boundary(source)
+  let blocks = @md.parse(source[:at].to_owned())
+  let from = @md.diff_prefix(state.sent, blocks)
+  if from >= blocks.length() {
+    // Nothing new *finished*: the open block is still growing, and it is already on the host's
+    // screen as text. Sending it again would be a frame that redraws the same paragraph.
+    return None
+  }
+  state.sent = blocks
+  // The **tail**, not the whole parse: the host is holding the head, and a frame that repeated it
+  // would be applied as `head + head + tail`. The web UI's equivalent sent whole blocks because it
+  // had nothing to diff against; this path's whole point is that it does.
+  Some({ id: state.id, from, blocks: blocks[from:].to_owned(), })
+}
+
+///|
+/// What one live frame says.
+///
+/// The content and the framing, as separate things, because they fail separately: what a frame
+/// *means* is a rule about two documents agreeing, and it is asserted by replaying a block's deltas
+/// and comparing the result with one parse of the whole. How it is spelled on the wire is the `from`
+/// field and the tagged objects, and that is asserted against a literal.
+priv struct LiveFrame {
+  /// The row this is the rendering of. Named on every frame rather than once, because the host files
+  /// by it: a block's frames interleave with other blocks' in one stream, and a frame without an id
+  /// has nothing to be applied to.
+  id : String
+  /// How many leading blocks the host is holding.
+  from : Int
+  /// The blocks from `from` on — and only those. A frame carrying the whole parse would be applied
+  /// on the host as `head + head + tail`.
+  blocks : Array[@md.Block]
+}
+
+///|
+/// A frame as the wire carries it.
+fn LiveFrame::fields(self : LiveFrame) -> Array[(String, Json)] {
+  let tail : Array[Json] = []
+  for block in self.blocks {
+    tail.push(block.to_json())
+  }
+  [
+    ("id", Json::string(self.id)),
+    ("from", Json::number(self.from.to_double(), repr=self.from.to_string())),
+    ("blocks", Json::array(tail)),
+  ]
 }
 
 ///|
@@ -954,6 +1199,9 @@ async fn Shell::run_turn(
   // asked to quit mid-answer — comes out of it as one. `defer` takes a value and MoonBit has no
   // assignment expression, so the flag is cleared by a closure.
   defer clear_busy(open)
+  // A handle from this turn must not outlive it: the next turn's tools are different tools, and a stale one
+  // would let Stop cancel work that belongs to a reader's *next* question.
+  defer clear_running_tool(open)
   let path = open.path
   // A named skill becomes its own text here, before anything is echoed or written down.
   //
@@ -1031,12 +1279,18 @@ async fn Shell::run_turn(
   // be sent the moment it stops. A `StringBuilder` rather than `+`: a long answer arrives in hundreds
   // of frames, and repeated concatenation is the quadratic this path exists to avoid.
   let piece_text = StringBuilder()
+  // How much text the open block has, counted here rather than asked of the buffer: the two gates on
+  // a live frame are about how much has arrived, and reading that off a `StringBuilder` means
+  // building the string first.
+  let mut piece_length = 0
   // The open block is over: send its parse, and start the next one empty. Called where a block stops
   // being the newest thing that happened — a tool, the other kind of text, or the end of the turn —
   // which are exactly the moments the host stops appending to that row.
   let close_piece = () => {
-    say_blocks(path, piece_id, piece_text.to_string())
+    say_blocks(path, piece_id, piece_text.to_string(), open.live)
+    open.live = None
     piece_text.reset()
+    piece_length = 0
     piece_kind = ""
   }
   // A tool is one row from start to finish, so the id is chosen when it starts and reused when it
@@ -1053,6 +1307,18 @@ async fn Shell::run_turn(
     piece_seq += 1
     piece_id = row_id(kind, turn, piece_seq)
     piece_kind = kind
+    // A new block is a new parse. The host's row for this id starts with no blocks, so the state has
+    // to start with none sent — keeping the previous block's would make the first frame a suffix of
+    // a document the host never got the head of.
+    //
+    // **Only the answer gets one.** Reasoning is drawn as plain text by design, so a live parse of it
+    // would be work nobody draws — and `close_piece` reads this back to decide what to diff, so a
+    // state for a block that sent nothing live would be a diff against a document the host never got.
+    open.live = if kind == "reply" {
+      Some({ id: piece_id, sent: [], at_length: 0, at_ms: @env.now(), })
+    } else {
+      None
+    }
     piece_id
   }
   let on_delta : async (@core.StreamEvent) -> Unit = delta => {
@@ -1062,9 +1328,22 @@ async fn Shell::run_turn(
     }
     let id = if piece_kind == kind { piece_id } else { new_piece(kind) }
     piece_text.write_string(text)
+    piece_length += text.length()
     say_piece(path, kind, id, text)
+    // **Only the answer is rendered live.** Reasoning is drawn on the host as plain text by design —
+    // three lines of its tail while it arrives, a summary line once it stops — so a parse of it would
+    // be work nobody draws: the reasoning frames were a third of the live traffic in a measured run.
+    // Its *finished* parse still goes out, once, because that is the row's record of how to draw
+    // itself; see `close_piece`.
+    if kind == "reply" {
+      live_blocks(path, open, piece_text, piece_length, @env.now())
+    }
   }
   let on_tool_process : async (@agent.ToolHandle?) -> Unit = handle => {
+    // **The handle is kept, not just drawn.** It is the only thing that can stop the command the reader is
+    // watching, and `Abort` reads it — see `running_tool`. Set before the row goes out, so a stop that
+    // arrives while the row is being drawn still finds it.
+    open.running_tool = handle
     match handle {
       Some(running) => {
         tool_seq += 1
@@ -1598,6 +1877,13 @@ async fn Shell::serve(self : Shell) -> Unit {
             // Only the session on screen: stopping is something the reader does to the conversation
             // they are looking at, and a global flag would mean that stopping one stopped them all.
             open.aborting.val = true
+            // **And the command it is running is stopped now, not at the next step.** The flag is checked
+            // between steps and the step in progress is the tool, so with the flag alone a reader who
+            // pressed Stop during a two-minute test suite watched it run to the end. Cancelling the task
+            // the tool runs in is what reaches the child: the runtime escalates from `SIGTERM` to a kill,
+            // and the driver's own cancellation path kills whatever the command had started by pid.
+            //
+            stop_running_tool(open)
             say_status(open.path, "stopping…")
           }
           // Both read the question back out of the log rather than taking one from the host: the

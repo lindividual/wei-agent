@@ -120,6 +120,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <!-- Dictation reads the microphone, so the system asks the reader for it the first time the microphone
+       button is pressed, and shows this sentence as the reason. The sentence is the whole of the
+       argument the reader gets, so it says the two things that decide the answer: what it is for, and
+       that nothing leaves the machine. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>wei Agent uses the microphone only while you are dictating, and turns your speech into text on this Mac. Nothing is sent anywhere.</string>
   <key>NSHumanReadableCopyright</key>
   <string>Apache-2.0</string>
 </dict>

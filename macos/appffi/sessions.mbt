@@ -386,17 +386,27 @@ fn say_session(open : Open) -> Unit {
 }
 
 ///|
-/// Put a session on screen for a host that has never seen it: which one it is, and the whole of what is
-/// in it.
+/// Put a session on screen for a host that has never seen it: the whole of what is in it, then which
+/// one it is.
 ///
 /// The history is the part that is only ever sent once. A host keeps a transcript per session, so a
 /// session it has already been told about — or has been watching deltas of — needs no replay: sending
 /// one would *replace* a transcript that is more up to date than the log, because a running turn's rows
 /// are on the host and not yet in the session it is holding. That is not a hypothetical: it is what a
 /// reader would see as "the answer I was watching disappeared when I came back".
+///
+/// **The rows go first, and the order is load-bearing.** The host swaps which transcript it is showing
+/// when it hears *which session* is on screen, not when the rows arrive — so a host told "session C"
+/// before it has anything for C swaps to an **empty** transcript and draws that until the rows land.
+/// Measured on this machine, opening a 30MB session that way is a blank column for about 150ms (54ms
+/// parsing, 16ms encoding, then a 3.7MB line and 51ms of decoding it on the host's main thread), which
+/// is what a reader reported as "it goes white and I have to scroll". Sending the rows first makes the
+/// same swap land on a transcript that already has them: what the host does with rows for a session it
+/// is not showing is file them under that session, so the switch brings them in with it. One render
+/// instead of two.
 fn say_open(open : Open) -> Unit {
-  say_show(open)
   say_history(open.path, open.session)
+  say_show(open)
 }
 
 ///|

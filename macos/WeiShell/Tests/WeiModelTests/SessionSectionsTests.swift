@@ -45,13 +45,15 @@ final class SessionSectionsTests: XCTestCase {
         SessionGroup(cwd: cwd, label: label, current: false, sessions: rows)
     }
 
-    /// The everyday view: this afternoon, the last month, and then by month — descending.
+    /// The everyday view: this afternoon, yesterday, the week, the month, and then by month — descending.
     func testSessionsAreBucketedByRecency() {
         let sections = timeSections(
             rows: [
                 at(2026, 7, 3),  // today
                 at(2026, 7, 3, 9),
-                at(2026, 6, 20),  // within 30 days of 2026-07-03
+                at(2026, 7, 2),  // yesterday, one calendar day back
+                at(2026, 6, 30),  // six days back: inside the week
+                at(2026, 6, 20),  // inside 30 days, outside 7
                 at(2026, 6, 4),
                 at(2026, 5, 30),  // outside it: its own month
                 at(2026, 5, 2),
@@ -60,32 +62,51 @@ final class SessionSectionsTests: XCTestCase {
             now: now,
             calendar: calendar
         )
-        XCTAssertEqual(sections.map(\.title), ["Today", "Previous 30 Days", "May", "November 2025"])
-        XCTAssertEqual(sections.map(\.rows.count), [2, 2, 2, 1])
+        XCTAssertEqual(
+            sections.map(\.title),
+            ["Today", "Yesterday", "Previous 7 Days", "Previous 30 Days", "May", "November 2025"]
+        )
+        XCTAssertEqual(sections.map(\.rows.count), [2, 1, 1, 2, 2, 1])
     }
 
-    /// The boundaries themselves, because "previous 30 days" is exactly the kind of rule that is off by
-    /// one: 30 days back is *in*, 31 is out, and midnight this morning is still today.
+    /// The four boundaries themselves, because "previous 7 days" is exactly the kind of rule that is off
+    /// by one: the day itself is *in* and the day after it out, every boundary sits on the start of a
+    /// calendar day rather than on a rolling 24 hours, and midnight this morning is still Today.
     func testTheBoundariesAreInclusive() {
-        let thirtyDaysAgo = calendar.date(byAdding: .day, value: -30, to: calendar.startOfDay(for: now))!
-        let thirtyOneDaysAgo = calendar.date(byAdding: .day, value: -31, to: calendar.startOfDay(for: now))!
-        let midnight = calendar.startOfDay(for: now)
+        let start = calendar.startOfDay(for: now)
+        let midnight = start
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: start)!
+        let sevenDaysAgo = calendar.date(byAdding: .day, value: -7, to: start)!
+        let eightDaysAgo = calendar.date(byAdding: .day, value: -8, to: start)!
+        let thirtyDaysAgo = calendar.date(byAdding: .day, value: -30, to: start)!
+        let thirtyOneDaysAgo = calendar.date(byAdding: .day, value: -31, to: start)!
 
         let sections = timeSections(
             rows: [
                 row(midnight, "midnight"),
+                row(yesterday, "yesterday"),
+                row(sevenDaysAgo, "seven"),
+                row(eightDaysAgo, "eight"),
                 row(thirtyDaysAgo, "thirty"),
                 row(thirtyOneDaysAgo, "thirty-one"),
             ],
             now: now,
             calendar: calendar
         )
-        // The order the rows arrive in is the order they are kept in, and the headings are what place
-        // them: midnight is Today, 30 days ago is Previous 30 Days, 31 days ago is a month.
-        XCTAssertEqual(sections.map(\.title), ["Today", "Previous 30 Days", "June"])
+        // The order the rows arrive in is the order they are kept in, and the headings are what place them:
+        // midnight is Today, one day back is Yesterday, seven days back is still the week while eight is out,
+        // and 30 days back is still the month while 31 is a month name.
+        XCTAssertEqual(
+            sections.map(\.title),
+            ["Today", "Yesterday", "Previous 7 Days", "Previous 30 Days", "June"]
+        )
         XCTAssertEqual(sections[0].rows.map(\.label), ["midnight"])
-        XCTAssertEqual(sections[1].rows.map(\.label), ["thirty"])
-        XCTAssertEqual(sections[2].rows.map(\.label), ["thirty-one"])
+        XCTAssertEqual(sections[1].rows.map(\.label), ["yesterday"])
+        XCTAssertEqual(sections[2].rows.map(\.label), ["seven"])
+        // Two rows in one bucket, in arrival order: eight days back and thirty days back share a heading
+        // because there is nothing between them — the week is the *last* seven days, not a sliding one.
+        XCTAssertEqual(sections[3].rows.map(\.label), ["eight", "thirty"])
+        XCTAssertEqual(sections[4].rows.map(\.label), ["thirty-one"])
     }
 
     /// Rows arrive newest first and the sections keep that order without a sort — including when one row

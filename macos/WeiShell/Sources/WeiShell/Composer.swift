@@ -71,11 +71,43 @@ struct Composer: View {
 
     @FocusState private var editorFocused: Bool
     @State private var pickingFiles = false
+    @State private var sketching = false
     @State private var showingUsage = false
+
+    /// What dictation is doing, as rules (`WeiModel.Dictation`): the transitions, what each ending does
+    /// to the text already in the field, and why it cannot start when it cannot. The view's part is to
+    /// turn that into three glyphs and to put the text where the rules say.
+    @State private var dictation = Dictation()
+    /// The microphone. Held here rather than owned by a task because a sentence outlives many bodies.
+    @State private var capture = VoiceCapture()
+    /// The field editor's side of it: showing a sentence as a composition and settling it into the
+    /// binding. A separate type because it is all facts about a text input client, none about a composer.
+    @State private var field = DictationField()
+    /// How far along a model download is, or `nil` when nothing is being downloaded. A number rather
+    /// than a flag because a download has a length, and a control that says "working…" for two minutes
+    /// is a control that looks hung.
+    @State private var installing: Double?
+    /// The language to dictate in, by locale identifier. Empty means "whatever the system is set to",
+    /// which is the answer for everybody who never thinks about it.
+    @AppStorage("voiceLanguage") private var voiceLanguage = ""
+    /// Whether the send that is waiting on a settling sentence should go out when it settles.
+    ///
+    /// A flag rather than a pending closure: what happens afterwards is `submit()` again, and the state it
+    /// reads (the draft) is only correct at that moment.
+    @State private var sendWhenSettled = false
     /// Whether a drag is hovering over the card. Drawn as a highlight rather than tracked as a fact:
     /// the drop is the only thing that changes anything.
     @State private var dropping = false
 
+    /// Whether there is a message to send.
+    ///
+    /// **Enabled while dictating, and that is a reversal.** The first version disabled it, on the reasoning
+    /// that a send during a sentence would post the text from *before* the reader started talking. True —
+    /// and it made the button a gate the reader had to understand: they finished speaking, watched the words
+    /// sit in the box, and found the arrow grey with nothing saying why. What resolves it is not a rule about
+    /// the button but about the click: **Send ends the dictation first**, waits for the sentence to settle,
+    /// and then sends what is in the box. `draft` is still the thing being checked, so a sentence that has
+    /// not settled yet leaves the arrow disabled — there is genuinely nothing to send until it does.
     private var canSend: Bool {
         enabled && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -174,6 +206,19 @@ struct Composer: View {
         .onPasteCommand(of: [.image]) { _ in
             if let path = PastedImage.write() { client.attachTemporary(path) }
         }
+        // The sketch sheet. On the card rather than on the pencil button, because it is about *this*
+        // message: the picture it produces is an attachment of the draft being written, and a sheet
+        // hung on the button would be one more thing that has to be found again after a redraw.
+        .sheet(isPresented: $sketching) {
+            Sketchpad { png in
+                // The same path the clipboard takes: a file this side made, which the shell reads,
+                // sniffs and deletes. Nothing about the sketch travels except PNG bytes, so the sheet
+                // and the paste cannot come to different conclusions about what an attachment is.
+                if let path = TemporaryImage.write(png, named: "sketch") {
+                    client.attachTemporary(path)
+                }
+            }
+        }
         .fileImporter(
             isPresented: $pickingFiles,
             allowedContentTypes: [.image],
@@ -207,6 +252,19 @@ struct Composer: View {
             // button goes grey, and the message never leaves. That is `submit()`'s first guard, and it
             // is the whole of the reported bug.
             .onKeyPress(.return, phases: .down) { press in
+                // **A sentence being spoken owns Return**, because the only thing this key can mean while a
+                // reader is still talking is "I am done". Handled here rather than passed on: left to the
+                // platform, Return settles the composition early and the rest of the sentence then has
+                // nothing left to replace.
+                //
+                // What "done" does next is the same thing Send does, deliberately — the key and the button are
+                // one gesture, and having Return mean "finish" while the arrow meant "finish and send" would
+                // be two answers to one question (see `submit`). With nothing settled yet there is nothing to
+                // send, and then it only finishes: the sentence stays in the box and the next Return sends it.
+                if dictation.isActive {
+                    if canSend { _ = submit() } else { stopDictation() }
+                    return .handled
+                }
                 // The event's own modifiers, not `NSEvent.modifierFlags`: that reads the *current*
                 // hardware state rather than the keystroke being handled, so a synthetic or replayed
                 // event — and a real one under a stuck modifier — would be judged by something other
@@ -220,6 +278,14 @@ struct Composer: View {
                     return .handled
                 }
                 return submit() ? .handled : .ignored
+            }
+            // Escape takes the sentence back out. Dictation is the only thing this key can be about in
+            // this field — there is no other operation in progress to cancel — and it is ignored
+            // otherwise, so the platform keeps whatever else it does with Escape.
+            .onKeyPress(.escape) {
+                guard dictation.isActive else { return .ignored }
+                cancelDictation()
+                return .handled
             }
             // The window's own submit gesture as well, because it is the one the menu bar and every
             // other command in this app use — and it goes through the same guard, since the platform
@@ -265,6 +331,19 @@ struct Composer: View {
     /// moment is a Return the IME never sees, and the composition is thrown away.
     @discardableResult
     private func submit() -> Bool {
+        // **Dictation is finished before anything is sent, and the send is re-issued afterwards.** Pressing
+        // Send while a sentence is being spoken used to do nothing at all — the draft did not have that
+        // sentence in it yet — which left the reader with a text box full of words and an arrow that refused.
+        // Stopping the microphone and waiting for the sentence to settle (or for the watchdog, two seconds)
+        // means the box holds everything they said when the send finally happens.
+        //
+        // Guarded on there being something to send, so a Send pressed on an empty box does not start a
+        // two-second wait for nothing.
+        if dictation.isActive, !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            sendWhenSettled = true
+            finishDictationThenSend()
+            return true
+        }
         // An input method gets Return back, always. See the handler's note.
         if composing { return false }
         // Nothing typed is not a message. It is also the state a composition leaves behind when its
@@ -316,6 +395,22 @@ struct Composer: View {
             .disabled(!enabled)
             .help("Attach an image")
 
+            // Beside the attach button, because it is the same decision — a picture for this message —
+            // taken the other way round: the reader has no file, so this is where one can be made.
+            Button {
+                sketching = true
+            } label: {
+                Image(systemName: "pencil.tip")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 24, height: 24)
+                    .background(.quaternary, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!enabled)
+            .help("Sketch an idea")
+
+            dictate
+
             ModelPicker(client: client, enabled: enabled)
 
             Spacer(minLength: 8)
@@ -344,6 +439,261 @@ struct Composer: View {
             .help("Send (⌘↩)")
         }
     }
+
+    // ── dictation ─────────────────────────────────────────────────────────
+
+    /// The microphone, as one control with one meaning per state.
+    ///
+    /// **One button, and its action is whatever the state needs.** The alternative — a menu, or a second
+    /// button that only appears when something is wrong — was rejected because every state here has
+    /// exactly one useful thing to do next, and a button that *does* it is easier to find than a menu
+    /// that lists it. What the button will do is in the tooltip, in words, because a glyph cannot say
+    /// "the model for Chinese is not on this Mac yet".
+    ///
+    /// The states and the glyphs:
+    ///
+    /// | state | glyph | pressing it |
+    /// |---|---|---|
+    /// | idle | `mic` | start listening |
+    /// | listening | `mic.fill` on the highlight wash | stop, and settle the sentence |
+    /// | stopping | `mic.fill` | nothing (the last result is on its way) |
+    /// | downloading a model | a small progress ring | nothing |
+    /// | microphone refused | `mic.slash` | open the privacy pane that can grant it |
+    /// | model missing | `arrow.down.circle` | download it |
+    /// | anything else | `mic.slash` | try again |
+    ///
+    /// The listening state is drawn on `highlightWash` rather than in a red dot: this app has one accent
+    /// and one highlight, and a recording indicator is a *background*, which is the job the highlight hue
+    /// was chosen for. The real feedback is the text appearing in the field, which is where the reader is
+    /// looking anyway.
+    private var dictate: some View {
+        Button {
+            dictatePressed()
+        } label: {
+            Group {
+                if let installing {
+                    ProgressView(value: installing)
+                        .progressViewStyle(.circular)
+                        .controlSize(.mini)
+                        .frame(width: 24, height: 24)
+                } else {
+                    Image(systemName: dictateGlyph)
+                        .font(.system(size: 11, weight: dictation.isListening ? .bold : .semibold))
+                        // **Motion, because a colour change is not a state.** The background alone was the
+                        // only sign that the microphone was open, and a filled circle behind a glyph is easy
+                        // to read as "this button is selected" rather than "this is happening now". The pulse
+                        // is the platform's own vocabulary for exactly this and costs nothing to keep true:
+                        // it runs while `isListening` and stops on its own when that stops being true.
+                        .symbolEffect(.pulse, options: .repeating, isActive: dictation.isListening)
+                        .frame(width: 24, height: 24)
+                        .background(
+                            dictation.isListening
+                                ? AnyShapeStyle(Wei.Palette.highlightWash) : AnyShapeStyle(.quaternary),
+                            in: Circle()
+                        )
+                        .overlay(
+                            // A ring, only while listening: the same shape at the same size, so nothing
+                            // moves — it is the outline appearing that reads as "on air".
+                            Circle()
+                                .strokeBorder(Wei.Palette.accent, lineWidth: dictation.isListening ? 1.5 : 0)
+                                .opacity(dictation.isListening ? 1 : 0)
+                        )
+                        .animation(.easeInOut(duration: 0.2), value: dictation.phase)
+                }
+            }
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled || dictation.phase == .stopping || installing != nil)
+        .help(dictateHelp)
+        .accessibilityLabel(dictateHelp)
+    }
+
+    private var dictateGlyph: String {
+        if dictation.isActive { return "mic.fill" }
+        switch dictation.trouble {
+        case .none: return "mic"
+        case .microphoneNotPermitted, .languageUnsupported, .failed: return "mic.slash"
+        case .modelMissing: return "arrow.down.circle"
+        }
+    }
+
+    /// What the button means right now, in words — used as both the tooltip and the accessibility label,
+    /// so the two cannot describe different states.
+    private var dictateHelp: String {
+        if installing != nil { return "Downloading the voice model…" }
+        switch dictation.phase {
+        case .starting: return "Starting to listen…"
+        case .listening: return "Finish dictating (↩)"
+        case .stopping: return "Finishing…"
+        case .idle: return "Dictate (⌘D)"
+        case let .unavailable(trouble):
+            switch trouble {
+            case .microphoneNotPermitted:
+                return "Dictation needs the microphone — click to open Privacy settings"
+            case let .modelMissing(locale):
+                return "Download the voice model for \(languageName(locale))"
+            case let .languageUnsupported(locale):
+                return "\(languageName(locale)) cannot be dictated on this Mac"
+            case let .failed(message):
+                return "Dictation stopped: \(message). Click to try again."
+            }
+        }
+    }
+
+    /// A language, in the platform's own words for it.
+    private func languageName(_ identifier: String) -> String {
+        Locale(identifier: "en").localizedString(forIdentifier: identifier)
+            ?? identifier.replacingOccurrences(of: "_", with: "-")
+    }
+
+    /// What pressing the microphone means, given where dictation is.
+    private func dictatePressed() {
+        switch dictation.phase {
+        case .starting, .listening:
+            // Starting as well as listening: the model is still loading, and pressing again means "never
+            // mind" — which is the same thing as stopping before anything was heard.
+            stopDictation()
+        case .stopping:
+            break
+        case .idle:
+            beginDictation()
+        case let .unavailable(trouble):
+            mend(trouble)
+        }
+    }
+
+    /// What can be done about it — which is different for each of them, and is the reason a failed state
+    /// is a button rather than a message.
+    private func mend(_ trouble: DictationTrouble) {
+        switch trouble {
+        case .microphoneNotPermitted:
+            // The app cannot grant this to itself, and a dialog that only says "denied" leaves the reader
+            // to find the switch. Opening the pane that has the switch is the whole of the help.
+            if let url = URL(
+                string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                NSWorkspace.shared.open(url)
+            }
+        case let .modelMissing(locale):
+            installVoiceModel(locale)
+        case .languageUnsupported, .failed:
+            // Nothing to fetch and nothing to open: trying again is the action.
+            dictation.available()
+        }
+    }
+
+    private func beginDictation() {
+        guard enabled else { return }
+        // **An input method and dictation both write marked text, so only one of them can be writing.**
+        // A composition in progress is dropped rather than committed: the keys that were typed to spell
+        // it are not a word yet, and Escape — which is what this is — is the key that means exactly that
+        // in every input method on this system.
+        if DictationField.inputMethodIsComposing {
+            (NSApp.keyWindow?.firstResponder as? NSTextView)?.inputContext?.discardMarkedText()
+        }
+        // The field has to have the keyboard before a sentence can go into it, and the button that was
+        // just pressed may have taken it.
+        editorFocused = true
+        field.forget()
+        // If the field editor is not there when a sentence settles — the window lost the keyboard, a
+        // permission dialog took it — the sentence still lands, at the end of the draft. See `DictationField`.
+        field.fallback = { text in
+            draft += draft.isEmpty ? text : " " + text
+        }
+        capture.onEvent = { event in handle(event) }
+        Task { await capture.start(wanted: voiceLanguage.isEmpty ? nil : voiceLanguage) }
+    }
+
+    /// Finish the sentence and send it, for a Send pressed while the microphone was open.
+    ///
+    /// The same call as `stopDictation`, with `sendWhenSettled` set: what happens when the sentence lands is
+    /// the only thing that differs between "stop" and "stop and send".
+    private func finishDictationThenSend() {
+        stopDictation()
+    }
+
+    /// Stop listening; the sentence settles when the recogniser's last result arrives.
+    ///
+    /// **There is no timer here, and that is deliberate.** "A stop always ends with a settled sentence" is a
+    /// guarantee of `VoiceCapture`, which owns the results stream and can see whether the final arrived; a
+    /// second watchdog on this side would be a second answer to the same question, and the two would drift
+    /// the moment either changed. All this does is ask and wait.
+    private func stopDictation() {
+        dictation.stop()
+        Task { await capture.stop() }
+    }
+
+    /// Throw the sentence away.
+    private func cancelDictation() {
+        sendWhenSettled = false
+        apply(dictation.cancel())
+        field.endCue()
+        Task { await capture.cancel() }
+    }
+
+    private func installVoiceModel(_ locale: String) {
+        installing = 0
+        Task {
+            do {
+                try await capture.installModel(locale: locale) { fraction in
+                    installing = fraction
+                }
+                installing = nil
+                dictation.available()
+            } catch {
+                installing = nil
+                apply(dictation.trouble(.failed(error.localizedDescription)))
+            }
+        }
+    }
+
+    /// What the microphone has to say, turned into a rule and then into something the field does.
+    private func handle(_ event: VoiceCapture.Event) {
+        switch event {
+        case .starting:
+            // Deliberately no cue yet: the model is still loading and nothing is being heard, so a caret that
+            // said "listening" would be saying something untrue.
+            dictation.beganStarting()
+        case .listening:
+            dictation.beganListening()
+            field.beginCue()
+        case let .partial(text): apply(dictation.heard(text))
+        case let .final(text):
+            apply(dictation.finished(text))
+            // End of the whole session, not of one sentence: only a stop does this.
+            if !dictation.isActive { field.endCue() }
+        case let .trouble(trouble):
+            apply(dictation.trouble(trouble))
+            field.endCue()
+        }
+    }
+
+    private func apply(_ effect: DictationEffect) {
+        switch effect {
+        case .none: break
+        case let .show(text):
+            field.show(text)
+            // The caret cue follows the text: a badge pinned to where the caret *was* is worse than no badge,
+            // because it points at the wrong word.
+            field.moveCue()
+        case let .settle(text):
+            field.settle(text)
+            // A sentence settling is not the end of the session — the recogniser commits one and carries on —
+            // so the cue stays and follows the caret to the next one.
+            field.moveCue()
+            // The reader pressed Send while they were still speaking: the sentence is now in the box, so the
+            // send they asked for can happen. Deferred by a run-loop turn so SwiftUI has written the settled
+            // text into the binding first — `submit()` reads `draft`, and reading it in the same turn it was
+            // written is exactly the kind of "the handler saw the old value" this file has been bitten by.
+            if sendWhenSettled {
+                sendWhenSettled = false
+                DispatchQueue.main.async { submit() }
+            }
+        case .discard:
+            field.discard()
+            field.endCue()
+        }
+    }
 }
 
 /// The image on the clipboard, written somewhere the shell can read it.
@@ -368,22 +718,34 @@ enum PastedImage {
               let png = image.pngData else {
             return nil
         }
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("wei-pasted", isDirectory: true)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = directory.appendingPathComponent("paste-\(UUID().uuidString).png")
-        do {
-            try png.write(to: file)
-        } catch {
-            return nil
-        }
-        return file.path
+        return TemporaryImage.write(png, named: "paste")
     }
 
     /// Whether there is anything to attach, for the menu item's enabled state.
     static var available: Bool {
         let pasteboard = NSPasteboard.general
         return pasteboard.data(forType: .png) != nil || pasteboard.data(forType: .tiff) != nil
+    }
+}
+
+/// A picture this side made, left somewhere the shell can read it.
+///
+/// The one place the convention lives, because there are now two producers: the clipboard, and the
+/// sketch sheet. A second copy of "write PNG bytes into a UUID-named file under the temporary
+/// directory" is how the two would come to disagree about which directory gets cleaned up — and the
+/// shell deletes exactly the file it was handed, so a file in the wrong place is a file that stays.
+enum TemporaryImage {
+    static func write(_ png: Data, named name: String) -> String? {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wei-images", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("\(name)-\(UUID().uuidString).png")
+        do {
+            try png.write(to: file)
+        } catch {
+            return nil
+        }
+        return file.path
     }
 }
 

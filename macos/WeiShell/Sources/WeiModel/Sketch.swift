@@ -1,0 +1,175 @@
+import CoreGraphics
+import Foundation
+
+/// A drawing, as the marks it is made of.
+///
+/// Here rather than beside the view, for the reason `TableLayout` is: the parts of a drawing that can
+/// be *wrong* are arithmetic on numbers, and arithmetic is worth testing without a window. Which corner
+/// a drag started from, whether a two-point drag was a shape or a slip of the hand, where an
+/// arrowhead's two arms land — all three are answered here, and `SketchTests` answers them again.
+///
+/// What is deliberately **not** here: the paper, the ink, and the glyphs on the tools. A picture is
+/// pixels, and pixels are drawing; this is what a drawing *is*. The two halves meet at `Stroke`, which
+/// is the only thing the view's `Canvas` and the PNG it exports both read — so the picture that gets
+/// sent cannot be a second rendering that disagrees with the one on screen.
+public enum Sketch {
+
+    // ── the tools ─────────────────────────────────────────────────────────
+
+    /// What a drag with the pointer draws.
+    ///
+    /// One enumeration rather than a case per tool kind, because every tool's whole life is the same
+    /// three moments — press, drag, release — and the only difference is what the two ends become.
+    public enum Tool: String, CaseIterable, Identifiable, Sendable {
+        /// Freehand: every point the pointer passed through.
+        case pen
+        /// A straight line, from where the drag started to where it ended.
+        case line
+        /// A line with an arrowhead at the end that was dragged to, for "this leads to that".
+        case arrow
+        /// An outline, however it was dragged.
+        case rectangle
+        /// An outline of an ellipse inscribed in the drag.
+        case ellipse
+
+        public var id: String { rawValue }
+    }
+
+    // ── the ink ───────────────────────────────────────────────────────────
+
+    /// The width of the ink, in points. Fixed rather than a choice: a picture the model is shown wants
+    /// one weight that is always legible, not a slider nobody can judge at a glance.
+    public static let ink: CGFloat = 2.5
+
+    /// The smallest drag that is a mark rather than a slip of the hand.
+    ///
+    /// A click with the pen is a dot, which is a mark; a *rectangle* one point wide is not a rectangle,
+    /// it is the button being pressed on the way to clicking somewhere else — and it would be an
+    /// unremovable smudge on the paper, since nothing here tells a deliberate 40×1 rectangle from that.
+    public static let minimumShape: CGFloat = 4
+
+    /// How long each arm of an arrowhead is, and how far it is turned off the shaft.
+    public static let barbLength: CGFloat = 11
+    public static let barbAngle: Double = .pi / 7
+
+    // ── the marks ─────────────────────────────────────────────────────────
+
+    /// One mark on the paper, in the paper's own coordinates.
+    public enum Stroke: Equatable, Sendable {
+        case freehand([CGPoint])
+        case line(CGPoint, CGPoint)
+        case arrow(CGPoint, CGPoint)
+        case rectangle(CGRect)
+        case ellipse(CGRect)
+    }
+
+    /// The rectangle a drag covers, whichever corner it started from and whichever way it went.
+    ///
+    /// Normalised here because `CGRect` refuses a negative size rather than storing one: building it
+    /// from `(to.x - from.x, to.y - from.y)` works for one quadrant of eight and silently gives a zero
+    /// rectangle for the rest, which is a shape the reader drew and cannot see.
+    public static func rect(from: CGPoint, to: CGPoint) -> CGRect {
+        CGRect(
+            x: min(from.x, to.x),
+            y: min(from.y, to.y),
+            width: abs(to.x - from.x),
+            height: abs(to.y - from.y)
+        )
+    }
+
+    /// Whether a finished drag should be kept.
+    public static func isMeaningful(_ stroke: Stroke) -> Bool {
+        switch stroke {
+        case .freehand:
+            // Including a single point: a click with the pen is a dot, and a dot is a mark.
+            return true
+        case let .line(from, to), let .arrow(from, to):
+            return distance(from, to) >= minimumShape
+        case let .rectangle(rect), let .ellipse(rect):
+            // Both sides, not the diagonal: a wide flat rectangle is not a thin rectangle, it is a drag
+            // that went sideways before the reader meant to start drawing.
+            return min(rect.width, rect.height) >= minimumShape
+        }
+    }
+
+    /// The two far ends of the arrowhead for an arrow that ends at `to`.
+    ///
+    /// Returned as points rather than as an angle, because the arrow is drawn as a path and a path
+    /// wants points. A drag of zero length has no direction to point in, so both arms come back at the
+    /// tip — not a rotation by an undefined angle, which is a NaN that spreads into the drawn path.
+    public static func barbs(from: CGPoint, to: CGPoint) -> (CGPoint, CGPoint) {
+        let back = distance(from, to)
+        guard back > 0 else { return (to, to) }
+        // The shaft, reversed and normalised: the direction each arm leaves the tip in, before it is
+        // turned off by `barbAngle` in either direction.
+        let ux = (from.x - to.x) / back
+        let uy = (from.y - to.y) / back
+        let cos = CGFloat(cos(barbAngle))
+        let sin = CGFloat(sin(barbAngle))
+        let left = CGPoint(
+            x: to.x + barbLength * (ux * cos - uy * sin),
+            y: to.y + barbLength * (ux * sin + uy * cos)
+        )
+        let right = CGPoint(
+            x: to.x + barbLength * (ux * cos + uy * sin),
+            y: to.y + barbLength * (-ux * sin + uy * cos)
+        )
+        return (left, right)
+    }
+
+    // ── a drag in progress ────────────────────────────────────────────────
+
+    /// The mark being drawn right now.
+    ///
+    /// A type rather than a handful of `@State` in the view, because "what has this drag drawn so far"
+    /// is a question with one answer per tool and the view should not be the place that knows it — the
+    /// same draft is read by the canvas on every move and by the release that decides whether to keep
+    /// it.
+    public struct Draft: Equatable, Sendable {
+        public let tool: Tool
+        public let origin: CGPoint
+        /// Always at least the origin: a press is a draft of one point, which is what a pen dot is.
+        public private(set) var points: [CGPoint]
+
+        public init(tool: Tool, at point: CGPoint) {
+            self.tool = tool
+            self.origin = point
+            self.points = [point]
+        }
+
+        /// The pointer moved, or was lifted.
+        public mutating func drag(to point: CGPoint) {
+            switch tool {
+            case .pen:
+                // Two identical points in a row are one point. The gesture reports moves the reader
+                // cannot see, and a stroke *is* its points, so they would be paid for twice: once in
+                // the array and once in every pass that draws it.
+                if points.last != point { points.append(point) }
+            case .line, .arrow, .rectangle, .ellipse:
+                // A shape is where the drag started and where it is now — the second end is replaced,
+                // never accumulated. It is also why dragging back onto the start leaves nothing: a
+                // shape with no extent is not a mark (see `isMeaningful`).
+                points = [origin, point]
+            }
+        }
+
+        /// What it has drawn, for drawing it — in progress or finished.
+        public var stroke: Stroke {
+            let end = points.last ?? origin
+            switch tool {
+            case .pen: return .freehand(points)
+            case .line: return .line(origin, end)
+            case .arrow: return .arrow(origin, end)
+            case .rectangle: return .rectangle(Sketch.rect(from: origin, to: end))
+            case .ellipse: return .ellipse(Sketch.rect(from: origin, to: end))
+            }
+        }
+
+        /// Whether letting go should keep it.
+        public var isMeaningful: Bool { Sketch.isMeaningful(stroke) }
+    }
+
+    private static func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
+        hypot(b.x - a.x, b.y - a.y)
+    }
+}

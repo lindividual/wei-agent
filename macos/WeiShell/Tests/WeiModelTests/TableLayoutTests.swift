@@ -133,4 +133,63 @@ final class TableLayoutTests: XCTestCase {
         // 18 characters at ten points each, plus ten points of padding on both sides.
         XCTAssertEqual(laid.widths[0], 200)
     }
+
+    // ── the memo ───────────────────────────────────────────────────────────
+    //
+    // A table's layout is a measurement per cell and the view asks for it from its `body`, which is
+    // re-evaluated on every frame of a block that is still arriving. The memo is what keeps an
+    // unchanged table from being measured again on each of those frames, so what is asserted here is
+    // the *count* of measurements rather than the widths — the widths are asserted everywhere above.
+
+    /// The case the memo exists for: the same table, laid out again, measures nothing the second time.
+    func testTheSameTableIsOnlyMeasuredOnce() {
+        let memo = TableMemo()
+        var calls = 0
+        let measure: CellMeasure = { spans in
+            calls += 1
+            return CGFloat(spans.count) * 10
+        }
+        let args = (padding: 10, minimum: 60, maximum: 300) as (CGFloat, CGFloat, CGFloat)
+        _ = memo.layout(
+            header: [text("a"), text("b")],
+            rows: [[text("1"), text("2")]],
+            align: [],
+            padding: args.0, minimum: args.1, maximum: args.2, measure: measure
+        )
+        let first = calls
+        XCTAssertGreaterThan(first, 0, "the first layout has to measure something")
+        let again = memo.layout(
+            header: [text("a"), text("b")],
+            rows: [[text("1"), text("2")]],
+            align: [],
+            padding: args.0, minimum: args.1, maximum: args.2, measure: measure
+        )
+        XCTAssertEqual(calls, first, "the second layout of the same table measures nothing")
+        XCTAssertEqual(again.widths.count, 2)
+        XCTAssertEqual(memo.computed, 1)
+    }
+
+    /// A changed table is a new layout — the memo is a memo, not a cache of the first thing it saw.
+    func testAChangedTableIsLaidOutAgain() {
+        let memo = TableMemo()
+        let measure: CellMeasure = { spans in CGFloat(spans.count) * 10 }
+        let first = memo.layout(
+            header: [text("a")], rows: [[text("1")]], align: [],
+            padding: 10, minimum: 60, maximum: 300, measure: measure
+        )
+        let grown = memo.layout(
+            header: [text("a")], rows: [[text("1")], [text("2")]], align: [],
+            padding: 10, minimum: 60, maximum: 300, measure: measure
+        )
+        XCTAssertEqual(first.rows.count, 1)
+        XCTAssertEqual(grown.rows.count, 2, "the new row is in the layout")
+        XCTAssertEqual(memo.computed, 2)
+        // And the alignment counts as content: a table whose columns changed alignment is re-laid out,
+        // because the alignment is what the view draws the cells against.
+        _ = memo.layout(
+            header: [text("a")], rows: [[text("1")], [text("2")]], align: [.right],
+            padding: 10, minimum: 60, maximum: 300, measure: measure
+        )
+        XCTAssertEqual(memo.computed, 3)
+    }
 }

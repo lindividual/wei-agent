@@ -107,9 +107,21 @@ public func sessionSections(
 
 /// The everyday view: one project's sessions, bucketed by recency.
 ///
-/// The boundaries are Notes', and for the reason a list of documents needs any: a session used this
-/// afternoon and one used in June do not belong under one heading. Coarse on purpose — a per-row "3 hours
-/// ago" is a column of numbers to read rather than a list to scan.
+/// Five buckets, fine where a list is long and coarse where it is short: **Today / Yesterday / Previous
+/// 7 Days / Previous 30 Days**, then a month at a time. The first four are Notes' grain, and the reason a
+/// list of documents needs any bucketing at all is the same here — a session used this afternoon and one
+/// used in June do not belong under one heading.
+///
+/// **Why the two extra buckets.** The old rule was Today / Previous 30 Days / a month, and the middle
+/// bucket was doing the work of three: a project worked in daily showed "Previous 30 Days" over thirty
+/// rows, so the heading said nothing about the part of the list a reader is in most of the time. Splitting
+/// it puts yesterday and the last week back in reach — the sessions anyone actually returns to — while the
+/// month floor stays coarse, because a per-row "3 hours ago" is a column of figures to read rather than a
+/// list to scan. Finer than a week is not worth a heading: "Previous 2 Days" over two rows is a rule the
+/// reader has to work out, and a heading has to be cheaper to read than the rows under it.
+///
+/// All four boundaries are **closed at the start of the calendar day**, not a rolling 24 hours — see the
+/// tests, because "previous 7 days" is exactly the kind of rule that is off by one.
 public func timeSections(
     rows: [SessionRow],
     now: Date,
@@ -117,6 +129,8 @@ public func timeSections(
 ) -> [SessionSection] {
     guard !rows.isEmpty else { return [] }
     let today = calendar.startOfDay(for: now)
+    let yesterday = calendar.date(byAdding: .day, value: -1, to: today) ?? today
+    let sevenDaysAgo = calendar.date(byAdding: .day, value: -7, to: today) ?? today
     let thirtyDaysAgo = calendar.date(byAdding: .day, value: -30, to: today) ?? today
     // Two formatters rather than one per row: a month heading is the same string for every session in that
     // month, and `DateFormatter` is the expensive part of this.
@@ -136,6 +150,12 @@ public func timeSections(
         if date >= today {
             id = "today"
             title = "Today"
+        } else if date >= yesterday {
+            id = "yesterday"
+            title = "Yesterday"
+        } else if date >= sevenDaysAgo {
+            id = "week"
+            title = "Previous 7 Days"
         } else if date >= thirtyDaysAgo {
             id = "recent"
             title = "Previous 30 Days"

@@ -107,3 +107,19 @@ public func turns(of rows: [Row]) -> [Turn] {
     flush()
     return out
 }
+
+/// The id a transcript scrolls to when it goes to the end.
+///
+/// **This exists because scrolling to the end is one line that is quietly wrong.** The view scrolls with
+/// `ScrollViewReader.scrollTo(id)`, and `scrollTo` does nothing at all when no view answers to that id —
+/// no warning, no error, no scroll, which is indistinguishable from a layout or timing problem. The views
+/// here are *turns* (`ForEach(turns, id: \.element.id)`), and a turn's id is its question's row id; the
+/// obvious thing to reach for, the last row, is therefore almost always an id that does not exist — after
+/// any answer, the last row is a piece of that answer (`"<turn>/<block>"`).
+///
+/// So the answer to "where is the end" is computed once, here, next to the rule that decides what a turn
+/// is. `nil` for a transcript with nothing in it, which is the state every switch passes through before
+/// the new session's history arrives.
+public func endOf(_ rows: [Row]) -> String? {
+    turns(of: rows).last?.id
+}

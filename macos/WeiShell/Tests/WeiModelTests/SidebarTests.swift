@@ -243,7 +243,7 @@ final class BlockTests: XCTestCase {
         let code = try XCTUnwrap(
             decode(#"{"kind":"blocks","id":"reply-1","blocks":[{"t":"code","lang":"moonbit","text":"fn main {}"}]}"#)
         )
-        guard case let .blocks(_, blocks) = code else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, blocks, _) = code else { return XCTFail("expected blocks") }
         guard case let .code(lang, text) = blocks[0] else { return XCTFail("expected a fence") }
         XCTAssertEqual(lang, "moonbit")
         XCTAssertEqual(text, "fn main {}")
@@ -254,7 +254,7 @@ final class BlockTests: XCTestCase {
                 #"{"kind":"blocks","id":"reply-2","blocks":[{"t":"table","header":[[{"t":"text","text":"a"}],[{"t":"text","text":"b"}]],"rows":[[[{"t":"text","text":"1"}],[{"t":"text","text":"2"}]]],"align":["left","right"]}]}"#
             )
         )
-        guard case let .blocks(_, tableBlocks) = table else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, tableBlocks, _) = table else { return XCTFail("expected blocks") }
         guard case let .table(header, rows, align) = tableBlocks[0] else {
             return XCTFail("expected a table")
         }
@@ -266,7 +266,7 @@ final class BlockTests: XCTestCase {
         let heading = try XCTUnwrap(
             decode(#"{"kind":"blocks","id":"reply-3","blocks":[{"t":"h","level":3,"spans":[{"t":"text","text":"Title"}]}]}"#)
         )
-        guard case let .blocks(_, headings) = heading else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, headings, _) = heading else { return XCTFail("expected blocks") }
         guard case let .heading(level, spans) = headings[0] else { return XCTFail("expected a heading") }
         XCTAssertEqual(level, 3)
         XCTAssertEqual(spans, [.text("Title")])
@@ -278,7 +278,7 @@ final class BlockTests: XCTestCase {
                 #"{"kind":"blocks","id":"reply-4","blocks":[{"t":"ul","items":[[{"t":"p","spans":[{"t":"text","text":"one"}]}],[{"t":"p","spans":[{"t":"text","text":"two"}]},{"t":"ul","items":[[{"t":"p","spans":[{"t":"text","text":"nested"}]}]]}]]}]}"#
             )
         )
-        guard case let .blocks(_, lists) = list else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, lists, _) = list else { return XCTFail("expected blocks") }
         guard case let .bullets(items) = lists[0] else { return XCTFail("expected a list") }
         XCTAssertEqual(items.count, 2)
         XCTAssertEqual(items[1].count, 2, "the nested list belongs to the second item")
@@ -295,7 +295,7 @@ final class BlockTests: XCTestCase {
                 #"{"kind":"blocks","id":"reply-5","blocks":[{"t":"p","spans":[{"t":"text","text":"a "},{"t":"strong","spans":[{"t":"em","spans":[{"t":"text","text":"both"}]}]},{"t":"code","text":"x"},{"t":"link","url":"https://x.y","spans":[{"t":"text","text":"here"}]}]}]}"#
             )
         )
-        guard case let .blocks(_, blocks) = event else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, blocks, _) = event else { return XCTFail("expected blocks") }
         guard case let .paragraph(spans) = blocks[0] else { return XCTFail("expected a paragraph") }
         XCTAssertEqual(spans.count, 4)
         XCTAssertEqual(spans[0], .text("a "))
@@ -315,7 +315,7 @@ final class BlockTests: XCTestCase {
                 #"{"kind":"blocks","id":"reply-6","blocks":[{"t":"p","spans":[{"t":"image","url":"/tmp/shot.png","alt":"a chart"}]}]}"#
             )
         )
-        guard case let .blocks(_, blocks) = event else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, blocks, _) = event else { return XCTFail("expected blocks") }
         guard case let .paragraph(spans) = blocks[0] else { return XCTFail("expected a paragraph") }
         XCTAssertEqual(spans, [.image(url: "/tmp/shot.png", alt: "a chart")])
     }
@@ -329,7 +329,8 @@ final class BlockTests: XCTestCase {
         conversation.apply(
             .blocks(
                 id: "reply-1",
-                blocks: [.table(header: [[.text("a")], [.text("b")]], rows: [], align: [.left, .right])]
+                blocks: [.table(header: [[.text("a")], [.text("b")]], rows: [], align: [.left, .right])],
+                from: 0
             )
         )
         XCTAssertNotNil(conversation.rows[0].blocks)
@@ -337,7 +338,7 @@ final class BlockTests: XCTestCase {
 
         // A parse for a row that is not here is dropped rather than appended: it describes text that
         // this conversation does not have.
-        conversation.apply(.blocks(id: "reply-99", blocks: [.rule]))
+        conversation.apply(.blocks(id: "reply-99", blocks: [.rule], from: 0))
         XCTAssertEqual(conversation.rows.count, 1)
     }
 
@@ -366,5 +367,88 @@ final class BlockTests: XCTestCase {
         )
         guard case let .history(rows) = row else { return XCTFail("expected history") }
         XCTAssertNil(rows[0].blocks)
+    }
+
+    /// A live frame names the block it starts at, and it is the one field a host has to understand to
+    /// render an answer while it arrives: the head is what it already holds, the tail is the new part.
+    func testALiveFrameNamesWhereItsBlocksStart() throws {
+        let event = try XCTUnwrap(
+            decode(
+                #"{"kind":"blocks","id":"reply-1-1","from":2,"blocks":[{"t":"p","spans":[{"t":"text","text":"more"}]}]}"#
+            )
+        )
+        guard case let .blocks(id, blocks, from) = event else { return XCTFail("expected blocks") }
+        XCTAssertEqual(id, "reply-1-1")
+        XCTAssertEqual(from, 2)
+        XCTAssertEqual(blocks.count, 1)
+    }
+
+    /// A shell that predates the field sends a block whole, and the host reads that as `from: 0` —
+    /// being wrong about the default here would append a whole document to the head of itself.
+    func testAFrameWithoutFromIsTheWholeBlock() throws {
+        let event = try XCTUnwrap(
+            decode(
+                #"{"kind":"blocks","id":"reply-1","blocks":[{"t":"hr"}]}"#
+            )
+        )
+        guard case let .blocks(_, _, from) = event else { return XCTFail("expected blocks") }
+        XCTAssertEqual(from, 0)
+    }
+
+    /// The head the host already has and the tail it is just being sent are **one document** again.
+    func testALiveFrameIsAppendedToTheBlocksAlreadyHeld() {
+        var conversation = Conversation()
+        conversation.apply(.reply(id: "reply-1-1", delta: "one\n\ntwo"))
+        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("one")], from: 0))
+        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("two")], from: 1))
+        XCTAssertEqual(conversation.rows[0].blocks, [paragraph("one"), paragraph("two")])
+    }
+
+    /// A **last** live frame can also correct a block that was sent too early — the text of the block
+    /// it names is replaced, which is what makes a half-arrived table become a table.
+    func testALiveFrameCanReplaceTheBlockItNames() {
+        var conversation = Conversation()
+        conversation.apply(.reply(id: "reply-1-1", delta: "| a |"))
+        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("| a |")], from: 0))
+        conversation.apply(
+            .blocks(
+                id: "reply-1-1",
+                blocks: [.table(header: [[.text("a")]], rows: [[[.text("1")]]], align: [.left])],
+                from: 0
+            )
+        )
+        guard case .table? = conversation.rows[0].blocks?[0] else {
+            return XCTFail("a finished block is sent whole and replaces what was there")
+        }
+    }
+
+    /// A tail for a row the host has no head of is dropped rather than guessed at: appending it would
+    /// draw half a document as if it were the whole one.
+    func testATailWithoutAHeadIsDropped() {
+        var conversation = Conversation()
+        conversation.apply(.reply(id: "reply-1-1", delta: "two"))
+        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("two")], from: 3))
+        XCTAssertNil(conversation.rows[0].blocks)
+    }
+
+    /// The text that was arriving is over the moment a tool is asked for, not the moment it answers.
+    ///
+    /// This is what the shell does — it closes the block and parses it there — and the host has to
+    /// agree, because `complete` is what decides whether a reasoning block is drawn as a three-line
+    /// peek or as one folded line. Getting it wrong leaves a block peeking at its tail for as long as
+    /// a `bash` call takes.
+    func testAToolCallEndsTheTextThatWasArriving() {
+        var conversation = Conversation()
+        conversation.apply(.thinking(id: "thinking-1-1", delta: "thinking about it"))
+        XCTAssertFalse(conversation.rows[0].complete)
+        conversation.apply(
+            .tool(id: "tool-1-1", name: "bash", detail: "ls", done: false, output: "", isError: false)
+        )
+        XCTAssertTrue(conversation.rows[0].complete, "the reasoning block ended when the tool started")
+        XCTAssertFalse(conversation.rows[1].complete, "and the tool itself is still running")
+    }
+
+    private func paragraph(_ text: String) -> Block {
+        .paragraph([.text(text)])
     }
 }

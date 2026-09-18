@@ -67,8 +67,13 @@ public enum ShellEvent: Decodable, Equatable {
     case history(rows: [Row])
     /// The sidebar's list, in full, whenever it changes by more than a turn's worth.
     case sessions(workspaces: [SessionGroup])
-    /// A block stopped growing: how to draw it. Sent once per block, when the deltas are over.
-    case blocks(id: String, blocks: [Block])
+    /// A block's rendering: the blocks at `from` onwards.
+    ///
+    /// `from` is how many leading blocks the host already holds. A block that is still arriving is
+    /// re-rendered as it grows, and the part of it that has finished is not sent twice — which is
+    /// what makes rendering an answer while it arrives affordable. `0` means "the whole block", and
+    /// it is what every finished block sends.
+    case blocks(id: String, blocks: [Block], from: Int)
     /// What the settings panel draws. Re-sent whenever one of these facts changes, so the panel never
     /// has to guess about the key in use after saving one.
     case settings(ShellSettings)
@@ -115,7 +120,7 @@ public enum ShellEvent: Decodable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case kind, session, model, cwd, key, text, id, delta
         case name, detail, done, output, calls, tools, cost
-        case path, rows, workspaces, env, saved, mode, blocks, items
+        case path, rows, workspaces, env, saved, mode, blocks, from, items
         case isError = "error"
         case canSend = "can_send"
         case interrupted, continued
@@ -171,7 +176,9 @@ public enum ShellEvent: Decodable, Equatable {
         case "blocks":
             self = .blocks(
                 id: try fields.decode(String.self, forKey: .id),
-                blocks: try fields.decode([Block].self, forKey: .blocks)
+                blocks: try fields.decode([Block].self, forKey: .blocks),
+                // Absent from any shell older than the field, and those send a block whole.
+                from: try fields.decodeIfPresent(Int.self, forKey: .from) ?? 0
             )
         case "reply":
             self = .reply(

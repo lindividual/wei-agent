@@ -94,6 +94,20 @@ public struct Conversation: Equatable {
     /// fact about the session rather than about this moment.
     public private(set) var ready: ShellEvent?
 
+    /// Whether the shell has said what is **in** this session — by replaying it, or by sending a row.
+    ///
+    /// Two states look identical from `rows` alone, and only one of them is worth drawing as an empty
+    /// column: a session with nothing in it yet, and a session whose rows are still on their way from
+    /// the shell. The second is what a reader sees as a white column — opening a session the shell has
+    /// not read yet is real work (measured: 54ms to parse a 30MB log, 16ms to encode, then 51ms of the
+    /// host decoding one 3.7MB event on the main thread) — and a window that has been handed a
+    /// conversation and is showing nothing reads as broken rather than as busy.
+    ///
+    /// A flag rather than a timer, and rather than a guess from `rows.count`: an empty session is a
+    /// real answer from the shell (`history` with no rows), and it means "loaded, and empty", which
+    /// is a different thing to draw than "still coming".
+    public private(set) var loaded = false
+
     private var nextNote = 0
 
     /// Which turn the live rows on screen belong to.
@@ -136,14 +150,27 @@ public struct Conversation: Equatable {
             status = ""
             openBlock.removeAll()
             nextNote = 0
+            // **Loaded even when there is nothing in it**: an empty session is an answer, and the
+            // difference between it and "still coming" is the whole reason this flag exists.
+            loaded = true
             return
-        case let .blocks(id, blocks):
-            // The row stopped growing and this is how it should be drawn. Patched in place rather
-            // than appended: the row is already on screen from its deltas, and the parse describes
-            // the text that is already there.
-            if let index = rows.firstIndex(where: { $0.id == live(id) }) {
+        case let .blocks(id, blocks, from):
+            // How the row should be drawn. Patched in place rather than appended: the row is already
+            // on screen from its deltas, and the parse describes the text that is already there.
+            //
+            // A row that is not here is dropped rather than created — a parse describes text this
+            // conversation does not have.
+            guard let index = rows.firstIndex(where: { $0.id == live(id) }) else { return }
+            if from == 0 {
                 rows[index].blocks = blocks
+            } else if let held = rows[index].blocks, from <= held.count {
+                // A frame of a block that is still growing: the head is what the host already has, so
+                // the two are one document again.
+                rows[index].blocks = Array(held.prefix(from)) + blocks
             }
+            // A `from` that does not line up — the host has fewer blocks than the shell believes, or
+            // none at all — is dropped rather than guessed at. Frames arrive in order, so the only
+            // way here is a shell replaying a session the host has already drawn.
 
         case .sessions, .session, .settings, .models, .jobs:
             // The sidebar's, the panel's and the picker's own facts. The transcript is unchanged by any
@@ -205,9 +232,12 @@ public struct Conversation: Equatable {
             }
             // A tool call ends the answer block it interrupted, for the same reason the web UI
             // does: what comes next is about the tool, not a continuation of what came before.
-            if done {
-                closeAllBlocks()
-            }
+            //
+            // At the **start** of the call as well as at its report, and that is not a detail: the
+            // shell closes the block and sends its parse the moment a tool is asked for, so a row
+            // left marked as still arriving would be drawn as one while the tool ran — a reasoning
+            // block peeking at its tail instead of folded to a line, for as long as the tool takes.
+            closeAllBlocks()
 
         case let .status(text):
             status = text
@@ -248,6 +278,13 @@ public struct Conversation: Equatable {
             row.complete = true
             rows.append(row)
             status = ""
+        }
+        // A row arriving is the shell saying what is in this session, whatever it calls the event —
+        // so a transcript that has content is loaded, whether or not a `history` ever came. The
+        // belt to the flag's braces: it costs a comparison and it means the placeholder in the view
+        // cannot outlive the first real row even if some future path forgot to send the replay.
+        if !rows.isEmpty {
+            loaded = true
         }
     }
 

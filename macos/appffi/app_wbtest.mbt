@@ -211,6 +211,32 @@ test "history keeps one row per tool, with its output attached" {
 }
 
 ///|
+/// History ids are counted **per session**, so two sessions both number their rows `h-1`, `h-2`, …
+///
+/// Pinned because a host-side consequence depends on it and nothing in the shell would notice if it
+/// changed: the host draws a transcript with `ForEach(turns, id: \.element.id)`, and a turn's id is its
+/// question's row id. Two conversations that both start `h-1` therefore hand SwiftUI the *same* row
+/// identities across a switch, and a view it considers unchanged keeps its `@State` — which is how a
+/// fold the reader opened in one conversation comes back open over a different one. The host answers
+/// that by scoping the transcript's rows to their session (`RootView.swift`), which is correct whether
+/// or not this stays true; this test is here so that a change in the shell is a *decision* rather than
+/// a surprise.
+test "history ids start over in every session" {
+  let first = history_rows(@core.parse_session_file(@core.small_session_file))
+  let second = history_rows(@core.parse_session_file(@core.small_session_file))
+  let ids = fn(rows : Array[Json]) {
+    rows.map(fn(row) {
+      match row {
+        Json::Object(fields) => fields.get("id").unwrap().stringify()
+        _ => "?"
+      }
+    })
+  }
+  assert_eq(ids(first), ids(second))
+  assert_eq(ids(first)[0], "\"h-1\"")
+}
+
+///|
 test "a compaction stands in for the history it replaced" {
   let text =
     #|{"type":"session","version":3,"id":"s2","timestamp":"2026-08-23T06:26:15.210Z","cwd":"/tmp"}
@@ -311,21 +337,21 @@ test "settings carry the key source, the flags, the mode and the file" {
 }
 
 ///|
-/// A live block's parse is sent when the block stops growing, and only then.
+/// A block's rendering crosses as the same parse the `history` event carries, from the same `md`
+/// package — and it names how much of it the host is expected to already have.
 ///
-/// The timing is the whole of the design: a row that is still arriving is plain text on the host,
-/// because re-parsing a growing block on every delta is quadratic — measured, the web UI paid for that
-/// lesson with 40KB of reasoning in 64-character frames. So this event exists for the moment a block
-/// is over, and what is sent is the same parse the `history` event carries, from the same `md` package
-/// the web UI renders with.
-test "a finished block carries its parse, and an empty one carries nothing" {
+/// The `from` field is what makes rendering an answer while it arrives possible: a block that is still
+/// growing is re-sent as the part that changed, so the part the reader has already read is never sent
+/// twice. `0` means the whole block, which is what a block that has stopped growing always sends.
+test "a block's rendering carries its parse and the index it starts at" {
   let json = event("blocks", [
     ("id", Json::string("reply-2")),
+    ("from", Json::number(0, repr="0")),
     ("blocks", @md.blocks_json("## Heading\n\nwith `code`\n")),
   ])
   inspect(
     json.stringify(),
-    content="{\"kind\":\"blocks\",\"id\":\"reply-2\",\"blocks\":[{\"t\":\"h\",\"level\":2,\"spans\":[{\"t\":\"text\",\"text\":\"Heading\"}]},{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"with \"},{\"t\":\"code\",\"text\":\"code\"}]}]}",
+    content="{\"kind\":\"blocks\",\"id\":\"reply-2\",\"from\":0,\"blocks\":[{\"t\":\"h\",\"level\":2,\"spans\":[{\"t\":\"text\",\"text\":\"Heading\"}]},{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"with \"},{\"t\":\"code\",\"text\":\"code\"}]}]}",
   )
   // The three shapes the host branches on: a table, a fence with a language, and the null a row with
   // no text carries. All three are cases `AttributedString(markdown:)` gets wrong, which is why the
@@ -341,6 +367,149 @@ test "a finished block carries its parse, and an empty one carries nothing" {
   // Nothing to parse is the one value the host treats as "draw the text instead". Asserted through
   // the JSON literal rather than the value's own printer, because it is the literal that crosses.
   inspect(blocks_of("") is Json::Null, content="true")
+}
+
+///|
+/// The live rendering of a block that is still growing: the finished part, once, and never the part
+/// that is still being written.
+///
+/// The rule is the one thing that makes the feature affordable: the prefix up to the last blank line
+/// is parsed and sent when it first appears, and every frame after that is a diff — so the bytes on
+/// the wire are the bytes of the answer rather than the answer once per frame. What the reader has
+/// already read never moves, which is also what keeps the screen from reflowing under them.
+fn live_state(id : String) -> LiveMarkdown {
+  { id, sent: [], at_length: 0, at_ms: 0, }
+}
+
+///|
+test "a live frame carries the blocks that finished, not the one being written" {
+  let state = live_state("reply-1-1")
+  let frame = live_frame(state, "one\n\ntwo", 9, 1000).unwrap()
+  inspect(
+    event("blocks", frame.fields()).stringify(),
+    content="{\"kind\":\"blocks\",\"id\":\"reply-1-1\",\"from\":0,\"blocks\":[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"one\"}]}]}",
+  )
+  // The open paragraph is not in the frame: it is already on the host's screen as text, and sending
+  // it would be a frame that redraws it. The frame also recorded what it has sent.
+  inspect(state.sent.length().to_string(), content="1")
+}
+
+///|
+/// The second frame of the same block is only the part that changed — which is the whole point of the
+/// diff, and the difference between one parse per block and one parse per frame.
+test "a later live frame starts where the last one ended" {
+  let state = live_state("reply-1-1")
+  ignore(live_frame(state, "one\n\ntwo", 9, 1000))
+  let frame = live_frame(state, "one\n\ntwo\n\nthree", 17, 1200).unwrap()
+  inspect(
+    event("blocks", frame.fields()).stringify(),
+    content="{\"kind\":\"blocks\",\"id\":\"reply-1-1\",\"from\":1,\"blocks\":[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"two\"}]}]}",
+  )
+}
+
+///|
+/// The two gates, and both of them are needed. The clock alone would let a fast model pile up a
+/// second of text and then send it all at once — a stall in the middle of a stream, which is the one
+/// thing streaming exists to avoid. The size alone would make a slow model's every delta pay for a
+/// parse, and a model trickling out one character at a time is exactly the case this is *not* for.
+test "a live frame is refused until enough has changed or enough time has passed" {
+  let state = live_state("reply-1-1")
+  ignore(live_frame(state, "one\n\ntwo", 9, 1000))
+  // Same text, no time: refused, and refused *before* anything is parsed — which is the whole reason
+  // the gate is its own function: this is the common case, one delta out of many.
+  inspect(live_due(state, 9, 1010), content="false")
+  // Enough text, no time: due. (`LIVE_MARKDOWN_CHARS` is 64, and the paragraph below is longer.)
+  let grown = "one\n\ntwo\n\n" + "x".repeat(80)
+  inspect(live_due(state, grown.length(), 1010), content="true")
+  // Time alone: due, so a model sending a few characters a second still renders.
+  inspect(live_due(state, 9, 1300), content="true")
+}
+
+///|
+/// A due frame with nothing new *finished* in it says nothing.
+///
+/// The open paragraph is already on the host's screen as text, so a frame that re-sent it would
+/// redraw the same paragraph — and the clock having moved does not change that.
+test "a due frame with nothing finished in it is empty" {
+  let state = live_state("reply-1-1")
+  ignore(live_frame(state, "one\n\ntwo", 9, 1000))
+  inspect(live_frame(state, "one\n\ntwo", 9, 9999) is None, content="true")
+  // But the attempt still moved the clock, so the next delta is judged against it.
+  inspect(live_due(state, 9, 9999), content="false")
+}
+
+///|
+/// The host's copy of a row after a frame — the same rule `WeiModel`'s `Conversation.apply` uses.
+///
+/// Kept here rather than in the shell because it is the host's behaviour that the frames have to
+/// reconstruct, and the shell has no use for it.
+fn applied(held : Array[@md.Block], frame : LiveFrame) -> Array[@md.Block] {
+  let head = if frame.from < held.length() {
+    held[:frame.from].to_owned()
+  } else {
+    held
+  }
+  head + frame.blocks
+}
+
+///|
+/// **The property the whole live path rests on**: replaying a block's frames gives the same document
+/// as parsing the finished block once.
+///
+/// Asserted by replaying the deltas of a real-shaped answer the way the shell streams them — in
+/// 40-character pieces, at 20ms intervals, so the two gates admit some frames and refuse others — and
+/// comparing the host's copy with one parse of the whole block.
+///
+/// This is the test that catches a frame dropped, a diff off by one, a tail that repeats the head, and
+/// a final block that never arrives. It caught the second of those: the first version of the live frame
+/// carried the whole parse rather than the tail, and the host applied it as `head + head + tail` —
+/// which no single-frame test would have noticed, because one frame of a block with no history looks
+/// exactly right either way.
+test "replaying the frames of a block gives back the block" {
+  let source = "## Title\n\nfirst paragraph here\n\nsecond paragraph\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n- one\n- two\n\ntail\n\n"
+  let state = live_state("reply-9-1")
+  let mut held : Array[@md.Block] = []
+  let mut now = 1000UL
+  for at in 0..<(source.length() + 1) {
+    let arrived = source[:at].to_owned()
+    // The shell's own cadence: the clock moves, so the time gate admits frames as the block grows.
+    now += 20
+    match live_frame(state, arrived, at, now) {
+      Some(frame) => held = applied(held, frame)
+      None => ()
+    }
+  }
+  // The end of a block is not a live frame: the shell parses the whole of it and diffs, which is the
+  // one parse that is allowed to be of the whole thing.
+  let whole = @md.parse(source)
+  let from = @md.diff_prefix(state.sent, whole)
+  held = applied(held, {
+    id: "reply-9-1",
+    from,
+    blocks: whole[from:].to_owned(),
+  })
+  inspect(held == whole, content="true")
+  // And more than one frame was needed, or the replay above would be testing nothing.
+  inspect(state.sent.length() > 1, content="true")
+}
+
+///|
+/// A block that has not written a blank line yet has nothing finished in it, so there is nothing to
+/// render — the host draws the text, which is always right.
+test "a block with nothing finished sends no frame" {
+  let state = live_state("reply-2-1")
+  inspect(
+    live_frame(state, "one long paragraph", 17, 1000) is None,
+    content="true",
+  )
+}
+
+///|
+/// A fence is the case that would come out wrong: a blank line inside it is a blank line in a code
+/// block, not between blocks — cutting there would show two code blocks where the model wrote one.
+test "a blank line inside an open fence is not a live frame" {
+  let state = live_state("reply-3-1")
+  inspect(live_frame(state, "```\na\n\nb", 8, 1000) is None, content="true")
 }
 
 ///|
@@ -842,4 +1011,83 @@ test "new-in keeps the path whole, and a bare one is not a prompt" {
   assert_true(
     command_of("explain /new-in to me") is Prompt("explain /new-in to me"),
   )
+}
+
+///|
+/// Stop reaches the command that is running, and reaches it once.
+///
+/// This is the difference between a stop that works and a stop that looks like it works: the `aborting`
+/// flag is read between steps, and the step in progress *is* the tool — so before the handle was kept, a
+/// reader who pressed Stop during a long command watched it run to the end while the status line said
+/// "stopping…".
+test "stop reaches the running tool, and only once" {
+  let stopped : Ref[Int] = { val: 0, }
+  let handle : @agent.ToolHandle = {
+    name: "bash",
+    detail: "sleep 60",
+    arguments: Json::string("sleep 60"),
+    stop: () => stopped.val = stopped.val + 1,
+  }
+  let open = Open::new(
+    "/tmp/s.mbt",
+    "/tmp",
+    "m",
+    @core.Session::new(
+      {
+        id: "s",
+        timestamp: @core.format_iso_utc(0L),
+        cwd: "/tmp",
+        parent_session: None,
+        version: Some(3),
+      },
+      [],
+    ),
+  )
+
+  // Nothing running: a stop is not an error and stops nothing.
+  stop_running_tool(open)
+  assert_eq(stopped.val, 0)
+
+  // Running: the handle's own stop is what runs — this is the call that cancels the tool's task and, with
+  // it, the child process.
+  open.running_tool = Some(handle)
+  stop_running_tool(open)
+  assert_eq(stopped.val, 1)
+
+  // Taken, not read: a second Stop — two clicks, or one arriving after the tool has already reported — must
+  // not cancel whatever the turn started next.
+  assert_true(open.running_tool is None)
+  stop_running_tool(open)
+  assert_eq(stopped.val, 1)
+}
+
+///|
+/// A handle from a finished turn does not outlive it.
+///
+/// A stale handle would let Stop cancel work belonging to a reader's *next* question, which is a worse
+/// failure than not stopping at all: it would look like the agent dropping a command for no reason.
+test "the turn's end forgets its tool" {
+  let open = Open::new(
+    "/tmp/s.mbt",
+    "/tmp",
+    "m",
+    @core.Session::new(
+      {
+        id: "s",
+        timestamp: @core.format_iso_utc(0L),
+        cwd: "/tmp",
+        parent_session: None,
+        version: Some(3),
+      },
+      [],
+    ),
+  )
+  open.running_tool = Some({
+    name: "bash",
+    detail: "sleep 60",
+    arguments: Json::string("sleep 60"),
+    stop: () => (),
+  })
+  clear_running_tool(open)
+  assert_true(open.running_tool is None)
 }

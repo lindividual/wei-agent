@@ -241,6 +241,8 @@ private struct WorkspaceList: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            identity
+            searchField
             List(selection: $browsing) {
                 // **Two sections that are usually empty, and absent when they are.** Nothing running means
                 // no heading rather than an empty one: a section that says "Running sessions" over an empty
@@ -274,51 +276,98 @@ private struct WorkspaceList: View {
                 }
             }
             .listStyle(.sidebar)
-            // The list's content is inset under the search field the platform places in this column, so its
-            // first row lays out *above* the list's own top edge and is clipped: measured, the "Running tool
-            // calls" title came out at ay 154 with the list's frame starting at 169. A top content margin is
-            // what keeps the first row out of that band. (Found by dumping the accessibility tree, which is
-            // the only way this shows up — the row is in the tree, with a real size, and simply not drawn.)
+            // Air between the search field and the first heading, so the heading reads as a heading rather
+            // than as another row of the field. It used to be load-bearing: while the platform placed the
+            // field in this column's accessory band the list's content was inset *under* it, so the first row
+            // laid out above the list's own top edge and was clipped — measured, the "Running tool calls" title
+            // came out at ay 154 with the list's frame starting at 169. (Found by dumping the accessibility
+            // tree, which is the only way this shows up — the row is in the tree, with a real size, and simply
+            // not drawn.) The field is a row above the list now, so this is only room.
             .contentMargins(.top, Wei.Space.loose, for: .scrollContent)
-            settings
         }
-        // **The app's mark, in this column's own toolbar band, above the search field.** Drawn rather than
-        // imported, from the same `Wei.Mark` geometry the icon is drawn from, so the two cannot drift.
+        // **Settings, one glyph at the leading end of this column's own band.**
         //
-        // It was the first row of this column instead — the mark *and* the app's name — and what was removed
-        // is the row: a heading above the search field pushed everything this column is for (the projects)
-        // one row further down, to say a name the window's own menu bar already says. The name is now only
-        // in the tooltip.
+        // It was the last row of this column, at the bottom of the list, and that is where the mark used to
+        // be: the two swapped places, because the mark is the app's *identity* and identity reads first — it
+        // is what the column is, above everything the column lists — while preferences are the app's own
+        // control and belong where a control belongs, in the band the platform gives this column for
+        // controls. A reader looking for them looks in the app menu first anyway (`⌘,` is still wired).
         //
-        // `.automatic` is the placement that lands in *this* column's band. Declared here it sits at the
-        // leading end of the sidebar — in front of the platform's own sidebar toggle, and above the search
-        // field rather than beside it. The same item declared `.navigation` lands in the *content* column
+        // `.automatic` is the placement that lands in *this* column's band: declared here it occupies the
+        // leading end of the sidebar, ahead of the platform's own sidebar toggle (measured: gear
+        // `x=117…157`, toggle `161…204`). The same item declared `.navigation` lands in the *content* column
         // instead, and `.primaryAction` is the window's trailing edge, which is where the session buttons
         // are.
         .toolbar {
             ToolbarItem(placement: .automatic) {
-                Wei.MarkView(height: 18)
-                    .accessibilityLabel("wei Agent")
-                    .help("wei Agent")
+                Button {
+                    openSettings()
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .help("Settings (⌘,)")
+                .accessibilityLabel("Settings")
             }
         }
-        // **The platform's own search, placed in the sidebar.** It was a hand-rolled capsule inside this
-        // column's content, and that is the version this file argued for at length — the reasoning was
-        // sound for a deployment target of macOS 14 and is wrong now on two counts.
-        //
-        // First, the scope: the query spans *every* project, and a field drawn inside the sessions column
-        // read as "filter the list I am looking at". Put at the top of the workspace column it says what it
-        // does — the search covers all of them — and `.sidebar` is the placement that means exactly this.
-        //
-        // Second, and what settled it: our capsule was `.glassEffect` on the app's own surface, and glass
-        // over the sidebar's vibrant material renders *dark* (measured: fill 124–138 against the sidebar's
-        // 220–247) — a black pill in a light sidebar. `.searchable` is the system's search field, so it
-        // renders the way the platform renders one over a sidebar, in every appearance, without us keeping
-        // a second implementation of a control the system already has.
-        .searchable(text: $search, placement: .sidebar, prompt: "Search all sessions")
         // The register was refreshed when the popover opened; now that the rows are always on screen it is
         // refreshed when the column appears, and on every revision the shell sends (see `ShellClient.jobs`).
         .onAppear { client.refreshJobs() }
+    }
+
+    /// **Who this column is, at the head of it: the app's mark and name, with the search field under them.**
+    ///
+    /// Both were in the toolbar band — the mark as a toolbar item, the search field as `.searchable`'s
+    /// sidebar accessory — and they are rows of this column now, in this order, because of what the band is:
+    /// a strip 52 points tall that the whole window shares and one line deep. Two things stacked in it do not
+    /// stack: the item's own height does not grow the band (measured — a 31-point item and an ordinary one
+    /// occupy the same strip), and the wider item instead squeezes its neighbour. The mark and the platform's
+    /// own sidebar toggle wanted 61 of this column's 208 points together, and the toggle came out 38 wide
+    /// instead of 47. Anything placed *above* an accessory band fares no better — that is the titlebar's drag
+    /// region, and there is no room between the two for a row of this column's own.
+    ///
+    /// Drawn rather than imported, from the same `Wei.Mark` geometry the icon is drawn from, so the two cannot
+    /// drift. Its leading edge is `loose` (16) past the column's edge — the same 16 the rows' own content starts
+    /// at (their 10 of row inset plus 6 of cell inset) — so the mark, the magnifier under it and the folders
+    /// below that line up: measured, the mark and the magnifier both at `x=24` of a column starting at `x=8`,
+    /// and the folder glyphs at 26 because theirs is centred in an 18-wide slot. The name follows at the mark's
+    /// own width plus `tight`, which is what puts it over the rows' labels rather than a few points off them.
+    private var identity: some View {
+        HStack(spacing: Wei.Space.tight) {
+            Wei.MarkView(height: 18)
+            Text("wei Agent")
+                .font(Wei.Font.control(.semibold))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, Wei.Space.loose)
+        .padding(.trailing, Wei.Space.regular)
+        .padding(.top, Wei.Space.cozy)
+        .padding(.bottom, Wei.Space.tight)
+        .accessibilityElement()
+        .accessibilityLabel("wei Agent")
+    }
+
+    /// **The search field, placed by this column rather than by `.searchable`.**
+    ///
+    /// The control is the platform's own `NSSearchField` — the same one `.searchable(placement: .sidebar)`
+    /// put in this column's accessory band — so the field renders the way the platform renders one over a
+    /// sidebar, in every appearance. What changed is who places it.
+    ///
+    /// `.searchable`'s band sits *below* the titlebar and *above* this column's content: the sidebar's safe
+    /// area starts under it (measured: the field at `y=61…89`, this column's content only from `y=98`), so
+    /// nothing drawn in this column can ever be above the field — it would have to be drawn over the list
+    /// and under a blur that belongs to the list's scroll view. Placing the control here is what makes the
+    /// order the reader asked for expressible: identity, then search, then the list.
+    ///
+    /// **The field keeps the size and the insets the platform gave it**, so it is the same control in the same
+    /// shape: 28 points tall, 10 in from this column's edge (the old accessory's `x=18` of a column starting at
+    /// `x=8`), 9 above and below — which is why those three numbers are written as what they are rather than as
+    /// the nearest token. What the reader asked for is the order around it, not a different field.
+    private var searchField: some View {
+        SessionSearchField(text: $search, placeholder: "Search all sessions")
+            .frame(height: 28)
+            .padding(.horizontal, Wei.Space.cozy + Wei.Space.tiny)
+            .padding(.vertical, Wei.Space.cozy + 1)
     }
 
     /// Which project a running session belongs to, for the row that has room for one word of it.
@@ -352,40 +401,57 @@ private struct WorkspaceList: View {
         .buttonStyle(.plain)
     }
 
-    /// Settings, as one glyph at the bottom of this column.
-    ///
-    /// It is the app's own control, not this column's and not that one's — and a control that belongs to no
-    /// column is what the bottom of the first column is for. The web UI pins its equivalent to the bottom of
-    /// the sidebar for exactly this reason, and a Mac reader looking for preferences looks in the app menu
-    /// first anyway (`⌘,` is still wired).
-    ///
-    /// **The glyph alone**: the word beside it said nothing the gear does not, and the hairline over it was
-    /// the last divider left in this column (the top of the column had one for the same reason, and lost it
-    /// for the same reason). What replaces the two is where it sits: the gear's own box is the **slot the
-    /// project rows put their folders in** (`WorkspaceRow.glyphSlot`), placed where those rows' content starts
-    /// — `loose` (16) past this column's edge, which is the list's 10 of row inset plus 6 of cell inset. So
-    /// the gear shares a centre line with both the folders above it and the magnifier in the search field
-    /// (measured: `x=33` from the column's edge, all three). The height is a control's, which is what makes
-    /// it a comfortable thing to click.
-    private var settings: some View {
-        HStack(spacing: 0) {
-            Button {
-                openSettings()
-            } label: {
-                Image(systemName: "gearshape")
-                    .font(Wei.Font.control())
-                    .frame(width: WorkspaceRow.glyphSlot, height: Wei.Control.small)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Settings (⌘,)")
-            .accessibilityLabel("Settings")
-            Spacer(minLength: 0)
+}
+
+/// The platform's search field, placed by the view that owns the query.
+///
+/// `NSViewRepresentable` rather than a hand-drawn capsule, and that is the whole point of it: this column
+/// once drew its own field, and the version that replaced it with `.searchable` was right that a hand-rolled
+/// `.glassEffect` pill over the sidebar's vibrant material renders *dark* (measured: fill 124–138 against the
+/// sidebar's 220–247). What is reverted is only the *placement* — the control is the platform's, so the
+/// bezel, the magnifier, the clear button, the appearance, and the focus behaviour are the platform's too.
+///
+/// The binding is followed in both directions: typing goes out on every keystroke (`sendsSearchStringImmediately`
+/// is what makes this the live filter the list expects rather than one that waits for Return), and a value
+/// set from outside — the clear button, or a future menu item — is written back into the field.
+private struct SessionSearchField: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        // The sidebar band's own height: `.regular` draws a 24-point bezel, and the field this replaced was
+        // 28 (measured in that band), which is the size the platform gives a search field in a sidebar.
+        field.controlSize = .large
+        field.placeholderString = placeholder
+        field.sendsSearchStringImmediately = true
+        field.sendsWholeSearchString = false
+        field.delegate = context.coordinator
+        return field
+    }
+
+    func updateNSView(_ field: NSSearchField, context: Context) {
+        context.coordinator.text = $text
+        if field.stringValue != text {
+            field.stringValue = text
         }
-        .foregroundStyle(Wei.Palette.secondary)
-        .padding(.leading, Wei.Space.loose)
-        .padding(.trailing, Wei.Space.regular)
-        .padding(.vertical, Wei.Space.tight)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var text: Binding<String>
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSSearchField else { return }
+            text.wrappedValue = field.stringValue
+        }
     }
 }
 
@@ -556,30 +622,47 @@ private struct SessionList: View {
         // No field here any more: the query spans every project, so its control lives in the workspace
         // column. What is left in this one is the list that query produces.
         list
-        // **And no toolbar of its own any more.** The button that adds a row to this list is at the window's
-        // trailing edge, in `ConversationView`'s toolbar, next to the one that renames the session on screen:
-        // `.primaryAction` is the window's trailing edge *whatever column declares it* (measured: `x=872…917`
-        // of 921), so declaring it here never put it over this column — and declaring it at this column's
-        // leading position (`.navigation`) displaced the window's own title out of the column
-        // (`x=230…864` → `x=397…557`). Two session actions on the window's right is the arrangement both
-        // measurements point at.
+        // **And no toolbar of its own any more.** Renaming the session on screen is at the window's trailing
+        // edge, in `ConversationView`'s toolbar: `.primaryAction` is the window's trailing edge *whatever
+        // column declares it* (measured: `x=872…917` of 921), so declaring it here never put it over this
+        // column — and declaring it at this column's leading position (`.navigation`) displaced the window's
+        // own title out of the column (`x=230…864` → `x=397…557`).
+        //
+        // Starting a session is declared there too and *also* drawn here, as this list's first row. The two
+        // are one action for two moments: the toolbar item is what a reader reaches for with the pointer
+        // already at the window's top, and the row is the control where they are looking when the list is
+        // what told them the session they wanted is not there. The workspace column pairs its "Add
+        // Workspace…" row with a File menu item the same way.
     }
 
     private var list: some View {
         List(selection: selection) {
+            // Hidden while searching, because this column is then a *result set* spanning every project and
+            // "New Session" would have no project to name — the row would promise an addition to the list
+            // the reader is looking at, which is not the list it would add to.
+            if !searching {
+                newSession
+            }
             ForEach(sections) { section in
                 SwiftUI.Section {
                     ForEach(section.rows) { row in
                         SessionRowView(
                             row: row,
-                            workspace: workspaceLabel(of: row),
+                            // The project is named on the row **only while searching**, and that is the one
+                            // case where it is not a repetition: a result set spans every project, so a row
+                            // that did not say which one it came from would be a row the reader had to check
+                            // the first column for. Everywhere else this list is one project's sessions and
+                            // the column's own heading already names it, so the line was a second copy of a
+                            // fact one line above it — removed for that reason (it was added for the search
+                            // case, which now asks for it rather than always paying for it).
+                            workspace: searching ? workspaceLabel(of: row) : nil,
                             onRename: { onRename(row) },
                             onDelete: { delete(row) }
                         )
                         .tag(row.path)
                     }
                 } header: {
-                    // These are *time* headings — Today, Previous 30 Days — and they carry the same job
+                    // These are *time* headings — Today, Yesterday, Previous 7 Days — and they carry the same job
                     // Notes' month headings do: they are how a reader finds a session by when it was
                     // rather than by what it was called. Notes sets its own at the control size and
                     // semibold; the list style's default here is a caption, which measured 10 points of
@@ -619,13 +702,47 @@ private struct SessionList: View {
         }
     }
 
+    /// Adding one, as the *first* row of the list it adds to.
+    ///
+    /// The shape is `WorkspaceList.addWorkspace`'s, deliberately: the two columns are read as one window,
+    /// and the single row in a list that *acts* rather than names should not be the one row drawn a
+    /// different way. The glyph takes a workspace row's own slot (`WorkspaceRow.glyphSlot`) for the same
+    /// reason — the two pluses land at the same x down the window.
+    ///
+    /// **No ellipsis in the label**, which is the one place this departs from "Add Workspace…": that one
+    /// opens a chooser and asks for more, and this one starts a session where the reader already is. An
+    /// ellipsis is a promise that a dialog follows.
+    ///
+    /// The eight points of padding are `SessionRowView`'s own, so this row's plus starts on the same edge as
+    /// the session names below it. The label therefore sits one glyph-slot in from those names, and that is
+    /// the intent rather than a mistake: this list has no glyph column, so the indent is what marks the row
+    /// as a button among rows that are documents.
+    private var newSession: some View {
+        Button {
+            client.newSession()
+        } label: {
+            HStack(spacing: Wei.Space.tight) {
+                Image(systemName: "plus")
+                    .font(Wei.Font.control())
+                    .frame(width: WorkspaceRow.glyphSlot, alignment: .center)
+                Text("New Session")
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(Wei.Palette.accent)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, Wei.Space.cozy)
+        .help("New session in this project (⌘N)")
+    }
+
     private var emptyMessage: String {
         if searching {
             return "No sessions match."
         }
-        // Said without pointing at a control: the button that starts one is in this column's own
-        // toolbar, and the sentence that used to be here ("Type below to start one") pointed at a
-        // composer that lives in the next column over.
+        // Said without pointing at a control: the button that starts one is the first row of this list
+        // (and the toolbar item at the window's trailing edge), and the sentence that used to be here
+        // ("Type below to start one") pointed at a composer that lives in the next column over.
         return groups.contains(where: { $0.cwd == browsing })
             ? "No sessions in this project."
             : "No project selected."
@@ -699,10 +816,11 @@ private struct UndoRow: View {
 
 /// One session, in the list.
 ///
-/// Three lines, and each is a different question the reader is asking: *which* conversation (the label),
-/// *where* it lives (the project, in small type under it), and *when* it was last used. The project is the
-/// one the middle line had to wait for: these rows are one project's sessions, but a **search result is not**
-/// — the query spans every project, so a result has to say which project it came from.
+/// **Two lines, and each is a question the reader is asking**: *which* conversation (the label) and *when* it
+/// was last used. A third line appears only when it has something to say that the two do not: *where* the row
+/// lives, which is a fact the row has to carry **only as a search result** — these rows are one project's
+/// sessions and the window's title names that project, so the line was a second copy of a fact one line above
+/// it — and *that a turn is in flight* in it, which nothing else on screen says.
 ///
 /// The name is weighted rather than coloured to make it the top line. It was 15 semibold for a while, and
 /// that read as a *heading*: three quarters of the way to the window's own section headings (13 semibold) and
@@ -710,8 +828,9 @@ private struct UndoRow: View {
 /// column already uses for a project and its count, which is what makes the two lists read as one system.
 private struct SessionRowView: View {
     let row: SessionRow
-    /// The project this session lives in, as the first column names it.
-    let workspace: String
+    /// The project this session lives in, as the first column names it — `nil` unless the list is a result
+    /// set, where which project a row came from is a fact the row has to carry itself.
+    let workspace: String?
     let onRename: () -> Void
     let onDelete: () -> Void
 
@@ -723,26 +842,44 @@ private struct SessionRowView: View {
                 .font(Wei.Font.control(.medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
+            // **The second line always exists and always holds the same kinds of things**, which is a
+            // requirement rather than a style: a `List` row measures itself when it is *built*, and a row whose
+            // height changes in place is never measured again. Measured, twice — a turn starting added a line
+            // and the time was clipped by the row's own bottom edge (`y=168…183` inside a row ending at `y=175`),
+            // and a search result did the same thing (`y=166…181`). Same identity, same view, stale height.
+            //
+            // So everything after the name goes on one line: the project (a search result only — this list
+            // spans projects then, and the window's title names it otherwise), then the time, then the status.
+            // A fixed height tall enough for a third line would have worked too and would have spent those
+            // points on every quiet row to pay for the rare busy one.
             HStack(spacing: Wei.Space.tight) {
-                Text(workspace)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                if let workspace {
+                    Text(workspace)
+                        .font(Wei.Font.caption())
+                        .foregroundStyle(Wei.Palette.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("·")
+                        .font(Wei.Font.caption())
+                        .foregroundStyle(Wei.Palette.tertiary)
+                }
+                Text(sessionAgeText(modified: row.modified, now: Date(), calendar: .current))
+                    .font(Wei.Font.caption())
+                    .foregroundStyle(Wei.Palette.tertiary)
                 if row.running {
-                    // A turn in flight *in this session*. With more than one conversation able to run at
-                    // once this is a per-row fact rather than a statement about the window, which is
-                    // exactly what the shell sends it as — and it is the only state the wire carries per
-                    // row, so it is the only one drawn.
+                    // A turn in flight *in this session*. With more than one conversation able to run at once
+                    // this is a per-row fact rather than a statement about the window, which is exactly what the
+                    // shell sends it as — and it is the only state the wire carries per row, so it is the only
+                    // one drawn.
                     StatusChip(text: "Running")
+                        .font(Wei.Font.caption())
                 }
             }
-            .font(Wei.Font.caption())
-            .foregroundStyle(Wei.Palette.secondary)
-            Text(sessionAgeText(modified: row.modified, now: Date(), calendar: .current))
-                .font(Wei.Font.caption())
-                .foregroundStyle(Wei.Palette.tertiary)
         }
-        // Taller than the three lines of text, and the same height whatever the middle line holds, so the
-        // list does not step: a row with a status chip is not a taller row than one without.
+        // A control's height, so the shortest row — a name and a time — is not a tight box drawn around two
+        // lines of type. **The height does not depend on what is in the row**, which is a requirement rather
+        // than a preference here: see the note on the last line — a row that grows in place is a row the list
+        // does not re-measure.
         .frame(minHeight: Wei.Control.row, alignment: .leading)
         // Room inside the row, since the platform's list will not take it on the outside: see the note on the
         // list in `SessionList`. Eight a side is what puts this column's text on the **same left edge as the
@@ -912,6 +1049,15 @@ private struct ConversationView: View {
                                 .help(workspacePath)
                         }
                     }
+                        // **Air above the name — and the number here is twice what it moves.**
+                        //
+                        // The block is centred on the toolbar's centre line (`titleLift`), so padding inside
+                        // it is paid for twice over: half of it pushes the type down, and the other half makes
+                        // the block taller, which pulls it back up by as much as it pushed down. Eight points
+                        // therefore reads as four. Measured: the name's line box moves from `y=5` — level with
+                        // the top of the traffic lights, which is what "touching the window's top edge" was —
+                        // to `y=9`, and the project line below it stays inside the band, at `y=35…50`.
+                        .padding(.top, Wei.Space.cozy)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.leading, Wei.Space.section)
                         // Room at the trailing end for the toolbar's own buttons, which are on this row once the
@@ -1090,6 +1236,20 @@ private struct TranscriptViewportKey: PreferenceKey {
     }
 }
 
+/// How tall three lines of the reasoning font are, as the text view lays them out.
+///
+/// The live peek in `ThinkingRow` is a fixed-height box anchored to its end, so something has to say
+/// how tall three lines are — and the answer has to be the text system's, not a font's: `NSFont`'s
+/// ascender and descender are the same numbers only by accident, and the one number that matters is
+/// how far apart the platform puts two baselines. It is measured from a hidden probe rather than
+/// computed, which is what `ConversationTitleHeightKey` does one column over and for the same reason.
+private struct PeekHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct TranscriptView: View {
     let conversation: Conversation
     let revision: Int
@@ -1144,6 +1304,19 @@ private struct TranscriptView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Wei.Space.section) {
+                    if !conversation.loaded {
+                        // **An empty column is indistinguishable from a broken one.** The reader has
+                        // switched conversations and the shell is still reading the log — the rows are
+                        // on their way, but nothing on screen says so, and the same blank frame is what
+                        // a failed load would look like. One line costs nothing and answers the only
+                        // question the reader has at that moment.
+                        //
+                        // Not a spinner: the wait is measured in milliseconds (see
+                        // `Conversation.loaded`), and a spinner that appears and vanishes inside one
+                        // run-loop turn reads as a flicker. The sentence is what the reader needs; the
+                        // motion would only be the second thing to look at.
+                        OpeningNotice()
+                    }
                     ForEach(Array(turns.enumerated()), id: \.element.id) { index, turn in
                         TurnView(
                             turn: turn,
@@ -1154,6 +1327,19 @@ private struct TranscriptView: View {
                         )
                     }
                 }
+                // **Rows belong to their conversation, and the ids alone do not say so.** The shell counts
+                // history ids per session (`h-1`, `h-2`, … in `macos/appffi/sessions.mbt`), so two
+                // conversations hand this list the *same* identities — and SwiftUI keeps `@State` for an
+                // identity it considers unchanged, which is how a reasoning block the reader opened in one
+                // conversation comes back open in another. Keying the stack by the session makes each
+                // conversation's rows their own views, so nothing carries across. It costs a rebuild on a
+                // switch, which is what a switch is.
+                //
+                // On the stack rather than on the `ScrollView` above it, deliberately: the scroll view and
+                // its offset are the *column's* state, and the landing at the end of a newly-opened
+                // conversation is driven from here (`onChange(of: session)` below). Giving the scroll view
+                // a new identity too would take that mechanism with it.
+                .id(session)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(Wei.Space.section)
                 // The two measurements: where the content ends, and how tall the window is. The
@@ -1211,8 +1397,11 @@ private struct TranscriptView: View {
             // is the stronger one, and `nil` (or `scrollEdgeEffectHidden`) turns the whole thing off.
             .scrollEdgeEffectStyle(.soft, for: .top)
             .onChange(of: revision) { _, _ in
-                guard scroll.following, let last = conversation.rows.last else { return }
-                proxy.scrollTo(last.id, anchor: .bottom)
+                guard scroll.following, let end = WeiModel.endOf(conversation.rows) else { return }
+                // Deferred by one turn of the run loop, for the same reason the switch below is: a row that
+                // has just arrived has not been built yet, and scrolling to a row that is not there does
+                // nothing. `LazyVStack` is what makes this matter — it builds what is near the viewport.
+                DispatchQueue.main.async { proxy.scrollTo(end, anchor: .bottom) }
             }
             // Opening a session lands at its end, whatever the reader was doing in the last one.
             //
@@ -1223,9 +1412,21 @@ private struct TranscriptView: View {
             // wants to start. The web UI made the same call for the same reason.
             .onChange(of: session) { _, _ in
                 scroll.opened()
-                guard let last = conversation.rows.last else { return }
+                // **The end is a *turn*, not the last row**, and that distinction is the whole of a bug: the
+                // view registers turn ids, `scrollTo` does nothing at all for an id nothing answers to, and
+                // after any answer the last row is a piece of that answer. So the switch landed at the top
+                // of the new conversation and stayed there. `endOf` is the rule, tested in `WeiModel`.
+                //
+                // **The rows have to be here by now, and that is the shell's half of this.** This runs on
+                // the frame that changes which session is on screen, and it returns immediately for an
+                // empty transcript — so a shell that says "this session is on screen" before it says what
+                // is *in* the session hands this one shot at a transcript with nothing in it, and the
+                // reader lands at the top of a conversation they have not read (which is what happened:
+                // it is half of "it goes white and I have to scroll"). `say_open` sends the rows first for
+                // exactly this reason; the pairing is asserted in `TranscriptRoutingTests`.
+                guard let end = WeiModel.endOf(conversation.rows) else { return }
                 // After the rows are laid out: scrolling to a row the view has not built yet does nothing.
-                DispatchQueue.main.async { proxy.scrollTo(last.id, anchor: .bottom) }
+                DispatchQueue.main.async { proxy.scrollTo(end, anchor: .bottom) }
             }
             // The reader's own scrolling, which is the only thing that can stop the following. A
             // local monitor because SwiftUI on macOS 14 has no "the user scrolled" callback: the
@@ -1257,12 +1458,20 @@ private struct TranscriptView: View {
 /// copy of it rather than a second opinion: a conversation reads the same way in both front ends, or the two
 /// stops agreeing about what a turn is. What the reader gets is the answer and a line saying how much work
 /// went into it; the work itself is one click away.
+///
+/// **A turn that is still running is the exception**, and it is the one the transcript's readability
+/// turns on: its work is drawn open (a fold a reader has to open to watch the agent work would be
+/// opened on every turn), and *open* is not the same as *everything*. A live turn shows the call it is
+/// on and one line for the calls behind it — see `WeiModel.liveWork` for the rule and `LiveWorkTests`
+/// for the cases.
 private struct TurnView: View {
     let turn: Turn
-    /// Whether this turn is still arriving. A live turn draws its work open.
+    /// Whether this turn is still arriving. A live turn draws its work open, one call at a time.
     let live: Bool
 
     @State private var workOpen = false
+    /// Whether the live fold — the calls this turn has already finished — is open.
+    @State private var earlierOpen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Wei.Space.regular) {
@@ -1278,11 +1487,7 @@ private struct TurnView: View {
                 // which is the line it opened with.
                 foldButton(open: workOpen || live)
                 if workOpen || live {
-                    VStack(alignment: .leading, spacing: Wei.Space.regular) {
-                        ForEach(turn.work) { row in
-                            RowView(row: row).id(row.id)
-                        }
-                    }
+                    work
                 }
             }
             if let answer = turn.answer {
@@ -1290,6 +1495,68 @@ private struct TurnView: View {
             }
             if let figures = turn.figures {
                 TurnFigures(text: figures)
+            }
+        }
+    }
+
+    /// The work, drawn differently while the turn is running.
+    ///
+    /// A finished turn shows every row where it stands: a reader who opened this fold has decided to
+    /// read the working out, and the order it happened in is the record. A live one shows the newest
+    /// call and a fold over the finished ones, because the reader is watching rather than reading.
+    @ViewBuilder
+    private var work: some View {
+        let plan = liveWork(turn.work)
+        VStack(alignment: .leading, spacing: Wei.Space.regular) {
+            if live {
+                ForEach(plan.items) { item in
+                    switch item {
+                    case let .row(row):
+                        RowView(row: row)
+                    case .fold:
+                        earlierCalls(plan)
+                    }
+                }
+            } else {
+                ForEach(turn.work) { row in
+                    RowView(row: row).id(row.id)
+                }
+            }
+        }
+    }
+
+    /// The calls a live turn has already finished, behind one line.
+    ///
+    /// It opens onto the rows themselves rather than a summary of them — the point of opening a fold
+    /// over tool calls is reading what the tools said, and a second summary of what is already a
+    /// summary is a click that buys nothing.
+    private func earlierCalls(_ plan: LiveWork) -> some View {
+        VStack(alignment: .leading, spacing: Wei.Space.regular) {
+            Button {
+                earlierOpen.toggle()
+                // Opening these is asking to read the working out, so the turn's own fold stays open
+                // when the turn ends — otherwise the thing they just opened is taken away from them
+                // the moment the answer arrives.
+                if earlierOpen { workOpen = true }
+            } label: {
+                HStack(spacing: Wei.Space.tight) {
+                    Image(systemName: earlierOpen ? "chevron.down" : "chevron.right")
+                        .font(.system(size: Wei.Icon.inline - 2, weight: .semibold))
+                    Text(plan.label)
+                        .font(Wei.Font.caption())
+                }
+                .foregroundStyle(Wei.Palette.secondary)
+            }
+            .buttonStyle(.plain)
+            .help(earlierOpen ? "Hide these calls" : "Show these calls")
+            if earlierOpen {
+                VStack(alignment: .leading, spacing: Wei.Space.regular) {
+                    ForEach(plan.folded) { row in
+                        RowView(row: row).id(row.id)
+                    }
+                }
+                // Indented, so the fold reads as holding them rather than as another row beside them.
+                .padding(.leading, Wei.Space.regular)
             }
         }
     }
@@ -1308,6 +1575,33 @@ private struct TurnView: View {
         }
         .buttonStyle(.plain)
         .help(open ? "Hide what it did" : "Show what it did")
+    }
+}
+
+/// What the transcript says while the shell is still reading a session's log.
+///
+/// The state it exists for is short — measured, about 150ms for a 30MB conversation — and that is
+/// exactly why it matters: it is long enough to see, and what the reader sees without this is the same
+/// empty column a broken load would leave. A blank column is indistinguishable from a list that has not
+/// loaded, which is the rule the sidebar's own empty state is written to (`WeiModel/Sessions.swift`).
+///
+/// The wording follows the same advice: name what is happening, not that something *is* happening.
+/// "Opening…" is the reader's own act (`docs/design-system.md`'s plain-language rule); "Loading…"
+/// would describe the machine. No ellipsis-abuse and no exclamation — it is a sentence about the
+/// conversation, in the place the conversation will be.
+///
+/// Deliberately not a `ProgressView`: the wait is one run-loop turn, so a spinner would appear and
+/// vanish inside a frame, which reads as a flicker rather than as progress.
+private struct OpeningNotice: View {
+    var body: some View {
+        Text("Opening…")
+            .font(Wei.Font.control())
+            .foregroundStyle(Wei.Palette.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, Wei.Space.regular)
+            // Named for a reader who cannot see the layout: a bare "Opening…" in a transcript reads as
+            // the conversation's own words.
+            .accessibilityLabel("Opening the conversation")
     }
 }
 
@@ -1331,45 +1625,113 @@ private struct TurnFigures: View {
     }
 }
 
-/// The reasoning of a turn: dimmed, indented, and folded once it has stopped arriving.
+/// The reasoning of a turn: dimmed, indented, and three lines of it at a time.
+///
+/// Two shapes, one per state of the block, and the shape is the answer to "how much of it does the
+/// reader want on screen":
+///
+/// - **still arriving**: the last `peekLines` lines, at a **fixed height**, with a click that opens
+///   all of it. The end of it is what the model is thinking *now*, which is the only part worth
+///   watching — and a fixed height is what keeps the rest of the turn on screen while they watch. A
+///   reasoning model produces tens of kilobytes in a minute; drawn open, that is a column of text the
+///   answer is below, and the live tool call that says what is happening scrolls off the bottom.
+/// - **finished**: one line saying there was some, and the whole of it behind a click. What was
+///   interesting about a finished thought is that it happened at all.
+///
+/// The box is anchored to its **end**, which is the reason it is a fixed-height frame rather than a
+/// `lineLimit`: a `lineLimit` keeps the *first* lines of what it is given, so a long paragraph that
+/// has not yet wrapped past three lines would look frozen — the reader would be shown the beginning
+/// of the thought while the model was fifty lines further on. Clipping the bottom of the box instead
+/// means the newest line is always the one at the bottom edge.
+///
+/// Two costs, both paid deliberately:
+///
+/// - an `NSFont` metric would have to be trusted to size the frame, so the height is **measured** from
+///   a hidden three-line probe of the same font. Same lesson as `ConversationTitleHeightKey`: the
+///   number that matters is the text view's idea of a line, not a font's;
+/// - only a **slice** of the text is handed to the view, so what is laid out while a block streams is
+///   a few lines rather than everything arrived so far. The slice is longer than the box on purpose —
+///   the top of it is clipped away — so that the bottom edge is always the live edge.
 private struct ThinkingRow: View {
     let row: Row
     @State private var expanded = false
 
-    /// Folded only when the block is finished *and* the reader has not opened it: a block still arriving is
-    /// open, because that is what the reader is watching.
-    private var showsText: Bool {
-        expanded || !row.complete
-    }
+    /// How tall the box is, as reported by the probe below. Zero only for the frame before the probe
+    /// has answered.
+    @State private var peekHeight: CGFloat = 0
+
+    /// The lines a block still arriving shows.
+    private static let peekLines = 3
+
+    /// Whether any text is drawn: a block still arriving always shows its tail, a finished one only
+    /// when the reader has asked.
+    private var showsText: Bool { expanded || !row.complete }
+
+    /// Whether the text is being *peeked at* — tail, clipped to three lines — rather than read.
+    private var peeking: Bool { !expanded && !row.complete }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Wei.Space.tight) {
             if showsText {
-                Text(row.text)
-                    .font(Wei.Font.code())
-                    .foregroundStyle(Wei.Palette.secondary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                text
             }
-            if row.complete {
-                Button {
-                    expanded.toggle()
-                } label: {
-                    HStack(spacing: Wei.Space.tight) {
-                        Image(systemName: "brain")
-                            .font(.system(size: Wei.Icon.inline - 1))
-                        Text(expanded ? "Hide reasoning" : "Reasoning")
-                    }
-                    .font(Wei.Font.caption())
+            Button {
+                expanded.toggle()
+            } label: {
+                HStack(spacing: Wei.Space.tight) {
+                    Image(systemName: "brain")
+                        .font(.system(size: Wei.Icon.inline - 1))
+                    Text(label)
                 }
-                .buttonStyle(.link)
-                .foregroundStyle(Wei.Palette.secondary)
+                .font(Wei.Font.caption())
             }
+            .buttonStyle(.link)
+            .foregroundStyle(Wei.Palette.secondary)
         }
         .padding(.leading, Wei.Space.regular)
         .overlay(alignment: .leading) {
             Rectangle().fill(.quaternary).frame(width: 2)
         }
+        .onPreferenceChange(PeekHeightKey.self) { measured in peekHeight = measured }
+    }
+
+    @ViewBuilder
+    private var text: some View {
+        let output = Text(peeking ? reasoningPeek(row.text) : row.text)
+            .font(Wei.Font.code())
+            .foregroundStyle(Wei.Palette.secondary)
+            .textSelection(.enabled)
+            // The natural height of the whole slice, so that the frame below has something taller
+            // than itself to align to the bottom and clip.
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        if peeking {
+            output
+                .frame(maxHeight: peekHeight, alignment: .bottom)
+                .clipped()
+                .background(probe)
+        } else {
+            output
+        }
+    }
+
+    /// Three lines of the font this text is drawn in, invisible, and asked only for its height.
+    private var probe: some View {
+        Text(Array(repeating: "A", count: Self.peekLines).joined(separator: "\n"))
+            .font(Wei.Font.code())
+            .hidden()
+            .background(
+                GeometryReader { geometry in
+                    Color.clear.preference(key: PeekHeightKey.self, value: geometry.size.height)
+                }
+            )
+    }
+
+    /// What the button says, which is one word per state of the reader's attention rather than one
+    /// word for the row: the activity while it is happening, the content once they have opened it.
+    private var label: String {
+        if expanded { return "Hide reasoning" }
+        return row.complete ? "Reasoning" : "Thinking…"
     }
 }
 
@@ -1441,14 +1803,14 @@ private struct RowView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
         case .thinking:
-            // Reasoning, folded: it is worth being able to read and not worth competing with the answer.
+            // Reasoning, never all of it: it is worth being able to read and not worth competing with
+            // the answer. It arrives before the answer and is often the longest thing in a turn, so
+            // drawing it whole — finished or still arriving — puts a page of working-out between the
+            // reader's question and the answer.
             //
-            // It arrives before the answer and is often the longest thing in a turn, so leaving it open puts a
-            // page of working-out between the reader's question and its answer. The web UI folds it for the
-            // same reason; a summary line says there was some, and a click opens it.
-            //
-            // Kept open while it is still arriving: a fold that has to be opened to watch the agent think is a
-            // fold opened and closed on every turn.
+            // What changes with the state is *which* few lines, and that is `ThinkingRow`'s own
+            // rule: the tail while it is arriving (what it is thinking now), a summary line once it
+            // has stopped.
             ThinkingRow(row: row)
 
         case .tool:
@@ -1794,8 +2156,21 @@ private struct TableView: View {
     /// this wraps instead.
     private static let maximum: CGFloat = 320
 
+    /// The size a cell is drawn at, which is also the size it is **measured** at.
+    ///
+    /// One number rather than two that happen to agree today: the measurement used to ask for 12 while
+    /// the cell was drawn at 13 (`Wei.Size.control`), so every column was sized for text about 8% narrower
+    /// than the text in it — which is how a wide header ends up clipped in the column it was supposed to
+    /// set the width of. The comment on `width` claimed the two fonts agreed; this is the line that makes
+    /// it true.
+    private static let cellSize = Wei.Size.control
+
+    /// The layout, kept across redraws. A table is re-laid out whenever anything in the transcript
+    /// changes, and a frame of a block that is still arriving is such a change — see `TableMemo`.
+    @State private var memo = TableMemo()
+
     private var layout: TableLayout {
-        tableLayout(
+        memo.layout(
             header: header,
             rows: rows,
             align: align,
@@ -1824,7 +2199,7 @@ private struct TableView: View {
         HStack(alignment: .top, spacing: 0) {
             ForEach(Array(cells.enumerated()), id: \.offset) { index, spans in
                 Text(Styled.spans(spans))
-                    .font(Wei.Font.control(isHeader ? .semibold : .regular))
+                    .font(.system(size: Self.cellSize, weight: isHeader ? .semibold : .regular))
                     .multilineTextAlignment(alignment(laid.align[index]))
                     .padding(.horizontal, Self.padding)
                     .padding(.vertical, 6)
@@ -1865,6 +2240,11 @@ private struct TableView: View {
     /// unmeasured, once with the answer). The font has to be set here rather than inherited from the
     /// view, because the measurement happens outside it — and it has to be the *same* font, or the
     /// column is sized for text that is not what is drawn.
+    ///
+    /// Measured with the **semibold** face, which is the header's: a column is as wide as its widest
+    /// cell and the header is measured alongside the data, so measuring prose with the lighter face would
+    /// under-measure prose that sits in a column whose header is long. The difference is a couple of
+    /// percent of a column's width, and the direction of it is the safe one.
     private static func width(_ spans: [Block.Span]) -> CGFloat {
         let attributed = NSMutableAttributedString(
             attributedString: NSAttributedString(Styled.spans(spans))
@@ -1872,7 +2252,7 @@ private struct TableView: View {
         guard attributed.length > 0 else { return 0 }
         attributed.addAttribute(
             NSAttributedString.Key.font,
-            value: NSFont.systemFont(ofSize: 12),
+            value: NSFont.systemFont(ofSize: cellSize, weight: .semibold),
             range: NSRange(location: 0, length: attributed.length)
         )
         return ceil(attributed.size().width)
