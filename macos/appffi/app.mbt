@@ -2722,6 +2722,11 @@ priv enum Gate {
 } derive(Eq, Debug)
 
 ///|
+/// `Gate` and `Keep` are both derived `Eq`/`Debug` for `app_wbtest.mbt` alone, so `moon check`
+/// reports those four impls as `unused_value`. That warning is wrong here: dropping the derives
+/// breaks the whitebox build (eighteen `does not implement trait` errors). Leave them on.
+
+///|
 /// Which commands may run while the session on screen has a turn in flight.
 ///
 /// One turn at a time *per session*, which is what the session's own lock is for: a turn owns its
