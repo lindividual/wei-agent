@@ -2815,25 +2815,25 @@ test "a deletion is refused in words, one sentence per reason" {
     live_jobs: 0,
     exists: true,
   }
-  inspect(refuse_deletion(ok) is None, content="true")
+  assert_eq(refuse_deletion(ok), None)
 
   let no_path : Deletion = { ..ok, path: "", }
-  inspect(refuse_deletion(no_path), content="Some(delete: no session path)")
+  assert_eq(refuse_deletion(no_path), Some("delete: no session path"))
 
   let running : Deletion = { ..ok, busy: true, }
-  inspect(
+  assert_eq(
     refuse_deletion(running),
-    content="Some(cannot delete a session with a turn running — stop it first)",
+    Some("cannot delete a session with a turn running — stop it first"),
   )
 
   let working : Deletion = { ..ok, live_jobs: 1, }
-  inspect(
+  assert_eq(
     refuse_deletion(working),
-    content="Some(cannot delete a session with a background job still running)",
+    Some("cannot delete a session with a background job still running"),
   )
 
   let gone : Deletion = { ..ok, exists: false, }
-  inspect(refuse_deletion(gone), content="Some(that session is already gone)")
+  assert_eq(refuse_deletion(gone), Some("that session is already gone"))
 }
 
 ///|
@@ -2852,20 +2852,20 @@ test "a job that outlived its file is refused for the job, not for the file" {
     live_jobs: 2,
     exists: false,
   }
-  inspect(
+  assert_eq(
     refuse_deletion(orphan),
-    content="Some(cannot delete a session with a background job still running)",
+    Some("cannot delete a session with a background job still running"),
   )
   // And a turn beats a job, for the same shape of reason: stopping the turn is what the reader has to
   // do first, and the job is reachable afterwards.
   let both : Deletion = { ..orphan, busy: true, }
-  inspect(
+  assert_eq(
     refuse_deletion(both),
-    content="Some(cannot delete a session with a turn running — stop it first)",
+    Some("cannot delete a session with a turn running — stop it first"),
   )
   // Nothing named at all beats everything: there is nothing to have a turn or a job.
   let nothing : Deletion = { ..both, path: "", }
-  inspect(refuse_deletion(nothing), content="Some(delete: no session path)")
+  assert_eq(refuse_deletion(nothing), Some("delete: no session path"))
 }
 
 ///|
@@ -2899,44 +2899,41 @@ test "every refusal names a reason, and every allow is silent" {
 /// sentence in the same call — so neither could be asserted.
 test "a project removal is refused in words, turn before job" {
   let idle : Array[ProjectLoad] = [{ busy: false, live_jobs: 0, }]
-  inspect(refuse_project_removal("/tmp", idle) is None, content="true")
+  assert_eq(refuse_project_removal("/tmp", idle), None)
   // A project nobody has open at all is also removable: the loads list is empty, not "unknown".
-  inspect(refuse_project_removal("/tmp", []) is None, content="true")
+  assert_eq(refuse_project_removal("/tmp", []), None)
 
-  inspect(
-    refuse_project_removal("", idle),
-    content="Some(remove: no project path)",
-  )
-  inspect(
+  assert_eq(refuse_project_removal("", idle), Some("remove: no project path"))
+  assert_eq(
     refuse_project_removal("/tmp", [{ busy: true, live_jobs: 0, }]),
-    content="Some(a turn is running in this project — stop it first)",
+    Some("a turn is running in this project — stop it first"),
   )
-  inspect(
+  assert_eq(
     refuse_project_removal("/tmp", [{ busy: false, live_jobs: 3, }]),
-    content="Some(a background job is still running in this project)",
+    Some("a background job is still running in this project"),
   )
   // **A turn is asked for before a job**, and the input that tells the two apart is a session with
   // both: stopping the turn is what the reader does next, and the job is reachable afterwards.
-  inspect(
+  assert_eq(
     refuse_project_removal("/tmp", [{ busy: true, live_jobs: 3, }]),
-    content="Some(a turn is running in this project — stop it first)",
+    Some("a turn is running in this project — stop it first"),
   )
   // One busy session anywhere in the project is enough — the row stands for all of them.
-  inspect(
+  assert_eq(
     refuse_project_removal("/tmp", [
       { busy: false, live_jobs: 0, },
       { busy: true, live_jobs: 0, },
       { busy: false, live_jobs: 0, },
     ]),
-    content="Some(a turn is running in this project — stop it first)",
+    Some("a turn is running in this project — stop it first"),
   )
   // And a job in any of them, likewise.
-  inspect(
+  assert_eq(
     refuse_project_removal("/tmp", [
       { busy: false, live_jobs: 0, },
       { busy: false, live_jobs: 1, },
     ]),
-    content="Some(a background job is still running in this project)",
+    Some("a background job is still running in this project"),
   )
 }
 
@@ -3022,7 +3019,7 @@ async test "forking a session with nothing in it is refused, and writes nothing"
     seen.push(json)
   })
   shell.fork()
-  inspect(kinds_of(seen), content="[error]")
+  assert_eq(kinds_of(seen), ["error"])
   inspect(
     text_field(seen[0], "text"),
     content="nothing to fork: this session has no messages yet",
@@ -3049,10 +3046,9 @@ async test "a fork's file says where it came from, and names itself after the pa
   // What the host is told, in order: the new session's rows, then the snapshots that belong to it, then
   // the sentence about the fork, then the list. `history` first is the load-bearing one (the host swaps
   // transcript on the `session` event, and swapping before the rows arrive is a blank column).
-  inspect(
-    kinds_of(lines),
-    content="[history, session, usage, models, think, images, status, sessions]",
-  )
+  assert_eq(kinds_of(lines), [
+    "history", "session", "usage", "models", "think", "images", "status", "sessions",
+  ])
   // The session the host was told about is the one on disk, and `history` carries the routing it needs
   // to file those rows under it.
   let child = text_field(lines[0], "session")
@@ -3129,7 +3125,7 @@ async test "a fork that cannot be written says so, and leaves nothing half-done"
   let lines = seen
   // One event, and it is the sentence. No `open`, no `sessions`, nothing about a session that does not
   // exist.
-  inspect(kinds_of(lines), content="[error]")
+  assert_eq(kinds_of(lines), ["error"])
   assert_true(
     text_field(lines[0], "text").contains("could not write the fork"),
     msg="the failure did not say what could not be written",

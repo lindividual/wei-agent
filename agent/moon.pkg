@@ -3,7 +3,6 @@ import {
   "lindividual/wei/platform",
   "moonbitlang/async",
   "moonbitlang/core/env",
-  "moonbitlang/core/json",
 }
 
 // The tests run the driver against a scripted model behind a real socket, and build filesystem
@@ -13,6 +12,7 @@ import {
   "moonbitlang/async/fs",
   "moonbitlang/async/socket",
   "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/json",
 } for "test"
 
 supported_targets = "+native"

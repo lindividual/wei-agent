@@ -33,13 +33,16 @@ extern "C" fn wei_emit(bytes : Bytes, len : Int) -> Unit = "wei_emit"
 /// The buffer is reused across calls rather than sized per message: a prompt is bounded by
 /// what a person will type, and the alternative is a length query that would need its own
 /// call into the host.
+///
+/// `exact_view` rather than a clamping view, because `wei_recv` caps the length it returns
+/// at the capacity it was handed — so the range asked for here is always inside the buffer.
 pub fn take_command() -> String {
   let buffer = Bytes::new(65536)
   let len = wei_recv(buffer, buffer.length())
   if len <= 0 {
     ""
   } else {
-    @utf8.decode_lossy(buffer.view(end=len))
+    @utf8.decode_lossy(buffer.exact_view(end=len))
   }
 }
 
