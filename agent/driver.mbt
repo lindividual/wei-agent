@@ -1187,130 +1187,26 @@ async fn run_tools(
 }
 
 ///|
-/// Run one turn: send the prompt, then keep going while the model asks for tools.
+/// Open a turn in the log, and hand back the session that now holds it.
 ///
-/// The loop is bounded by the model stopping rather than by a step count. A model
-/// that never stops would spin forever, which is a real risk with a small model; the
-/// bound below makes that a bounded, reported outcome rather than an infinite one.
+/// Everything that has to be true of the log *before* the first model call: the model and thinking
+/// level recorded, a stop that left a tool call unanswered repaired, the reader's question appended,
+/// and the turn opened. It happens in this order for one reason — between the opening entry and the
+/// outcome written at the end, the turn is durably in flight, which is the only way to tell afterwards
+/// that it was interrupted. A turn stopped by a guard and a turn that finished both end at a message.
 ///
-/// The bound is generous — 200 model calls — because a tool-heavy turn legitimately takes
-/// many of them, and stopping one at 40 cut work off in the middle of a task that was
-/// going fine. Reaching 200 is no longer "a long turn"; it means the model is looping,
-/// which is what the limit is for.
-///
-/// There are two limits, and the second is the one that actually bounds the bill. A turn can
-/// be expensive without being long: one request against a large cached-then-uncached context
-/// costs more than fifty small ones, so counting calls does not bound spending. `max_cost`
-/// does, using the per-model pricing the turn already sums.
-///
-/// Both defaults come from measurement rather than taste: over 2280 real turns the median
-/// cost was $0.004, the ninetieth percentile $0.036, and the most expensive $0.295 (147 calls,
-/// 93M cached prompt tokens). The longest ran 165 calls. So 200 calls and $1 are each about
-/// a turn that never happened — the guards catch a runaway, not a large turn.
-pub async fn run_turn(
+/// A continued turn appends nothing: the prompt it carries is already the last user message, and the
+/// turn it continues was already opened, so doing either again would put the question to the model
+/// twice and leave the log claiming two turns in flight.
+async fn open_turn(
   ctx : AgentContext,
   prompt : String,
+  prompt_images : Array[@core.Content],
   timestamp : Int64,
-  thinking_level? : String,
-  /// Most model calls one turn may make. `0` disables the bound.
-  max_rounds? : Int = 200,
-  /// Most one turn may cost, in US dollars. `0.0` disables the bound.
-  max_cost? : Double = 1.0,
-  /// Most one turn may take, in seconds. `0` disables the bound.
-  ///
-  /// The third dimension, and the one the other two cannot see: a command can sit for an hour
-  /// making no model calls and costing nothing, while the reader waits. Chosen from measurement
-  /// over 50,000 real assistant turns: half finished within 2s and 99% within 50s, but the
-  /// longest ran 34 minutes. Half an hour is past everything that was measured and still bounds
-  /// what a stuck turn can do to the reader's afternoon.
-  max_seconds? : Int = 1800,
-  /// The messages of the previous turn's last request, when the caller has them.
-  ///
-  /// Optional, and what it buys is the turn's first request: with it that request is measured
-  /// against the one before it like every other request, so a trim boundary that moved between
-  /// turns — the common case, because a turn appends the messages that release one — shows up in
-  /// `request_drift` instead of being the one rewrite in the turn that nothing reports. A caller
-  /// that runs one turn and stops passes nothing, and the first request is simply unmeasured, which
-  /// is what it was before this existed.
-  previous_request? : Array[Json]? = None,
-  /// Continue a turn that a crash left open, instead of starting a new one.
-  ///
-  /// The difference is one message. A new turn commits the user's prompt and opens a turn; a
-  /// resumed one does neither, because the prompt is already in the log and the turn that needs
-  /// closing is the one already open. Everything after that is the same loop, which is the point:
-  /// the tool results that *were* recorded stay as they are, so the work already done is not done
-  /// twice — the same property DBOS gets from checkpointing steps, which we get from the log.
-  continuing? : Bool = false,
-  /// Blocks that travel with the prompt in the same user message. Images, in practice.
-  ///
-  /// They belong to the prompt rather than to the context, which is why they are here and not on
-  /// `AgentContext`: a picture the reader attached to a question is part of the question, and it
-  /// has to be committed in the same entry as the text or a resumed session would replay the
-  /// question without it. Empty for every caller that sends text, which is all of them but one.
-  prompt_images? : Array[@core.Content] = [],
-  on_delta? : async (@core.StreamEvent) -> Unit,
-  should_stop? : () -> Bool,
-  /// Called after each tool finishes, for a caller rendering the turn live.
-  ///
-  /// Async because rendering means writing to a socket, and the same shape as
-  /// `on_delta` for the same reason.
-  on_tool? : async (ToolEvent) -> Unit,
-  /// Called with the tool that is running, then with `None` when it stops. Async because the
-  /// caller usually has to tell someone.
-  on_tool_process? : async (ToolHandle?) -> Unit,
-  /// Called after each round with (model calls, tool calls) so far.
-  on_progress? : async (Int, Int) -> Unit,
-  /// Called when a model call is about to be retried, and with `None` once that call answers.
-  ///
-  /// One callback for both directions rather than a "retrying" event and a "stopped retrying"
-  /// event, because the pair is one fact about one line on the reader's screen: whatever shows
-  /// what the turn is doing has to be able to say "waiting to try again" for the length of the
-  /// wait and then go back to saying what it was saying.
-  on_retry? : async (RetryAttempt?) -> Unit,
-  /// Called after every commit that changes what the next request would carry: the prompt going
-  /// in, each model call's response, each tool round. The log as it now stands is passed, which is
-  /// what a caller showing the figures *while* the turn runs needs — a turn of twenty rounds would
-  /// otherwise hand over twenty calls' worth at the end, when the reader has stopped needing them.
-  ///
-  /// Bookkeeping commits (the turn opening, a model or thinking-level change) are not reported:
-  /// they change neither the spend nor what the conversation weighs.
-  ///
-  /// Async for the same reason the other callbacks are: the caller usually has to tell someone.
-  on_commit? : async (@core.Session) -> Unit,
-) -> TurnResult {
-  // Streaming is optional: a caller that only wants the finished turn passes
-  // nothing, and a caller rendering live passes the same callback this loop uses.
-  let report : async (@core.StreamEvent) -> Unit = match on_delta {
-    Some(callback) => callback
-    None => fn(_event) { () }
-  }
-  let stopping = match should_stop {
-    Some(check) => check
-    None => fn() { false }
-  }
-  // A caller that does not render live gets a callback that does nothing; the
-  // annotation is left off because a body with nothing to await does not need it.
-  let tool_report : async (ToolEvent) -> Unit = match on_tool {
-    Some(callback) => callback
-    None => fn(_event) { () }
-  }
-  let progress : async (Int, Int) -> Unit = match on_progress {
-    Some(callback) => callback
-    None => fn(_calls, _tools) { () }
-  }
-  let retry_report : async (RetryAttempt?) -> Unit = match on_retry {
-    Some(callback) => callback
-    None => fn(_attempt) { () }
-  }
-  let committed : async (@core.Session) -> Unit = match on_commit {
-    Some(callback) => callback
-    None => fn(_session) { () }
-  }
-  let publish : async (ToolHandle?) -> Unit = match on_tool_process {
-    Some(callback) => callback
-    None => fn(_handle) { () }
-  }
-  let level = thinking_level
+  level : String?,
+  continuing : Bool,
+  committed : async (@core.Session) -> Unit,
+) -> @core.Session {
   // Record the model and thinking level before anything else. upstream derives these
   // from the log rather than from configuration, so a session that does not
   // record them reads back as `off` on whatever model the reader defaults to —
@@ -1437,6 +1333,137 @@ pub async fn run_turn(
     committed(session)
   }
 
+  session
+}
+
+///|
+/// Run one turn: send the prompt, then keep going while the model asks for tools.
+///
+/// The loop is bounded by the model stopping rather than by a step count. A model
+/// that never stops would spin forever, which is a real risk with a small model; the
+/// bound below makes that a bounded, reported outcome rather than an infinite one.
+///
+/// The bound is generous — 200 model calls — because a tool-heavy turn legitimately takes
+/// many of them, and stopping one at 40 cut work off in the middle of a task that was
+/// going fine. Reaching 200 is no longer "a long turn"; it means the model is looping,
+/// which is what the limit is for.
+///
+/// There are two limits, and the second is the one that actually bounds the bill. A turn can
+/// be expensive without being long: one request against a large cached-then-uncached context
+/// costs more than fifty small ones, so counting calls does not bound spending. `max_cost`
+/// does, using the per-model pricing the turn already sums.
+///
+/// Both defaults come from measurement rather than taste: over 2280 real turns the median
+/// cost was $0.004, the ninetieth percentile $0.036, and the most expensive $0.295 (147 calls,
+/// 93M cached prompt tokens). The longest ran 165 calls. So 200 calls and $1 are each about
+/// a turn that never happened — the guards catch a runaway, not a large turn.
+pub async fn run_turn(
+  ctx : AgentContext,
+  prompt : String,
+  timestamp : Int64,
+  thinking_level? : String,
+  /// Most model calls one turn may make. `0` disables the bound.
+  max_rounds? : Int = 200,
+  /// Most one turn may cost, in US dollars. `0.0` disables the bound.
+  max_cost? : Double = 1.0,
+  /// Most one turn may take, in seconds. `0` disables the bound.
+  ///
+  /// The third dimension, and the one the other two cannot see: a command can sit for an hour
+  /// making no model calls and costing nothing, while the reader waits. Chosen from measurement
+  /// over 50,000 real assistant turns: half finished within 2s and 99% within 50s, but the
+  /// longest ran 34 minutes. Half an hour is past everything that was measured and still bounds
+  /// what a stuck turn can do to the reader's afternoon.
+  max_seconds? : Int = 1800,
+  /// The messages of the previous turn's last request, when the caller has them.
+  ///
+  /// Optional, and what it buys is the turn's first request: with it that request is measured
+  /// against the one before it like every other request, so a trim boundary that moved between
+  /// turns — the common case, because a turn appends the messages that release one — shows up in
+  /// `request_drift` instead of being the one rewrite in the turn that nothing reports. A caller
+  /// that runs one turn and stops passes nothing, and the first request is simply unmeasured, which
+  /// is what it was before this existed.
+  previous_request? : Array[Json]? = None,
+  /// Continue a turn that a crash left open, instead of starting a new one.
+  ///
+  /// The difference is one message. A new turn commits the user's prompt and opens a turn; a
+  /// resumed one does neither, because the prompt is already in the log and the turn that needs
+  /// closing is the one already open. Everything after that is the same loop, which is the point:
+  /// the tool results that *were* recorded stay as they are, so the work already done is not done
+  /// twice — the same property DBOS gets from checkpointing steps, which we get from the log.
+  continuing? : Bool = false,
+  /// Blocks that travel with the prompt in the same user message. Images, in practice.
+  ///
+  /// They belong to the prompt rather than to the context, which is why they are here and not on
+  /// `AgentContext`: a picture the reader attached to a question is part of the question, and it
+  /// has to be committed in the same entry as the text or a resumed session would replay the
+  /// question without it. Empty for every caller that sends text, which is all of them but one.
+  prompt_images? : Array[@core.Content] = [],
+  on_delta? : async (@core.StreamEvent) -> Unit,
+  should_stop? : () -> Bool,
+  /// Called after each tool finishes, for a caller rendering the turn live.
+  ///
+  /// Async because rendering means writing to a socket, and the same shape as
+  /// `on_delta` for the same reason.
+  on_tool? : async (ToolEvent) -> Unit,
+  /// Called with the tool that is running, then with `None` when it stops. Async because the
+  /// caller usually has to tell someone.
+  on_tool_process? : async (ToolHandle?) -> Unit,
+  /// Called after each round with (model calls, tool calls) so far.
+  on_progress? : async (Int, Int) -> Unit,
+  /// Called when a model call is about to be retried, and with `None` once that call answers.
+  ///
+  /// One callback for both directions rather than a "retrying" event and a "stopped retrying"
+  /// event, because the pair is one fact about one line on the reader's screen: whatever shows
+  /// what the turn is doing has to be able to say "waiting to try again" for the length of the
+  /// wait and then go back to saying what it was saying.
+  on_retry? : async (RetryAttempt?) -> Unit,
+  /// Called after every commit that changes what the next request would carry: the prompt going
+  /// in, each model call's response, each tool round. The log as it now stands is passed, which is
+  /// what a caller showing the figures *while* the turn runs needs — a turn of twenty rounds would
+  /// otherwise hand over twenty calls' worth at the end, when the reader has stopped needing them.
+  ///
+  /// Bookkeeping commits (the turn opening, a model or thinking-level change) are not reported:
+  /// they change neither the spend nor what the conversation weighs.
+  ///
+  /// Async for the same reason the other callbacks are: the caller usually has to tell someone.
+  on_commit? : async (@core.Session) -> Unit,
+) -> TurnResult {
+  // Streaming is optional: a caller that only wants the finished turn passes
+  // nothing, and a caller rendering live passes the same callback this loop uses.
+  let report : async (@core.StreamEvent) -> Unit = match on_delta {
+    Some(callback) => callback
+    None => fn(_event) { () }
+  }
+  let stopping = match should_stop {
+    Some(check) => check
+    None => fn() { false }
+  }
+  // A caller that does not render live gets a callback that does nothing; the
+  // annotation is left off because a body with nothing to await does not need it.
+  let tool_report : async (ToolEvent) -> Unit = match on_tool {
+    Some(callback) => callback
+    None => fn(_event) { () }
+  }
+  let progress : async (Int, Int) -> Unit = match on_progress {
+    Some(callback) => callback
+    None => fn(_calls, _tools) { () }
+  }
+  let retry_report : async (RetryAttempt?) -> Unit = match on_retry {
+    Some(callback) => callback
+    None => fn(_attempt) { () }
+  }
+  let committed : async (@core.Session) -> Unit = match on_commit {
+    Some(callback) => callback
+    None => fn(_session) { () }
+  }
+  let publish : async (ToolHandle?) -> Unit = match on_tool_process {
+    Some(callback) => callback
+    None => fn(_handle) { () }
+  }
+  let level = thinking_level
+  let mut session = open_turn(
+    ctx, prompt, prompt_images, timestamp, level, continuing, committed,
+  )
   let replies : Array[String] = []
   let mut model_calls = 0
   let mut tool_calls = 0
