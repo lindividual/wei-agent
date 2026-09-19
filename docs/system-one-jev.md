@@ -10,6 +10,11 @@
 > 那些目录**已经从树里删掉了**（ADR-0007 决定主线在 macOS，后来没有恢复，于是连同测试与浏览器
 > 验收一起删除）。下面的分析、测量和结论**没有因此改变** —— 但它们举的「另一个落点」如果落在
 > `ui/` 上，那个落点现在不存在了，对应的位置改看 `macos/appffi/`。
+>
+> ⚠ **2026-09-19 追注（二）**：`macos/appffi/app.mbt` 因为太长拆成了三个文件
+> （`events.mbt` 是发给宿主的事件，`turn.mbt` 是一轮 turn）。下面按行号引用 `app.mbt:NNNN` 的
+> 地方会因此落在别的文件里：`Shell::system_prompt` 在 `events.mbt`，`run_turn` 在 `turn.mbt`，
+> `think_event` 在 `events.mbt`（`think_report` 仍在 `app.mbt`）。**符号名照旧可查，行号不再准。**
 
 ## 0. 先说结论
 
