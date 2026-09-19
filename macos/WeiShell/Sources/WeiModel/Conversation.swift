@@ -1,5 +1,41 @@
 import Foundation
 
+/// A picture a message carried, as the row carries it.
+///
+/// The media type and base64, and **no path**: a prompt's pictures have no file behind them. One came
+/// from the screen a second before it was sent, another from the clipboard, a third from a folder the
+/// reader picked — and the log holds the bytes rather than the path for the same reason it holds the
+/// bytes of an answer: the file may be gone, may be temp, may never have existed on this machine.
+///
+/// Base64 rather than bytes because that is how an image travels everywhere else in this program — to
+/// the provider, and to the composer through `Attachment` — so there is one encoding on the wire and
+/// not a second one for the transcript.
+public struct RowImage: Equatable, Decodable, Sendable {
+    public let mime: String
+    public let data: String
+
+    public init(mime: String, data: String) {
+        self.mime = mime
+        self.data = data
+    }
+
+    /// The bytes the base64 is of, or nothing if it is not base64 at all.
+    public var bytes: Data? { Data(base64Encoded: data) }
+
+    /// A name for these particular bytes, without hashing them.
+    ///
+    /// It is what the picture cache is keyed on, and the key has to be **the bytes** rather than the
+    /// row: `h-3` names one picture in one session and a different one in the next, so a cache keyed
+    /// by row id would draw yesterday's screenshot in today's message (see `Pictures`).
+    ///
+    /// The length plus both ends, rather than a hash of the whole string: hashing megabytes to name
+    /// them costs more than the naming saves, and two pictures agreeing on a length and on their first
+    /// and last 48 characters are the same picture for every purpose a transcript has.
+    public var key: String {
+        "row-image:\(data.count):\(data.prefix(48)):\(data.suffix(48))"
+    }
+}
+
 /// One row of the transcript.
 ///
 /// One struct with a kind rather than a case per shape, and the reason is the streaming update:
@@ -37,12 +73,43 @@ public struct Row: Identifiable, Equatable, Decodable {
     /// every delta is quadratic (the web UI measured it: 40KB of reasoning in 64-character frames).
     /// The view's rule is the simple one: draw the parse if it is here, the text otherwise.
     public var blocks: [Block]?
+    /// The pictures this message carried, a question's only. Drawn above its words, right-aligned
+    /// with them, because a message is one thing and its picture is part of what was said.
+    ///
+    /// The field exists because a picture in a question used to be **invisible in the transcript**: it
+    /// was in the log, it went to the model, and the reader's own message showed only their text — which
+    /// reads as "it did not send" to the one person who cannot check the log.
+    public var images: [RowImage] = []
 
     /// `isError` crosses as `error`, the same name the `tool` event uses for the same fact — one
     /// field, spelled once, so a row from a history and a row from a live stream decode alike.
     private enum CodingKeys: String, CodingKey {
-        case id, kind, text, complete, name, detail, output, blocks
+        case id, kind, text, complete, name, detail, output, blocks, images
         case isError = "error"
+    }
+
+    /// Written out rather than synthesised, for **one field**: `images`, which has to be optional
+    /// *on the wire* even though it is not optional in here.
+    ///
+    /// The synthesised decoder would not do it, and the reason is worth writing down because it looks
+    /// like it should: a stored property with a default value is **not** optional to Swift's
+    /// synthesis — it is decoded with `decode`, so a missing key throws, and every one of the literals
+    /// below (an older shell's `history`, a `rows` array from before this field existed) would fail
+    /// to decode and take the whole transcript with it. The defaults on `text`, `complete` and the
+    /// rest are documentation of what the shell always sends; this one cannot be, because the shell
+    /// does not always send it.
+    public init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        id = try fields.decode(String.self, forKey: .id)
+        kind = try fields.decode(Kind.self, forKey: .kind)
+        text = try fields.decode(String.self, forKey: .text)
+        complete = try fields.decode(Bool.self, forKey: .complete)
+        name = try fields.decode(String.self, forKey: .name)
+        detail = try fields.decode(String.self, forKey: .detail)
+        output = try fields.decode(String.self, forKey: .output)
+        isError = try fields.decode(Bool.self, forKey: .isError)
+        blocks = try fields.decodeIfPresent([Block].self, forKey: .blocks)
+        images = try fields.decodeIfPresent([RowImage].self, forKey: .images) ?? []
     }
 
     public init(
@@ -54,7 +121,8 @@ public struct Row: Identifiable, Equatable, Decodable {
         detail: String = "",
         output: String = "",
         isError: Bool = false,
-        blocks: [Block]? = nil
+        blocks: [Block]? = nil,
+        images: [RowImage] = []
     ) {
         self.id = id
         self.kind = kind
@@ -65,6 +133,7 @@ public struct Row: Identifiable, Equatable, Decodable {
         self.output = output
         self.isError = isError
         self.blocks = blocks
+        self.images = images
     }
 }
 
@@ -108,6 +177,20 @@ public struct Conversation: Equatable {
     /// is a different thing to draw than "still coming".
     public private(set) var loaded = false
 
+    /// Whether the shell says there are rows **before** the oldest one here.
+    ///
+    /// The transcript arrives a page at a time, newest first; this is what the view watches to decide
+    /// whether scrolling up should ask for another page. False for a session that fits in one page —
+    /// which is most of them — so nothing above the transcript is armed for a request that would come
+    /// back empty.
+    public private(set) var hasEarlier = false
+
+    /// The id to hand the shell when asking for the page before this one.
+    ///
+    /// The oldest row the host holds, which is the only cursor that cannot drift: a count would be
+    /// wrong the moment a turn appended a row while a page was in flight.
+    public var oldestRowID: String { rows.first?.id ?? "" }
+
     private var nextNote = 0
 
     /// Which turn the live rows on screen belong to.
@@ -141,7 +224,7 @@ public struct Conversation: Equatable {
     /// events that reach this one are the ones this transcript is made of.
     public mutating func apply(_ event: ShellEvent) {
         switch event {
-        case let .history(rows):
+        case let .history(rows, oldest, hasMore):
             // A whole session in one event, because the host did not watch this one happen: every
             // block in it is finished and no delta is coming for any of them. Replacing rather than
             // appending is the point — the rows belong to a different session from the ones on
@@ -153,6 +236,21 @@ public struct Conversation: Equatable {
             // **Loaded even when there is nothing in it**: an empty session is an answer, and the
             // difference between it and "still coming" is the whole reason this flag exists.
             loaded = true
+            hasEarlier = hasMore
+            // `oldest` is the shell's own answer about where this page starts; ignored here because the
+            // host can read the same fact off the rows it was just handed, and two sources for one
+            // cursor is how they drift. It stays on the wire for the *request* the view makes later.
+            _ = oldest
+            return
+
+        case let .earlier(rows, oldest, hasMore):
+            // **Prepended, not appended.** The rows are older than everything here, and the transcript
+            // is read in order: appending them would put the beginning of the conversation after its
+            // end. Live rows are untouched — this is the one event that adds to a transcript without
+            // replacing any of it, which is why it is not spelled as another `history`.
+            self.rows = rows + self.rows
+            hasEarlier = hasMore
+            _ = oldest
             return
         case let .blocks(id, blocks, from):
             // How the row should be drawn. Patched in place rather than appended: the row is already
@@ -191,7 +289,7 @@ public struct Conversation: Equatable {
             _ = (model, cwd, key)
             status = ""
 
-        case let .user(text, continued):
+        case let .user(text, continued, images):
             running = true
             // The prompt's own row is named by the turn rather than by how many rows there are: a
             // count is not an identity — a `history` replace resets it, and two rows that happened to
@@ -200,7 +298,12 @@ public struct Conversation: Equatable {
             // A continued turn gets the new set of row names without a second question on screen:
             // the question is already the last user row, from the run that was interrupted.
             if !continued {
-                rows.append(Row(id: "user-\(turn)", kind: .user, text: text, complete: true))
+                // The pictures the prompt was sent *with*, which is not the same as the pictures the row
+                // would have without them: the shell takes them off the composer in the same breath, so
+                // this event is the last place they exist as part of the question.
+                rows.append(
+                    Row(id: "user-\(turn)", kind: .user, text: text, complete: true, images: images)
+                )
             }
             // The prompt is what the answer is about, so everything before it is finished.
             closeAllBlocks()
@@ -278,6 +381,14 @@ public struct Conversation: Equatable {
             row.complete = true
             rows.append(row)
             status = ""
+
+        case .deleted:
+            // Nothing in a transcript, and deliberately: a delete is not something the conversation
+            // said, it is something that happened *to* it. The offer to put it back belongs to the
+            // window's session list, which is the thing that was showing a row a moment ago — and the
+            // window is about to be handed a different conversation anyway, so a row here would be a
+            // note inside a transcript nobody is looking at.
+            return
         }
         // A row arriving is the shell saying what is in this session, whatever it calls the event —
         // so a transcript that has content is loaded, whether or not a `history` ever came. The

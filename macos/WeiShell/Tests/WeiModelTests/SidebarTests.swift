@@ -114,7 +114,7 @@ final class SidebarTests: XCTestCase {
         {"kind":"history","rows":[{"kind":"user","id":"h-1","text":"list it","complete":true,"name":"","detail":"","output":"","error":false},{"kind":"tool","id":"h-2","text":"","complete":true,"name":"bash","detail":"ls","output":"a.txt","error":false}]}
         """#
         let event = try XCTUnwrap(ShellEvent.decode(line: line))
-        guard case let .history(rows) = event else {
+        guard case let .history(rows, _, _) = event else {
             return XCTFail("expected history, got \(event)")
         }
         XCTAssertEqual(rows.map(\.kind), [.user, .tool])
@@ -146,7 +146,7 @@ final class SidebarTests: XCTestCase {
         XCTAssertEqual(prompt, "")
 
         var conversation = Conversation()
-        conversation.apply(.user(text: "the old session's question", continued: false))
+        conversation.apply(.user(text: "the old session's question", continued: false, images: []))
         conversation.apply(envelope.event)
         XCTAssertEqual(conversation.rows.count, 1)
     }
@@ -218,7 +218,7 @@ final class SettingsTests: XCTestCase {
     func testSettingsDoNotTouchTheTranscript() throws {
         let event = try XCTUnwrap(ShellEvent.decode(line: settingsLine))
         var conversation = Conversation()
-        conversation.apply(.user(text: "hi", continued: false))
+        conversation.apply(.user(text: "hi", continued: false, images: []))
         conversation.apply(event)
         XCTAssertEqual(conversation.rows.count, 1)
     }
@@ -348,7 +348,7 @@ final class BlockTests: XCTestCase {
         {"kind":"history","rows":[{"kind":"reply","id":"h-1","text":"# Title","complete":true,"blocks":[{"t":"h","level":1,"spans":[{"t":"text","text":"Title"}]}],"name":"","detail":"","output":"","error":false}]}
         """#
         let event = try XCTUnwrap(decode(line))
-        guard case let .history(rows) = event else { return XCTFail("expected history") }
+        guard case let .history(rows, _, _) = event else { return XCTFail("expected history") }
         XCTAssertTrue(rows[0].complete)
         guard case let .heading(level, spans)? = rows[0].blocks?[0] else {
             return XCTFail("the row's parse did not survive decoding")
@@ -365,7 +365,7 @@ final class BlockTests: XCTestCase {
                 #"{"kind":"history","rows":[{"kind":"tool","id":"h-1","text":"","complete":true,"blocks":null,"name":"bash","detail":"ls","output":"","error":false}]}"#
             )
         )
-        guard case let .history(rows) = row else { return XCTFail("expected history") }
+        guard case let .history(rows, _, _) = row else { return XCTFail("expected history") }
         XCTAssertNil(rows[0].blocks)
     }
 

@@ -527,7 +527,21 @@ fn say_ready(open : Open, key_source : String) -> Unit {
 ///|
 /// The prompt, echoed so the host can put it in the conversation without having kept its own
 /// copy of what it sent.
-fn say_user(path : String, text : String, continued? : Bool = false) -> Unit {
+///
+/// `images` are the pictures that went out with it, **carried with the prompt rather than as an event
+/// of their own**: they are part of the question, the shell takes them off the composer in the same
+/// breath, and a separate event would be a second thing for the host to keep in step with a question
+/// that may already be drawn.
+fn say_user(
+  path : String,
+  text : String,
+  continued? : Bool = false,
+  images? : Array[(String, String)] = [],
+) -> Unit {
+  let pictures : Array[Json] = []
+  for (mime_type, data) in images {
+    pictures.push(image_row(mime_type, data))
+  }
   emit(
     session_event(path, "user", [
       ("text", Json::string(text)),
@@ -536,6 +550,7 @@ fn say_user(path : String, text : String, continued? : Bool = false) -> Unit {
       // lets the host start a new turn — with a new set of row names — without drawing a second
       // question.
       ("continued", Json::boolean(continued)),
+      ("images", Json::array(pictures)),
     ]),
   )
 }
@@ -1385,8 +1400,6 @@ async fn Shell::run_turn(
       None => prompt
     }
   }
-  say_user(path, sent, continued=continuing)
-  say_status(path, "thinking…")
   // The pictures go with the prompt and are taken off the composer here, before the first `await`:
   // they are part of the question being asked, and a reader who sends while the request is going out
   // must not send the same screenshot twice.
@@ -1396,6 +1409,17 @@ async fn Shell::run_turn(
       @core.Content::Image(data=attachment.data, mime_type=attachment.mime_type),
     )
   }
+  // Echoed from the same list the request is built from, and echoed here rather than after the
+  // clearing below — this is the last moment the turn's pictures exist as a list. The ordering is the
+  // point: a host that drew them from `say_images`, which follows, would be drawing a composer that
+  // has already been emptied.
+  say_user(
+    path,
+    sent,
+    continued=continuing,
+    images=attached_images(open.attached),
+  )
+  say_status(path, "thinking…")
   open.attached = []
   say_images(open)
   let mode = self.settings.tool_mode
@@ -1781,7 +1805,10 @@ fn command_of(line : String) -> Command {
     "continue" | "/continue" => ContinueTurn
     "dismiss" | "/dismiss" => DismissTurn
     "/sessions" => ListSessions
-    "/new" => NewSession
+    // Bare: the session on screen's directory. With a path: the project the host named, which is what
+    // the window's own "New Session" sends — see `Shell::create_in` for why the host is the side that
+    // knows it, and `/new-in` for the word that adds a project rather than opening a session.
+    "/new" => NewSession("")
     "/settings" => ListSettings
     "/key-clear" => ClearKey
     "/attach-clear" => ClearAttachments
@@ -1797,6 +1824,15 @@ fn command_of(line : String) -> Command {
     // a request to page that says nothing about where from is one the shell cannot guess at.
     "/earlier" => Earlier("")
     "/delete" => Delete("")
+    // Two words for the two halves of removing a project: the list forgets it, and the checkbox in the
+    // dialog is what decides whether the conversations go with it. Kept apart rather than one command
+    // with a flag because they are two different acts — see `Shell::remove_workspace`.
+    "/workspace-remove" => WorkspaceRemove("")
+    "/workspace-delete" => WorkspaceDelete("")
+    // The same act with the other answer to "and the file?": the word is separate rather than a flag
+    // inside `/delete`, because the two are two intentions and a reader of a wire log should be able to
+    // see which one was asked for. Neither is spelled without its path, for the reason below.
+    "/purge" => Purge("")
     "/attach" => Attach("")
     "/attach-temp" => AttachTemp("")
     "/job-kill" => KillJob("")
@@ -1817,6 +1853,14 @@ fn command_of(line : String) -> Command {
         Open(line[6:].trim().to_owned())
       } else if line.has_prefix("/delete ") {
         Delete(line[8:].trim().to_owned())
+      } else if line.has_prefix("/purge ") {
+        Purge(line[7:].trim().to_owned())
+      } else if line.has_prefix("/workspace-remove ") {
+        // The path is the whole command, like `/new-in`: a directory called `my work` is an ordinary
+        // thing to have.
+        WorkspaceRemove(line[18:].to_owned())
+      } else if line.has_prefix("/workspace-delete ") {
+        WorkspaceDelete(line[18:].to_owned())
       } else if line.has_prefix("/mode ") {
         SetMode(line[6:].trim().to_owned())
       } else if line.has_prefix("/attach ") {
@@ -1831,6 +1875,11 @@ fn command_of(line : String) -> Command {
         Detach(line[8:].to_owned())
       } else if line.has_prefix("/job-kill ") {
         KillJob(line[10:].trim().to_owned())
+      } else if line.has_prefix("/new ") {
+        // Not trimmed, for the reason `/new-in` gives below: a path is a path. Checked before that one
+        // only for clarity — `/new-in` does not have `/new ` as a prefix, because the fifth character
+        // is a hyphen rather than the space this looks for.
+        NewSession(line[5:].to_owned())
       } else if line.has_prefix("/new-in ") {
         // Not trimmed: a path is a path, and one with a trailing space is a directory somebody can
         // have. The chooser's own trailing separator is the caller's business — `canonical_dir`
@@ -1894,13 +1943,22 @@ priv enum Command {
   Model(String)
   ReportModel
   ListSessions
-  NewSession
-  /// A new session in a directory the host chose.
+  /// A new session in one project, named by the host. Empty means the project on screen.
+  NewSession(String)
+  /// A new session in a directory the host chose, **and that directory becomes a workspace**: the
+  /// marker file is written and the status line says so. The word the folder chooser sends.
   NewIn(String)
   Open(String)
   /// The id of the oldest row the host has, so the page before it can be sent.
   Earlier(String)
+  /// Out of the store, and aside on disk — recoverable with `/restore`.
   Delete(String)
+  /// A workspace the sidebar should stop listing, with its conversations left on disk.
+  WorkspaceRemove(String)
+  /// The same, and the conversations go too. The checkbox in the dialog, on the wire.
+  WorkspaceDelete(String)
+  /// The same, with the file removed too. The one irreversible command here.
+  Purge(String)
   ListSettings
   SaveKey(String)
   ClearKey
@@ -2103,12 +2161,16 @@ async fn Shell::serve(self : Shell) -> Unit {
           DismissTurn => if self.idle() { self.dismiss_turn(open) }
           ListSessions => self.say_sessions()
           // **Not gated on being idle**, and this is a fix rather than a loosening. The gate was written when
-          // `create` replaced the one session the shell held, so starting another *was* destructive to a turn
-          // in flight. Since the registry landed, a new session is added alongside the running one and the
+          // a new session replaced the one session the shell held, so starting another *was* destructive to a
+          // turn in flight. Since the registry landed, a new session is added alongside the running one and the
           // turn keeps writing its own file — so refusing was a leftover, and the reader's complaint ("it says
           // I have to stop the session first") was the shell turning a safe action into a dead end.
-          NewSession => self.create()
-          NewIn(path) => if self.idle() { self.new_in(path) }
+          NewSession(dir) => self.create_in(dir)
+          // **Not gated on being idle either**, the same correction the line above carries and for the
+          // same reason: adding a workspace opens a session alongside the running one rather than in
+          // place of it. What the two share is `open_fresh`, and showing another session disturbs no
+          // file — which is the whole of what the gate was ever protecting.
+          NewIn(path) => self.new_in(path)
           // Not gated on being idle: showing another session disturbs no file, which is the
           // whole of what the gate was ever protecting.
           Open(path) => self.show(path)
@@ -2122,7 +2184,19 @@ async fn Shell::serve(self : Shell) -> Unit {
             } else {
               say_earlier(open.path, open.session, before)
             }
-          Delete(path) => if self.idle() { self.discard(path) }
+          // **Not gated on `idle()`**, and this is the same correction `NewSession` above needed. `idle()`
+          // asks about the session *on screen*, but this command names one explicitly — so gating it there
+          // refused to delete a quiet conversation because an unrelated one was running, which is exactly
+          // the case a reader hits after switching away from a long turn. What must not be deleted is the
+          // session being named, and `discard` checks that itself (its turn, its jobs) before it touches
+          // the file.
+          Delete(path) => self.discard(path, purge=false)
+          Purge(path) => self.discard(path, purge=true)
+          // Ungated for the same reason, and with the same division of labour: `remove_project` asks
+          // about the *project* — every session of it, not the one on screen — because that is the set
+          // the row being removed stands for.
+          WorkspaceRemove(cwd) => self.remove_project(cwd, delete=false)
+          WorkspaceDelete(cwd) => self.remove_project(cwd, delete=true)
           ListSettings => self.say_settings()
           SaveKey(key) => self.save_key(key)
           ClearKey => self.save_key("")

@@ -64,9 +64,34 @@ public enum ShellEvent: Decodable, Equatable {
     case session(cwd: String, model: String, interrupted: Bool, interruptedPrompt: String)
     /// Everything in a session the host did not watch happen, as rows it can draw. Switching sessions
     /// is the only way this is sent: there are no deltas in a conversation that is already over.
-    case history(rows: [Row])
+    /// The newest rows of a session, and what the host needs to ask for the ones before them.
+    ///
+    /// A session's transcript arrives in **pages**, newest first: `oldest` is the id of the oldest row
+    /// in this page, and `hasMore` says whether anything precedes it. The shell holds the whole session
+    /// either way — paging is about what crosses the wire and what the host has to lay out, not about
+    /// what the shell can run a turn from.
+    case history(rows: [Row], oldest: String, hasMore: Bool)
+    /// The page **before** one the host already has.
+    ///
+    /// Its own event rather than another `history`, because the host treats the two differently: this
+    /// one is *prepended* to the transcript it names, while `history` replaces it. Sending `history`
+    /// again would throw away live rows the shell has not written down yet.
+    case earlier(rows: [Row], oldest: String, hasMore: Bool)
     /// The sidebar's list, in full, whenever it changes by more than a turn's worth.
     case sessions(workspaces: [SessionGroup])
+    /// A conversation that was just taken out of the store, so the window can offer it back.
+    ///
+    /// It comes from the shell rather than from the click, and that is the point: a delete can be
+    /// *refused* — a turn is appending to that file right now, or a background job it started is still
+    /// running — and a host that put its own notice up would be describing a state the shell never
+    /// entered. The shell answers either way, and only the answer knows which of the two happened.
+    ///
+    /// `restorable` is the same question one step further on. A delete renames the file aside and a
+    /// purge removes it, and the two are one checkbox apart in a dialog the *window* drew — so the host
+    /// could have remembered the box, but it would have been remembering it about a click that may not
+    /// have been carried out. The shell says which one happened, and this is what decides whether there
+    /// is anything to put back.
+    case deleted(path: String, label: String, restorable: Bool)
     /// A block's rendering: the blocks at `from` onwards.
     ///
     /// `from` is how many leading blocks the host already holds. A block that is still arriving is
@@ -83,7 +108,12 @@ public enum ShellEvent: Decodable, Equatable {
     /// carries the question that is already the last user message in the log, so the echoed text is
     /// for the record rather than for the transcript. The host starts a new turn from it and draws
     /// no second question.
-    case user(text: String, continued: Bool)
+    ///
+    /// `images` is the pictures that went out with it. They travel **with the prompt** rather than as
+    /// their own event because they are part of it: the shell takes them off the composer in the same
+    /// breath, so an event of their own would be a second thing to keep in step with a question that
+    /// may already be drawn.
+    case user(text: String, continued: Bool, images: [RowImage])
     /// Streaming answer text, under the id of the block it belongs to.
     case reply(id: String, delta: String)
     /// Streaming reasoning, same shape and a different block kind.
@@ -120,7 +150,10 @@ public enum ShellEvent: Decodable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case kind, session, model, cwd, key, text, id, delta
         case name, detail, done, output, calls, tools, cost
-        case path, rows, workspaces, env, saved, mode, blocks, from, items
+        case path, rows, workspaces, env, saved, mode, blocks, from, items, images
+        case label, restorable
+        case oldest
+        case has_more
         case isError = "error"
         case canSend = "can_send"
         case interrupted, continued
@@ -140,7 +173,11 @@ public enum ShellEvent: Decodable, Equatable {
         case "user":
             self = .user(
                 text: try fields.decode(String.self, forKey: .text),
-                continued: (try fields.decodeIfPresent(Bool.self, forKey: .continued)) ?? false
+                continued: (try fields.decodeIfPresent(Bool.self, forKey: .continued)) ?? false,
+                // Absent from a shell that predates the field, and from a prompt that carried no
+                // pictures — both of which mean the same thing to the transcript: a question with
+                // no images above it.
+                images: (try fields.decodeIfPresent([RowImage].self, forKey: .images)) ?? []
             )
         case "session":
             self = .session(
@@ -155,11 +192,31 @@ public enum ShellEvent: Decodable, Equatable {
                 )) ?? ""
             )
         case "history":
-            self = .history(rows: try fields.decode([Row].self, forKey: .rows))
+            // Hoisted into locals rather than written inline: three `try`s inside one initializer is
+            // more than the type checker will work through here, and it says so with "unable to
+            // type-check this expression in reasonable time" rather than with anything about the types.
+            let rows = try fields.decode([Row].self, forKey: .rows)
+            let oldest = try fields.decodeIfPresent(String.self, forKey: .oldest) ?? ""
+            // Absent from a shell that predates paging, which sends every row it has: a host that
+            // assumed there was more would offer to load a page that does not exist.
+            let hasMore = try fields.decodeIfPresent(Bool.self, forKey: .has_more) ?? false
+            self = .history(rows: rows, oldest: oldest, hasMore: hasMore)
+        case "earlier":
+            let rows = try fields.decode([Row].self, forKey: .rows)
+            let oldest = try fields.decodeIfPresent(String.self, forKey: .oldest) ?? ""
+            let hasMore = try fields.decodeIfPresent(Bool.self, forKey: .has_more) ?? false
+            self = .earlier(rows: rows, oldest: oldest, hasMore: hasMore)
         case "sessions":
             self = .sessions(
                 workspaces: try fields.decode([SessionGroup].self, forKey: .workspaces)
             )
+        case "deleted":
+            let deletedPath = try fields.decode(String.self, forKey: .path)
+            let deletedLabel = try fields.decode(String.self, forKey: .label)
+            // Absent from a shell that predates the checkbox, and those only ever renamed the file
+            // aside: true is both the older behaviour and the one that offers a way back.
+            let restorable = try fields.decodeIfPresent(Bool.self, forKey: .restorable) ?? true
+            self = .deleted(path: deletedPath, label: deletedLabel, restorable: restorable)
         case "settings":
             self = .settings(try ShellSettings(from: decoder))
         case "models":

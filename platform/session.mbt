@@ -303,6 +303,12 @@ pub async fn list_workspaces(root : String) -> Array[StoredWorkspace] {
     return out
   }
   for name in list_entries(root) {
+    // A workspace that has been removed is still a directory on disk — that is what makes the removal
+    // recoverable — and its name is the whole of what keeps it out of this listing. See
+    // `remove_workspace`.
+    if name.has_suffix(removed_suffix()) {
+      continue
+    }
     let dir = "\{root}/\{name}"
     if !is_directory(dir) {
       continue
@@ -369,6 +375,11 @@ pub async fn find_session(root : String, id : String) -> String? {
     return None
   }
   for name in list_entries(root) {
+    // Including a removed workspace's sessions would make `--resume` reach into a project the sidebar
+    // has been told to forget.
+    if name.has_suffix(removed_suffix()) {
+      continue
+    }
     let dir = "\{root}/\{name}"
     if !is_directory(dir) {
       continue
@@ -430,4 +441,104 @@ pub async fn restore_session(path : String) -> Unit {
   } noraise {
     _ => ()
   }
+}
+
+///|
+/// Take a session out of the store **and off the disk**.
+///
+/// The one destructive operation this program has, and it exists because a store with no way to empty
+/// it grows forever: a delete that only renames leaves a file per `Delete` click, and the only way to
+/// reclaim them is to find the directory in a shell. What that costs is stated where the reader makes
+/// the choice — the dialog says so, and the checkbox is off by default.
+///
+/// **The rename happens first, and the removal is of the renamed file.** That is not two ways to do
+/// one thing: a rename is atomic and a removal is not, so going through the aside-copy means the
+/// window never sees a half-deleted session — either it is in the store or it is in the trash, and the
+/// trash is emptied afterwards. A removal that fails leaves the file in exactly the state a plain
+/// delete leaves it, which is the recoverable one.
+pub async fn purge_session(path : String) -> Unit {
+  delete_session(path)
+  delete_file(path + deleted_suffix())
+}
+
+///|
+/// What a removed workspace's directory is renamed to, so it is out of every listing but still on
+/// disk.
+///
+/// The same mechanism as `deleted_suffix`, one level up: `list_workspaces` filters by this suffix, so
+/// renaming the directory is the whole of what "removed" means. The sessions inside keep their own
+/// names, because they are not deleted — they are in a project the sidebar has been told to forget.
+///
+/// **A directory rather than a marker file, and this is the one place the two kinds of forgetting
+/// differ.** A session is one file, so a rename is the whole of it. A workspace *is* its directory, and
+/// a marker saying "ignore me" would leave the reader with two things to undo and no way to tell from
+/// the store which of them was in force.
+fn removed_suffix() -> String {
+  ".removed"
+}
+
+///|
+/// Take a workspace out of the sidebar, keeping its conversations, and say where it went.
+///
+/// The directory is renamed aside rather than removed, for the reason `delete_session` renames a file:
+/// an accidental click should not be able to destroy a conversation, and here it would take all of
+/// them. What is left behind is `--Users-me-src--.removed` under the store root, with every session
+/// exactly where it was — and that path is the return value, because it is the only way back: the
+/// listing no longer knows this workspace, so nothing else can find it again.
+///
+/// `None` means nothing moved: a workspace the store does not list (which includes one already
+/// removed), or a rename that failed.
+///
+/// The cwd alone is not enough to find it: the directory name is derived from the path (see
+/// `session_dir_name`) and `list_workspaces` reads the real path out of the sessions' headers. So this
+/// resolves the directory from the listing first — the same listing the sidebar was drawn from —
+/// rather than renaming a name it guessed at.
+pub async fn remove_workspace(root : String, cwd : String) -> String? {
+  let dir = match workspace_dir_for(root, cwd) {
+    Some(dir) => dir
+    None => return None
+  }
+  let aside = dir + removed_suffix()
+  try @fs.rename(dir, aside) catch {
+    _ => return None
+  } noraise {
+    _ => ()
+  }
+  Some(aside)
+}
+
+///|
+/// Empty a workspace that `remove_workspace` renamed aside, taking every conversation with it.
+///
+/// **Handed the path `remove_workspace` returned, not a working directory**, and that is the whole of
+/// the division of labour between the two: a rename is atomic and a recursive removal is not, so the
+/// removal is of the aside-copy. Done in one step instead, a failure could leave a project that is
+/// half emptied *and still listed*; done in this order a failure leaves the state the reader could
+/// have chosen anyway — out of the list, conversations on disk.
+///
+/// Returns whether the directory is gone. The caller reports which of the two it got, because this is
+/// the only irreversible operation in the program.
+pub async fn purge_workspace(aside : String) -> Bool {
+  try @fs.rmdir(aside, recursive=true) catch {
+    _ => return false
+  } noraise {
+    _ => ()
+  }
+  true
+}
+
+///|
+/// Where a working directory's slice of the store is, as the listing sees it.
+///
+/// By resolved path rather than by the directory name, for the reason the listing itself gives: the
+/// name encodes the path, and decoding it back is ambiguous (`--a-b--` is both `a/b` and the one
+/// directory `a-b`). A removed workspace is deliberately not found here — it is no longer in the
+/// store's list.
+async fn workspace_dir_for(root : String, cwd : String) -> String? {
+  for stored in list_workspaces(root) {
+    if stored.cwd == cwd {
+      return Some(stored.dir)
+    }
+  }
+  None
 }

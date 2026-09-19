@@ -56,6 +56,8 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | ⇧Return 的行为和代码不符 | `NSEvent.modifierFlags` 读的是**此刻硬件**的状态，不是被处理那个事件的状态；合成/重放的事件更是完全无关 | 用事件自己的 `press.modifiers` |
 | `NSImage` 上没有 `pngData` | 它确实没有 | 过 `NSBitmapImageRep`（扩展在 `macos/WeiShell/Sources/WeiShell/Composer.swift`） |
 | 粘贴图片的回调从来不触发 | `onPasteCommand(of:)` 只在剪贴板**能提供**所列类型时才提供该命令（**这条是 API 语义，我没有逐个场景验证**） | 它意味着这条路径无法保证可达 —— 所以另给了一个菜单项（⌘⇧V），不赌谁能拿到 ⌘V |
+| 把快捷键写进 `Menu` 项的标题里（想让 `+` 菜单里两项看起来不一样） | **自定义 `label` 会被菜单丢掉**：`Button { … } label: { HStack { Text("Take Screenshot"); Spacer(); Text("⇧⌘S") } }` 渲染出来只有 `"Take Screenshot"`，和另一项一模一样（AX 里两项的 title 就是这么报的） | 用平台的 key-equivalent 列：给这一项挂 `.keyboardShortcut(…)`，AppKit 会在右边画灰字。同一个快捷键写在两处（菜单栏 + 弹出菜单）是安全的：**菜单打开期间，菜单栏先被搜索，所以按键跑的是菜单栏那一条** |
+| 一个 sheet 在某种输入下**窄得不能看**：截屏框选出一个词（90 点），`VStack` 跟着缩到 90 点宽，五个工具的标签各挤成几个点，Cancel / Insert 叠在一起 | 宽度是 `paper.size.width + padding`，而截图带来了自己的尺寸 —— 空白草图固定 640 点所以从来没露过这个面 | 给**整张 sheet** 一个下限（`max(纸宽, 420)`），而不是只给控件行 `minWidth` —— 后者会让下面的行比纸宽，按钮跑到纸外面去 |
 
 ## 三、文本输入 / 输入法（**中文用户必踩**）
 
@@ -78,6 +80,7 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | 不知道 Liquid Glass 怎么写、能不能用 | 凭记忆猜 API 不可靠 | **读 SDK 的 `.swiftinterface`**：`…/MacOSX.sdk/System/Library/Frameworks/SwiftUI.framework/…/arm64e-apple-macos.swiftinterface`。这次就是这么找到 `glassEffect` 的完整签名与可用性标注的 |
 | 同上，而且它不在 `SwiftUI` 里 | `glassEffect`、`Glass` 定义在 **SwiftUICore**（`@_originallyDefinedIn(module: "SwiftUI", macOS: 15.0)` 那套写法） | 按框架名找文件，别只 grep SwiftUI |
 | 想让 `.inset` 列表的行左右/上下多留白，改了 `.listRowInsets` 或 `.contentMargins(.horizontal, for: .scrollContent)`，一点没变 | 在 macOS 上这两个 modifier **对列表的行内边距不起作用**：四种写法（不设 / `listRowInsets` / `contentMargins` / 两者都设）量下来，`AXRow`、`AXCell`、`AXStaticText` 三层的 frame **一模一样**（285×320 的探针壳子：行 x=290…610、单元格 300…600、文字 306…） | padding 加在**行自己的内容**上（row view 里 `.padding(.horizontal, …)`）。量法：读 AX 的 `AXRow`/`AXCell`/`AXStaticText` 三个 x —— 三者一起动才算真的动了 |
+| 想让确认对话框里多一个「顺便把文件也删了」的勾选框 | **SwiftUI 没有这个控件**：`confirmationDialog` 的 actions/message 是 `ViewBuilder`，但对话框最终就是一组按钮，塞进去的别的视图不会到（`dialogSuppressionToggle` 是「别再问我」——「别再问」和「顺便也删文件」是两个问题）。查 `swiftinterface` 也没有等价物 | 用 **`NSAlert` + `accessoryView = NSButton(checkboxWithTitle:…)`**：macOS 的 `NSAlert` 是系统里唯一能在按钮旁边再放一个控件的对话框，而 SwiftUI 自己的 alert 底下就是它（这是**平台的对话框**，不是平台视图 —— 和菜单栏、剪贴板同一类，见 ADR-0008）。`beginSheetModal(for: window)` 让它是挂在窗口上的 sheet；`alertFirstButtonReturn` 是「Delete」，勾选框只**修饰**它（勾了再 Cancel 什么都不删）。记住第 0 个按钮是**默认**（Return），第 1 个是 Esc |
 | 用 macOS 26 的 API，但 package 的 target 是 14 —— 会不会崩在旧系统上 | —— | 用 `swift build` 后 `nm -m <binary> \| grep glassEffect` 看是不是 **weak external**，再 `otool -l \| grep minos` 看部署目标。weak 链接 + `if #available` 就是安全的 |
 | 搞不清一个 `ToolbarItem` 会落在**哪一栏**（三栏 split），截图看不出来 | 同一段声明换 placement 会落到不同栏，而且栏与栏在视觉上只隔一条分隔线 | **从进程内部读 `NSApp.windows.first?.toolbar?.items`**：`item.view` 的 frame 相对整窗，再沿 `superview` 链找到 superview 是 `NSToolbarView` 的那个祖先（item 自己的 frame 是相对 item view 的）。实测：声明在侧栏、`.automatic` → `x=117…161`（侧栏，在平台自己的侧栏开关 `x=161…208` 前面）；`.navigation` → 中间栏；`.primaryAction` → 窗口尾端。顺带同一条链上能读到 item 里的 `NSTextField`：平台画的窗口标题是 `_NSToolbarTitleField`（实测 `x=226 h=16`），可见它仍然在画 |
 | 想知道「设置面板是不是系统那样的偏好工具条」 | `TabView` 放在 `Settings` 场景里才会被画成偏好工具条；放在普通窗口里就是普通 tab | 同一套自查：AX 树里 `AXToolbar` 下面一个 `AXButton` 一个标签，窗口标题是当前标签名（实测五个标签 `x=103…417`、窗口标题 `API Key`） |
@@ -102,6 +105,7 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | 启动后拿到的 PID 不对 | `( … & )` 拿到的是**子 shell** 的 PID，不是 app 的 | 子 shell 里用 `exec env … /path/to/wei`，再 `echo $!` |
 | `pkill -f "Macos/wei"` 把自己也匹配上了 | `-f` 匹配整条命令行，而你的 `bash -c` 里就写着这个字符串 | 用锚定：`pkill -9 -f "Macos/wei$"`。**这条我照着写了又踩了**：`pkill -9 -f "Macos/wei"` 没杀掉任何一个 app（用户那个进程活得好好的），因为模式先匹配上了**它自己所在的 `bash -c`**，命令根本没走到那一步。教训是锚定要落在**参数的位置**上，`$` 放在路径后面；光把模式写短不算锚定 |
 | 反复启动后测到的行为不对 | **多个实例在跑**，你连的是上一个 | 每次测完按 PID 确认存活；断言时带上 PID / 窗口标题。顺带：两个实例**在同一个会话里各发一句**是会交错写进同一个 `.jsonl` 的 —— `Open.turns` 那把 mutex 只管**本进程内**；为什么先不修、以及真要修时最小的形状，见 [ADR-0009](adr/0009-multi-session-coordination.md) |
+| 明明改了代码、也重新打包了，**跑着的 app 显示的还是旧行为**（我这一轮：把 Sketch 从 `+` 菜单里拿掉了，菜单里还有它） | 上面那条的镜像：**两个实例同时活着**，而且这次两个都是同一个 bundle 路径、同一个窗口尺寸、同一个位置 —— 你截到的是别人那一扇。`pgrep`/`ps` 看得见两个 pid，但窗口列表里两扇窗的参数一模一样，看截图分不出来 | **AX 是按 pid 读的，所以状态问题一律用 AX 问**：`AXUIElementCreateApplication(pid)` 之后 `kAXMenuBarAttribute` / 遍历 `AXChildren`，那条 `AXMenuItem "Sketch"` 属不属于你那个 pid 一目了然。只有**点**是按坐标的（点会落到最前面那扇窗上），所以点之前先 `NSRunningApplication.activate` 并确认 `frontmostApplication.pid`。实测：我用坐标点 + 截图得出了「菜单里还有 Sketch」的错误结论，用 AX 一问是另一个 pid 的窗口 |
 | 按 PID 找窗口号 | 用户的 app 和你的 demo 同时跑时，按 owner 名选窗口会选到**用户那个**（两个进程 owner 都叫 `wei Agent`） | 按 `kCGWindowOwnerPID` 过滤 `CGWindowListCopyWindowInfo`，取 `layer == 0` 且有标题那个；`.optionAll` 是必须的（见第六节） |
 | 看不见 `Settings…` 菜单项；或者想切设置窗左边的某一项，AX 里翻不到 | 主菜单在**主线程忙的时候还会重建**（启动早期能看到的菜单项，几秒后又一次 `NSApp.mainMenu` 就变了）；而列表行的 `AXPress` 返回 **-25206**（不支持该动作） | 菜单项拿不准就不要猜选择器（`sendAction(showSettingsWindow:)` 返回 `true` 却什么都不做）：按 desc 找主窗左下角那个 `Settings` 按钮按下去。切换左栏那一项用**设 `kAXSelectedAttribute`**（不是 `AXPress`） |
 | 想把窗口改小，好看清滚动边缘效果 | `kAXSizeAttribute` 写入返回 **-25200**（不可设） | 改小不行就换成**内容长的那一项**（Skills 会列一长串技能）再滚；或者去 `/tmp` 写一个只含布局的壳子（第六节） |
@@ -135,10 +139,14 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | 编辑 app 正在写的 `WEI_DEBUG` 日志，看到 0 字节，以为「宿主根本没读流」 | 句柄是**启动时**开好的（`WireLog` 的 `static let handle`），app 起来之后再 `rm` 或 `> file`，写入就落到那个已经不在的 inode 上了 | 要清空就先确认那个 pid 已经不在了；或者干脆换个文件名重新起一个。同理：**先起 app 再 `rm`** 会得到「一切正常但日志是空的」 |
 
 | 想在**没有辅助功能 / 屏幕录制**权限的机器上验一个 SwiftUI 改动（新 sheet、画布） | `AXIsProcessTrusted()` 和 `CGPreflightScreenCaptureAccess()` 都是 `false` —— 而截图只是只读、驱动要 AX，于是「窗口里到底长什么样」这一步**根本到不了**，不是难，是没路 | 把改动切成**不依赖窗口**的两半去验：**算术**进单元测试（`SketchTests`：拖拽矩形的归一化、多小的拖拽不算一笔、零长度箭头的两支）；**产物**走一遍真边界 —— 生成出来的 PNG 直接喂 `wei-cli` 的 `/attach-temp`，看回的 `images` 事件里是不是 `image/png`、文件是不是被删掉了。窗口那一半没验就**明说没验**，别把「模型对、字节对」说成「功能对」 |
+| 想知道**一个命令在 TCC 被拒时说什么、退出码是什么**，而自己的进程早就授权了（终端、编辑器、这个 app 全都「能看」） | TCC 认的是调用方的签名身份，所以「我这台机器上它有权限」不等于「别人的机器上它有」—— 同一条命令在两种身份下可以给出**完全不同的两套回答**（实测 `screencapture -i`：有权限按 Escape 是「安静 + 退出 0」，没权限框选完是 `could not create image from rect` + 退出 1） | 给自己造一个**另一个身份**：`/tmp/x/Probe.app`（自己的 `Info.plist` + `CFBundleIdentifier`，`codesign -s -`），里面那个可执行文件跑一遍命令、把 stdout/stderr/退出码写进文件。这个 bundle 没被授权过，于是它替你回答「被拒时是什么样」。`open -a` 启动它（不要从 shell 直接跑，那会把权限算在 shell 头上），然后 `log show --predicate 'process == "probe"'` 能看到 TCC 的调用 |
 
 | 线上有**一条**事件比别的重几个数量级，主线程卡一下 | 两件事都在这条路上，而且都不在「解码」里：① **日志没开时的日志开销** —— `WireLog.line` 自己有 guard，但**参数在调用前就算好了**（`trimmingCharacters` 拷贝整行、`elided` 扫描并在找到附件时重写），于是 `WEI_DEBUG` 未设置时也为一条 4MB 事件付 **101ms 主线程**；② shell 为**没人画的行**发解析（reasoning 占 1.6MB/4.05MB） | ① 参数的计算一起进 guard（`if WireLog.isOn { … }`）；② 让「谁会读这个字段」在**一处**决定（`draws_markdown`），发出方与消费方共用那一个答案 |
 | 探针报出来的数字比应用还大 | 量具自己贵，而且贵在看不见的地方：**`String(describing:)` 一个有 1353 行的事件 = 166ms**；**每 tick 把整个窗口渲进位图 = 33ms/帧**（于是「切换后每帧 33ms」看着像应用的病） | 探针要跟被测物同量级：标签用 `String(line.prefix(48))` 而不是 `"\(event)"`；昂贵的渲染只在一头一尾做，不要放进每帧的循环。**先把量具本身量一遍**再相信它 |
 | 一个「让首帧落在末尾」的 SwiftUI 旋钮看起来像是解药 | `.defaultScrollAnchor(.bottom, for: .initialOffset)` 在实测里 **168.6 vs 174.7ms**，落在噪声里 —— 因为那 240ms 不在锚点上，而在「懒布局文档有三万点高」这件事本身 | 量了没效果就**回退**，别留下一个量不出效果的改动；换杠杆（降低文档高度 = 窗口化） |
+
+| A/B 两组的数字**一模一样**，于是结论是「这个改动没用」 | 只改了 MoonBit 侧、只跑了 `build-moonbit.sh` + `swift build` —— **SwiftPM 不知道 `vendor/libwei.a` 变了**，跑的还是旧二进制。症状不是报错，而是「两次测量完全相同」（实测：`doc=15480/15492` 一模一样地出现在「关掉分页」那一组里，而那本该是 32562） | 只要改了 `macos/appffi/`，**`rm -f` 掉那个产品再 build**（`.build/release/<产品>`）。判据很硬：A/B 若在**不涉及噪声的量**上完全相等，先怀疑自己没换成二进制。这条是 `macos/README.md` 那节的复现，我照着懂还是踩了 |
+| 一个「接近顶部就加载更多」的自动加载，在**切换会话**时连发了好几页 | 触发条件只看了「偏移接近顶部」，而**切换的那一瞬间偏移还是上一个会话的**（新会话的 rows 到达时它接近 0），于是触发；每加载一页又把偏移留在顶部，再触发。它同时和「跟随」规则抢同一个 revision：一个要把读者放到底部，另一个在他上方加行 | 触发条件里加「读者**自己**滚上去了」（这个仓库已经有的 `ScrollFollow`：`!following` 就是「他正在读上面的东西」）。用真探针看 `rows` 从 212 涨到 628 才发现，只看「白屏消失了没有」是看不出来的 |
 
 ## 六、调试手法（正面清单，别丢）
 

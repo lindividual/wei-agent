@@ -75,9 +75,15 @@ let package = Package(
     // with nothing to say — and it is the only test that can catch that class of failure, because
     // that failure is in the wiring rather than in any decoding. It links the archive, so `swift test`
     // needs `macos/build-moonbit.sh` to have run.
+    //
+    // It also depends on `WeiShell` itself, which is the one place a test does not follow the split
+    // below: the picture a sheet exports (`PictureExport`) is a view rendered into a bitmap, and a view
+    // rendered into a bitmap is not a fact about the wire. Everything about it that *is* arithmetic is
+    // in `WeiModel` where this cannot reach it; what is left — which pixels the file has, and whether
+    // the picture under the ink is right way up — can only be checked against a real `ImageRenderer`.
     .testTarget(
       name: "WeiShellTests",
-      dependencies: ["WeiKit", "WeiShellC"],
+      dependencies: ["WeiKit", "WeiShellC", "WeiShell"],
       linkerSettings: linkWei
     ),
   ]

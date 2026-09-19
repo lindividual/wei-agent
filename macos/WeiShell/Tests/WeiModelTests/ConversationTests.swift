@@ -179,4 +179,72 @@ final class ConversationTests: XCTestCase {
         XCTAssertNil(replies[0].blocks, "the second turn's parse landed on the first turn's row")
         XCTAssertEqual(replies[1].blocks?.count, 1)
     }
+
+    // ── what a question carried ───────────────────────────────────────────
+
+    /// **The pictures travel with the prompt, and land on the question's own row.**
+    ///
+    /// They are part of the message rather than of the composer's state, and the difference matters:
+    /// the shell empties the composer in the same breath, so a host that waited for `images` would
+    /// draw the question with no picture on it, one event later.
+    func testAQuestionKeepsThePicturesItWasSentWith() {
+        let conversation = run([
+            #"{"kind":"user","text":"what is this?","continued":false,"images":[{"mime":"image/png","data":"AAA="},{"mime":"image/jpeg","data":"BBB="}]}"#,
+            #"{"kind":"reply","id":"reply-1","delta":"a cat"}"#,
+        ])
+        let question = conversation.rows.first { $0.kind == .user }
+        XCTAssertEqual(question?.images.map(\.mime), ["image/png", "image/jpeg"])
+        XCTAssertEqual(question?.images.first?.bytes, Data([0x00, 0x00]))
+        // The answer carries none, and asking its picture list is how a view would ask.
+        XCTAssertEqual(conversation.rows.first { $0.kind == .reply }?.images, [])
+    }
+
+    /// A prompt that carried no pictures — every prompt before this field existed, and most prompts
+    /// since — decodes with an empty list rather than failing to decode at all.
+    ///
+    /// The absent case is the one worth pinning: a shell that predates `images` writes no such field,
+    /// and a transcript that refused those lines would turn an old log into an empty window.
+    func testAQuestionWithNoPicturesDecodes() {
+        let conversation = run([
+            #"{"kind":"user","text":"plain"}"#,
+            #"{"kind":"user","text":"and again","continued":false,"images":[]}"#,
+        ])
+        XCTAssertEqual(conversation.rows.map(\.text), ["plain", "and again"])
+        XCTAssertEqual(conversation.rows.map(\.images), [[], []])
+    }
+
+    /// The pictures are named by their own bytes, not by the row.
+    ///
+    /// This is the cache key, and the reason it cannot be the row id: `user-1` is one picture in one
+    /// session and a different one in the next, so a cache keyed by row would draw the previous
+    /// conversation's screenshot in this one. Two different pictures must therefore differ here — and
+    /// the same picture, in two rows or two sessions, must not.
+    func testAPicturesKeyIsItsBytesRatherThanItsRow() {
+        let one = RowImage(mime: "image/png", data: "AAA=")
+        let two = RowImage(mime: "image/png", data: "BBB=")
+        XCTAssertNotEqual(one.key, two.key)
+        XCTAssertEqual(one.key, RowImage(mime: "image/png", data: "AAA=").key)
+        XCTAssertEqual(RowImage(mime: "image/png", data: "AAA=").bytes, Data([0x00, 0x00]))
+        // Not base64 at all is not bytes rather than a crash: a row is data off a wire.
+        XCTAssertNil(RowImage(mime: "image/png", data: "not base64!!").bytes)
+    }
+
+    /// **A question can be a picture and nothing else**, which is the case a screenshot is.
+    ///
+    /// Two things have to hold for it to be drawn: the row survives with empty text (the shell skips a
+    /// row with neither words nor pictures, and this one has a picture), and it still *starts a turn* —
+    /// grouping is on the row kind, not on whether it says anything, so an empty question is the
+    /// question rather than a row orphaned inside the previous turn's work.
+    func testAQuestionWithNoWordsStillStartsATurn() {
+        let conversation = run([
+            #"{"kind":"user","text":"first"}"#,
+            #"{"kind":"reply","id":"reply-1","delta":"an answer"}"#,
+            #"{"kind":"end","text":"","calls":1,"tools":0,"cost":"0"}"#,
+            #"{"kind":"user","text":"","continued":false,"images":[{"mime":"image/png","data":"AAA="}]}"#,
+        ])
+        let grouped = turns(of: conversation.rows)
+        XCTAssertEqual(grouped.count, 2)
+        XCTAssertEqual(grouped[1].question?.text, "")
+        XCTAssertEqual(grouped[1].question?.images.count, 1)
+    }
 }

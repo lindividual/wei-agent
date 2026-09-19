@@ -81,7 +81,12 @@ public struct TurnUsage: Equatable {
 /// decision `core` makes for both front ends, so formatting it again here would be the second opinion
 /// that makes the web UI and this window disagree about the same turn.
 public struct Usage: Equatable, Decodable {
-    /// Assistant replies the totals cover, so a reader can tell "expensive" from "long".
+    /// How many priced model calls the totals cover: every assistant message on the path, plus the
+    /// summarization call behind each compaction. The shell's `replies`.
+    ///
+    /// Counted on the same walk as the tokens, which is why it is one number for "expensive" (the
+    /// bill) and "long" (the conversation) — and why it can be called a call count rather than a
+    /// guess: in this system one model call produces exactly one priced message.
     public let turns: Int
     /// Every token the provider billed, prompt and completion together.
     public let total: Int
@@ -218,6 +223,35 @@ public struct Usage: Equatable, Decodable {
     public var contextIsMeasured: Bool {
         guard context > 0 else { return prompt > 0 }
         return contextSource == "provider"
+    }
+
+    /// The whole session, as the line under the composer says it.
+    ///
+    /// What this replaces and why: the line used to carry the **last turn's** figures, which the
+    /// transcript already ends that turn with (a `note` row, "3 model calls · 2 tool calls · $0.01") —
+    /// so the same numbers were on screen twice, and the figures that were *not* anywhere on screen
+    /// were the session's. A reader deciding whether to keep going is asking about the conversation,
+    /// not about the turn they have just read the end of.
+    ///
+    /// `in / out` rather than a single total, and that is the one place this could mislead: the cache
+    /// reads are neither — they are counted separately because they are billed separately, and they
+    /// are the largest number of the three in a long conversation. A single "189M tokens" that is
+    /// four fifths cache reads would read as a spend rather than as a saving.
+    ///
+    /// Empty for a session that has asked nothing, which is the same convention `contextFill` uses:
+    /// a line of zeroes is a claim that a turn was free, and there has not been a turn.
+    public var sessionSummary: String {
+        guard turns > 0 else { return "" }
+        var parts: [String] = []
+        parts.append("\(turns) model call\(turns == 1 ? "" : "s")")
+        parts.append("\(TokenText.compact(input)) in / \(TokenText.compact(output)) out")
+        // Thinking is part of what was bought and invisible in the answer, which is the case where a
+        // reader wonders what they paid for. Left out rather than shown as `0` when the provider does
+        // not report it: that is a fact about the provider, not about the conversation.
+        if reasoning > 0 {
+            parts.append("\(TokenText.compact(reasoning)) thinking")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 

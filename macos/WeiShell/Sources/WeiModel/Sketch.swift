@@ -117,6 +117,70 @@ public enum Sketch {
         return (left, right)
     }
 
+    // ── the paper ─────────────────────────────────────────────────────────
+
+    /// A sheet of paper: how big it is in the sheet, and how many pixels that is worth.
+    ///
+    /// Two numbers rather than one, because they are two different questions and neither answers the
+    /// other. The **points** are the coordinate space every mark is made in and the size the sheet
+    /// takes of the window; the **scale** is pixels per point on the way out. A sheet drawn at 2× is
+    /// the same picture on screen as one drawn at 1× and twice the file underneath.
+    ///
+    /// The blank sketch is a constant on both axes (640×420 at 2×) and that is not a coincidence to
+    /// preserve — but a **screenshot is not**, which is why this is a type. The system's capture
+    /// arrives with its own size and its own resolution (a 2× display's full screen is 1470×956 points
+    /// and 2940×1912 pixels), and the paper that shows it has to be right about *both*: the reader has
+    /// to see the whole picture, and the model has to be handed the picture that was taken. The rule
+    /// that makes those two agree is `fitting` below.
+    public struct Paper: Equatable, Sendable {
+        public let size: CGSize
+        public let scale: CGFloat
+
+        public init(size: CGSize, scale: CGFloat) {
+            self.size = size
+            self.scale = scale
+        }
+
+        /// What the drawn picture is worth, in pixels.
+        public var pixels: CGSize {
+            CGSize(width: size.width * scale, height: size.height * scale)
+        }
+
+        /// The paper for a picture of `pixels` that is `points` big, no bigger than `limit` points.
+        ///
+        /// The shape is kept, the picture is **not enlarged**, and what does not fit is shrunk to fit
+        /// — those three are the whole rule. A 200-pixel-wide capture blown up to fill the sheet would
+        /// be a blur of itself, and the reader would be marking up something the model will never see:
+        /// a picture smaller than the limit therefore keeps its own size, and its export stays 1:1.
+        ///
+        /// `scale` is then whatever makes the export the picture's own pixels — **not the window's or
+        /// the screen's idea of a scale.** That is the point of taking `points` and `pixels` as two
+        /// separate answers: a shrunk sheet renders at a *larger* scale than the screen it came from,
+        /// which is what puts 2940×1912 in the file instead of the 1360×880 a 680-point sheet at the
+        /// screen's own 2× would hold. The resample on the way is one the renderer does at whatever
+        /// ratio `points` and `pixels` imply, and no rule here has to know what it is.
+        ///
+        /// Both inputs come from outside this file and neither is checkable here — one is what a decoder
+        /// reports for the picture's own resolution, the other what it reports for its size — so both are
+        /// floored at a pixel. Without that floor a picture that decoded to nothing divides by zero:
+        /// `limit / 0` is an infinite shrink, and an infinite shrink of a zero-sized picture is a `NaN`
+        /// in a value that is used as a frame.
+        public static func fitting(
+            pixels: CGSize,
+            points: CGSize,
+            into limit: CGSize,
+        ) -> Paper {
+            let drawn = CGSize(width: max(points.width, 1), height: max(points.height, 1))
+            let real = CGSize(width: max(pixels.width, 1), height: max(pixels.height, 1))
+            let fit = min(1, limit.width / drawn.width, limit.height / drawn.height)
+            let size = CGSize(width: drawn.width * fit, height: drawn.height * fit)
+            // The two share an aspect by construction — they are one picture at two resolutions — so
+            // one axis is the answer for both. Taking the width is a choice, and a mismatched pair
+            // would come out stretched rather than silently cropped.
+            return Paper(size: size, scale: real.width / size.width)
+        }
+    }
+
     // ── a drag in progress ────────────────────────────────────────────────
 
     /// The mark being drawn right now.

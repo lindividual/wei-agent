@@ -76,6 +76,59 @@ final class TranscriptRoutingTests: XCTestCase {
         XCTAssertEqual(client.conversation.rows[0].text, "what A asked")
     }
 
+    /// The offer to undo a delete is the shell's answer, not the click's guess.
+    ///
+    /// A delete can be refused — a turn appending to that file, or a background job it started — and it
+    /// also *replaces* the session on screen rather than being refused. So the host cannot tell from the
+    /// click whether a file moved: the shell says so with a `deleted` event, and that event is the only
+    /// thing that may put an Undo line on screen. This test is that rule, from the side that draws it.
+    func testTheUndoOfferComesFromTheShellRatherThanTheClick() {
+        let client = client()
+        XCTAssertNil(client.deleted, "an offer was up before anything was deleted")
+
+        // A refused delete says nothing about a deletion, so nothing is offered.
+        client.receive(
+            #"{"kind":"error","session":"/store/bbbb.jsonl","text":"cannot delete a session with a turn running — stop it first"}"#
+        )
+        XCTAssertNil(client.deleted)
+
+        // The one that happened: an offer with the path to put back, and the label to name it with.
+        client.receive(
+            #"{"kind":"deleted","session":"/store/bbbb.jsonl","path":"/store/bbbb.jsonl","label":"what B asked","restorable":true}"#
+        )
+        XCTAssertEqual(client.deleted?.path, "/store/bbbb.jsonl")
+        XCTAssertEqual(client.deleted?.label, "what B asked")
+        XCTAssertEqual(client.deleted?.restorable, true)
+
+        // And the offer is not a transcript row: it is about the list, and the conversation it names is
+        // gone — a note inside a transcript nobody is looking at is not where an Undo belongs.
+        XCTAssertEqual(client.conversation.rows.count, 1)
+        XCTAssertEqual(client.conversation.rows[0].text, "what A asked")
+
+        // The window's own clock takes it down, through the shell's door: the offer is still the
+        // shell's, and this only says it has stopped being worth drawing.
+        client.undoOfferExpired()
+        XCTAssertNil(client.deleted)
+    }
+
+    /// The same event says whether there is anything to put back, and that is the field that decides
+    /// whether the line is drawn at all.
+    ///
+    /// A purge is the one act in this app that cannot be undone, and it travels as the same event as a
+    /// delete — because from the list's point of view the same thing happened. `restorable` is the whole
+    /// of the difference, and an Undo button on a file that was removed is a button that lies.
+    func testAPurgedSessionIsAnnouncedWithoutAWayBack() {
+        let client = client()
+        client.receive(
+            #"{"kind":"deleted","session":"/store/bbbb.jsonl","path":"/store/bbbb.jsonl","label":"what B asked","restorable":false}"#
+        )
+        XCTAssertEqual(client.deleted?.path, "/store/bbbb.jsonl")
+        XCTAssertEqual(
+            client.deleted?.restorable, false,
+            "a removed file was announced as one that can be put back"
+        )
+    }
+
     /// An answer that arrives while the reader is looking elsewhere is kept, not dropped. This is the
     /// case a single-transcript host would get wrong in the other direction: the turn would be *stopped*
     /// by nobody listening.

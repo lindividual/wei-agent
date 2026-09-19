@@ -34,7 +34,7 @@ struct WeiApp: App {
             // be a second view of the same conversation — which is what the sidebar is for. "New"
             // therefore means a new session, and it is where a Mac user looks for it.
             CommandGroup(replacing: .newItem) {
-                Button("New Session") { client.newSession() }
+                Button("New Session") { client.newSession(in: actions.browsing) }
                     .keyboardShortcut("n", modifiers: .command)
                 // The second answer to "new session", where a Mac user looks for it. The shortcut is
                 // on this item rather than on the toolbar's copy of it: one shortcut belongs to one
@@ -47,11 +47,24 @@ struct WeiApp: App {
             // wins it is not one a reader should have to care about — so the feature is also here,
             // where it is discoverable and where nothing competes for it.
             CommandGroup(after: .pasteboard) {
+                Divider()
                 Button("Attach Image from Clipboard") {
                     if let path = PastedImage.write() { client.attachTemporary(path) }
                 }
                 .keyboardShortcut("v", modifiers: [.command, .shift])
                 .disabled(!PastedImage.available)
+                // The two screenshots, under the same menu as the clipboard because they are the same
+                // kind of thing: a picture for the next prompt that was not a file the reader picked.
+                //
+                // **⌘⇧S, not the system's ⌘⇧4.** The platform's own screenshot still works and still
+                // does what it does; these two are the ones that come back *here*, and two commands on
+                // one keystroke is the state this app has already been bitten by (see the note in
+                // `docs/macos-pitfalls.md` about who owns a key). A reader who wants a picture on their
+                // Desktop uses ⌘⇧4, and a reader who wants to ask about one uses these.
+                Button("Take Screenshot") { actions.screenshot(hiding: false) }
+                    .keyboardShortcut(Screenshot.onScreen)
+                Button("Take Screenshot Without This Window") { actions.screenshot(hiding: true) }
+                    .keyboardShortcut(Screenshot.withoutWindow)
             }
             // What the reader does *to* the session they are in: move to another one, or stop the work
             // in this one. Both had a way in already — the sidebar row, and the button in the composer

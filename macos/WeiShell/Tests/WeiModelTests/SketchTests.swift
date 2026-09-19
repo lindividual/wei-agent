@@ -136,4 +136,84 @@ final class SketchTests: XCTestCase {
         XCTAssertEqual(left, tip)
         XCTAssertEqual(right, tip)
     }
+
+    // ── the paper a picture is marked up on ───────────────────────────────
+
+    /// A picture that is bigger than the sheet is shrunk to fit, keeping its shape — and **the export is
+    /// still the picture's own pixels.**
+    ///
+    /// This is the case the whole type exists for: a full screen of a 2× display is 1470×956 points and
+    /// 2940×1912 pixels, which is more points than the sheet has room for and more pixels than the sheet
+    /// at the screen's own scale would hold. Both are answered at once — 440 points of paper, and 2940
+    /// pixels of picture underneath it.
+    func testAScreenSizedPictureIsFittedAndStillExportedAtItsOwnPixels() {
+        let paper = Sketch.Paper.fitting(
+            pixels: CGSize(width: 2940, height: 1912),
+            points: CGSize(width: 1470, height: 956),
+            into: CGSize(width: 680, height: 440)
+        )
+        XCTAssertEqual(paper.size.height, 440, accuracy: 0.001)
+        XCTAssertEqual(paper.size.width, 1470 * 440 / 956, accuracy: 0.001)
+        XCTAssertEqual(paper.pixels.width, 2940, accuracy: 0.5)
+        XCTAssertEqual(paper.pixels.height, 1912, accuracy: 0.5)
+    }
+
+    /// **A picture smaller than the sheet keeps its own size**, and that is a rule rather than a missed
+    /// optimisation: a 200-pixel capture blown up to fill the paper is a blur of itself, and the reader
+    /// would be marking up something the model will never see.
+    func testASmallerPictureIsNotEnlarged() {
+        let paper = Sketch.Paper.fitting(
+            pixels: CGSize(width: 600, height: 400),
+            points: CGSize(width: 300, height: 200),
+            into: CGSize(width: 680, height: 440)
+        )
+        XCTAssertEqual(paper.size, CGSize(width: 300, height: 200))
+        XCTAssertEqual(paper.scale, 2)
+        XCTAssertEqual(paper.pixels, CGSize(width: 600, height: 400))
+    }
+
+    /// A capture with no resolution of its own is one pixel per point, and the sheet may still shrink it.
+    func testAOneToOnePictureIsExportedOneToOne() {
+        let paper = Sketch.Paper.fitting(
+            pixels: CGSize(width: 2000, height: 1000),
+            points: CGSize(width: 2000, height: 1000),
+            into: CGSize(width: 680, height: 440)
+        )
+        XCTAssertEqual(paper.size, CGSize(width: 680, height: 340))
+        XCTAssertEqual(paper.scale, 2000.0 / 680.0, accuracy: 0.0001)
+        // `pixels` is the size and the scale multiplied back together, so the picture's own dimensions
+        // come out of it to within a rounding step rather than exactly. That is the right thing to
+        // assert: what matters is that the export is the picture's own resolution and not the window's.
+        XCTAssertEqual(paper.pixels.width, 2000, accuracy: 0.001)
+        XCTAssertEqual(paper.pixels.height, 1000, accuracy: 0.001)
+    }
+
+    /// Neither axis decides the other: a tall picture is limited by the height it is given.
+    func testAPortraitPictureIsLimitedByHeight() {
+        let paper = Sketch.Paper.fitting(
+            pixels: CGSize(width: 1000, height: 2000),
+            points: CGSize(width: 500, height: 1000),
+            into: CGSize(width: 680, height: 440)
+        )
+        XCTAssertEqual(paper.size.height, 440, accuracy: 0.001)
+        XCTAssertEqual(paper.size.width, 220, accuracy: 0.001)
+        XCTAssertEqual(paper.pixels.width, 1000, accuracy: 0.5)
+    }
+
+    /// Zero is a size that is drawn with, so it cannot be allowed to go through: a sheet that is zero
+    /// points wide takes `limit / 0` into a `NaN` frame, and that is a picture nothing can draw.
+    ///
+    /// The honest version of the input is "a decoder handed back nothing", which reaches here as a zero
+    /// in either axis rather than as an absence.
+    func testAZeroSizedPictureBecomesAPixelRatherThanNaN() {
+        let paper = Sketch.Paper.fitting(
+            pixels: CGSize(width: 0, height: 0),
+            points: CGSize(width: 0, height: 0),
+            into: CGSize(width: 680, height: 440)
+        )
+        XCTAssertEqual(paper.size, CGSize(width: 1, height: 1))
+        XCTAssertEqual(paper.scale, 1)
+        XCTAssertFalse(paper.size.width.isNaN)
+        XCTAssertFalse(paper.scale.isNaN)
+    }
 }

@@ -22,6 +22,25 @@ public enum ShellState: Equatable {
     }
 }
 
+/// A conversation that just left the store.
+///
+/// `restorable` is the checkbox in the delete dialog, and it is the shell's answer rather than the
+/// window's memory of the box it drew: a delete with a turn running in it is *refused*, so the box the
+/// reader ticked may describe a click that was never carried out. What decides whether an Undo button
+/// has anything to offer is this field.
+public struct DeletedSession: Equatable, Sendable {
+    public let path: String
+    public let label: String
+    /// False after a purge: the file was removed, not renamed aside, and `/restore` would find nothing.
+    public let restorable: Bool
+
+    public init(path: String, label: String, restorable: Bool) {
+        self.path = path
+        self.label = label
+        self.restorable = restorable
+    }
+}
+
 /// The app's whole connection to the agent.
 ///
 /// Thin on purpose: the decisions are `Conversation` (what the transcript becomes) and MoonBit
@@ -34,6 +53,17 @@ public final class ShellClient: ObservableObject {
     /// merged: the shell is the one that read the disk, and a list this side patched up from its own
     /// guesses would be a second opinion about what is on it.
     @Published public private(set) var groups: [SessionGroup] = []
+    /// The conversation that was taken out of the store last, and whether there is a way back.
+    ///
+    /// Set by the shell's `deleted` event rather than by the click that asked for it, because a delete
+    /// can be refused — a turn is appending to that file, or a job it started is still running — and
+    /// only the shell's answer knows whether the file actually moved. A window that put its own notice
+    /// up would show an Undo button for a conversation that is still in the list.
+    ///
+    /// How long the offer stands is *not* here: that is a fact about a window, and the list that draws
+    /// the line owns the clock. What is here is the offer itself, because it is what the Undo button
+    /// sends back.
+    @Published public private(set) var deleted: DeletedSession?
     /// The session on screen, by path. What the sidebar's selection *is*, rather than something the
     /// selection agrees with: a click asks the shell to switch, and the row highlights when the shell
     /// says it did. A refused switch — a turn is running — therefore leaves the row the reader
@@ -142,6 +172,11 @@ public final class ShellClient: ObservableObject {
 
         case let .sessions(workspaces):
             groups = workspaces
+
+        case let .deleted(path, label, restorable):
+            // The outcome of a delete, said once. It replaces whatever offer was up: two lines would be
+            // two conversations to choose between, and the second delete is the one the reader just did.
+            deleted = DeletedSession(path: path, label: label, restorable: restorable)
 
         case let .settings(settings):
             self.settings = settings
@@ -372,12 +407,6 @@ public final class ShellClient: ObservableObject {
         tell("/rename \(path) \(name)")
     }
 
-    /// Put a deleted session back.
-    public func restore(_ path: String) {
-        guard !path.isEmpty else { return }
-        tell("/restore \(path)")
-    }
-
     // ── background jobs ───────────────────────────────────────────────────
 
     /// Stop a job and everything it started.
@@ -414,27 +443,113 @@ public final class ShellClient: ObservableObject {
         tell("/limits \(rounds) \(cost) \(seconds)")
     }
 
-    /// Start a session in the same directory as the current one.
+    /// Start a session in the project the session on screen is in.
+    ///
+    /// The fallback, not the rule: a host with no project to name sends this. See `newSession(in:)`,
+    /// which is what the window uses because the window is the side that knows which project the reader
+    /// is looking at.
     public func newSession() {
-        tell("/new")
+        newSession(in: "")
     }
 
-    /// Start a session in a directory the reader picked.
+    /// Start a session in the project the reader is looking at.
+    ///
+    /// The project crosses with the command, which is the fix for a bug the window had: the shell knew
+    /// only the project of the session *on screen*, so "New Session" under another project created the
+    /// session in the old one — and the window, following `currentPath`, moved its own selection back
+    /// there. Browsing a project is a window fact (`RootView.browsing`), so the window is the side that
+    /// has to hand it over; the web UI's row carries `data-new="<cwd>"` for exactly this reason.
+    ///
+    /// Empty asks the same question `newSession()` does, rather than being refused: an empty project is
+    /// not a folder nobody picked, it is a window with nothing to name — an empty store, where no list
+    /// holds the open session yet — and the shell's answer to that is "the project on screen".
+    public func newSession(in project: String) {
+        tell(project.isEmpty ? "/new" : "/new \(project)")
+    }
+
+    /// Add a project: open a session in a folder the reader picked, **and record the folder as a
+    /// workspace**.
+    ///
+    /// **Not the same command as `newSession(in:)`**, though both name a directory. This one writes the
+    /// marker file — which is what puts a project in the sidebar — and says `workspace added: …`; that one
+    /// only opens a session in a project the store already holds. A reader who picked a folder meant both;
+    /// a reader clicking the plus under a project meant only the second, and a second copy of the marker
+    /// file is a second copy of a fact the store already has.
     ///
     /// The path crosses as a path and the shell is the side that checks it: whether it is a directory,
     /// and what its *resolved* form is. Resolution has to happen there rather than here — `getcwd`
     /// hands back `/private/tmp/...` while a chooser hands back `/tmp/...`, and a store keyed on both
     /// would list one folder twice. See `Shell::new_in`.
-    public func newSession(in path: String) {
+    public func addWorkspace(_ path: String) {
         guard !path.isEmpty else { return }
         tell("/new-in \(path)")
     }
 
-    /// Take a session out of the store. The shell refuses the one on screen, and the file is renamed
-    /// aside rather than removed, so a mis-click is recoverable by hand.
+    /// Take a project out of the sidebar.
+    ///
+    /// **Two commands rather than one with a flag**, for the same reason `/delete` and `/purge` are two: the
+    /// answer to "and the conversations?" is the whole of the difference, and a wire log should say which
+    /// one was asked for without a reader having to decode a boolean.
+    ///
+    /// The checkbox in the dialog is *not* remembered here: what the shell carries out is what the shell
+    /// reports, and a client that kept its own copy would have a second opinion about a project it can no
+    /// longer see. With `deletingSessions` false the store directory is renamed aside, so every conversation
+    /// is still on disk; with it true the directory is emptied, and that is the only act in this program
+    /// that cannot be undone.
+    ///
+    /// Addressed by the working directory, which is what a project *is* here — the store's directory name
+    /// for it cannot be decoded back into a path (see `platform/session.mbt`).
+    public func removeWorkspace(_ cwd: String, deletingSessions: Bool) {
+        guard !cwd.isEmpty else { return }
+        tell(deletingSessions ? "/workspace-delete \(cwd)" : "/workspace-remove \(cwd)")
+    }
+
+    /// Take a session out of the store. The file is renamed aside rather than removed, so a mis-click is
+    /// recoverable by hand — and the shell answers with a `deleted` event, which is what puts the offer
+    /// to undo it on screen.
+    ///
+    /// **Not refused for the session on screen**, which it used to be. The shell replaces the open
+    /// session with another one in the same project, so clicking Delete on the row you are reading is
+    /// allowed and does what it says. What is still refused is deleting one with work going on in it:
+    /// a turn appending to that file, or a background job it started. Those come back as an error
+    /// rather than as an offer, which is the correct pair of outcomes for a click on a row.
     public func delete(_ path: String) {
-        guard path != currentPath else { return }
+        guard !path.isEmpty else { return }
         tell("/delete \(path)")
+    }
+
+    /// The same, **and the file too**: the one irreversible command here.
+    ///
+    /// A separate word rather than a flag inside the other one, because the two are two intentions and
+    /// a reader of a wire log should be able to see which was asked for without reading a boolean. What
+    /// the reader actually did was tick a box in a dialog: the dialog is where the friction belongs — a
+    /// second confirmation after the first would be two questions for one decision — and this is what
+    /// the tick turns into.
+    public func purge(_ path: String) {
+        guard !path.isEmpty else { return }
+        tell("/purge \(path)")
+    }
+
+    /// Put the deleted session back, and take the offer down with it.
+    ///
+    /// The offer is cleared here rather than waiting for the shell to say the restore happened: the
+    /// click has been answered, and an Undo line that outlived its own click would be offering to undo
+    /// something that is no longer undone.
+    public func restore(_ path: String) {
+        guard !path.isEmpty else { return }
+        tell("/restore \(path)")
+        deleted = nil
+    }
+
+    /// The offer has been on screen as long as it is worth being: forget it.
+    ///
+    /// Called by the list that drew it, on its own clock. "How long an offer stands" is a decision
+    /// about a window — the web UI's five seconds and this one's twelve are the same rule applied to
+    /// two different things to read — and the side that draws the line is the side that knows when it
+    /// has stopped being useful. What it must not do is *be* the offer: a window that kept its own copy
+    /// could restore from it after the shell had moved on.
+    public func undoOfferExpired() {
+        deleted = nil
     }
 
     // ── settings ──────────────────────────────────────────────────────────
@@ -460,6 +575,16 @@ public final class ShellClient: ObservableObject {
     /// reach.
     public func clearSavedKey() {
         tell("/key-clear")
+    }
+
+    /// Ask the shell for the page of rows before one the transcript already has.
+    ///
+    /// The cursor is the id of the oldest row on screen: the shell answers with the page that ends just
+    /// before it, so the host never has to know how the shell pages, and a page that is answered late —
+    /// after a turn appended rows — still lands in the right place.
+    public func loadEarlier(_ before: String) {
+        guard !before.isEmpty else { return }
+        tell("/earlier \(before)")
     }
 
     /// Switch which tools a turn gets. Honoured on the next turn, not the one running.

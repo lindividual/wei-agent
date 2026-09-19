@@ -43,7 +43,7 @@ extension View {
 /// What the reader types in: a card that floats over the transcript, and a line of figures beneath it.
 ///
 /// The card holds everything that belongs to the message being written — the pictures attached to it,
-/// the text, and the three controls a reader reaches for while writing one: attach a file, choose the
+/// the text, and the three controls a reader reaches for while writing one: add an image, choose the
 /// model that will answer, and send. They are inside the card rather than around it because they are
 /// all about *this* message, and a control that changes what will be sent belongs next to the thing
 /// that will be sent.
@@ -54,6 +54,11 @@ extension View {
 /// who reads it, and they are looking at the answer, not at the box.
 struct Composer: View {
     @ObservedObject var client: ShellClient
+    /// What the window is in the middle of. The picture sheet lives here rather than in this view,
+    /// because **two places open it**: the `+` menu below the field, and the Edit menu — where a
+    /// screenshot's keystroke is written down. One piece of state written by two places cannot belong to
+    /// either of them, which is the same argument as the rename dialog's (see `WindowActions`).
+    @ObservedObject var actions: WindowActions
     /// The draft lives **here**, not in the window above.
     ///
     /// A `@Binding` handed down from `RootView` was the shape of a message that never left the app: the
@@ -71,7 +76,6 @@ struct Composer: View {
 
     @FocusState private var editorFocused: Bool
     @State private var pickingFiles = false
-    @State private var sketching = false
     @State private var showingUsage = false
 
     /// What dictation is doing, as rules (`WeiModel.Dictation`): the transitions, what each ending does
@@ -206,17 +210,55 @@ struct Composer: View {
         .onPasteCommand(of: [.image]) { _ in
             if let path = PastedImage.write() { client.attachTemporary(path) }
         }
-        // The sketch sheet. On the card rather than on the pencil button, because it is about *this*
-        // message: the picture it produces is an attachment of the draft being written, and a sheet
-        // hung on the button would be one more thing that has to be found again after a redraw.
-        .sheet(isPresented: $sketching) {
-            Sketchpad { png in
-                // The same path the clipboard takes: a file this side made, which the shell reads,
-                // sniffs and deletes. Nothing about the sketch travels except PNG bytes, so the sheet
-                // and the paste cannot come to different conclusions about what an attachment is.
-                if let path = TemporaryImage.write(png, named: "sketch") {
-                    client.attachTemporary(path)
-                }
+        // The picture sheet: blank paper, or a screenshot to mark up. On the card rather than on the
+        // button that opened it, because it is about *this* message — the picture it produces is an
+        // attachment of the draft being written, and a sheet hung on the button would be one more thing
+        // that has to be found again after a redraw.
+        //
+        // `item:` rather than `isPresented:` because the two cases carry different content, and because
+        // the identity is what gives each capture a sheet of its own state: a second screenshot while
+        // one is open is a *new* sheet, with empty paper, rather than a new picture inside the first
+        // one's marks.
+        .sheet(item: $actions.picture) { picture in
+            switch picture {
+            case .blank:
+                Sketchpad { png in attach(png, named: "sketch") }
+            case let .marking(markup):
+                Sketchpad(under: markup.image) { png in attach(png, named: "shot") }
+            }
+        }
+        // What a screenshot that did not happen has to say, when it was not the reader cancelling it.
+        // A dialog rather than a line in the window: this is the answer to something the reader just
+        // asked for, and it carries the one action that can fix it (the privacy pane).
+        .alert(item: $actions.shotTrouble) { trouble in
+            switch trouble {
+            case .permission:
+                Alert(
+                    title: Text("wei needs permission to read the screen"),
+                    message: Text(
+                        "Turn on Screen Recording for wei in Privacy & Security, then quit and reopen "
+                            + "the app."
+                    ),
+                    primaryButton: .default(Text("Open Settings")) {
+                        if let url = URL(
+                            string: "x-apple.systempreferences:com.apple.preference.security"
+                                + "?Privacy_ScreenCapture"
+                        ) {
+                            NSWorkspace.shared.open(url)
+                        }
+                    },
+                    secondaryButton: .cancel(Text("Not Now"))
+                )
+            case let .other(said):
+                Alert(
+                    title: Text("The screenshot could not be taken"),
+                    message: Text(
+                        said.isEmpty
+                            ? "Try again."
+                            : said
+                    ),
+                    dismissButton: .default(Text("OK"))
+                )
             }
         }
         .fileImporter(
@@ -230,6 +272,69 @@ struct Composer: View {
             guard case let .success(urls) = result else { return }
             for url in urls { client.attach(url.path) }
         }
+    }
+
+    /// Put a picture this side made on the next prompt.
+    ///
+    /// The same path the clipboard takes — a file this side wrote, which the shell reads, sniffs and
+    /// deletes. Nothing about a sketch or a screenshot travels except PNG bytes, so neither can come to
+    /// a different conclusion about what an attachment is.
+    private func attach(_ png: Data, named name: String) {
+        guard let path = TemporaryImage.write(png, named: name) else { return }
+        client.attachTemporary(path)
+    }
+
+    /// The pictures the `+` button offers: a file, or the screen — twice.
+    ///
+    /// A file that already exists, and the screen, because "is this window in the picture" is a decision
+    /// the reader has *before* the gesture and not something to discover afterwards. A modifier on one
+    /// item was the alternative and it is worse: a modifier is a thing to remember, and the answer to the
+    /// question the wrong way round is a screenshot with the app in it that has to be taken again. Two
+    /// items that say what they do cost one row each.
+    ///
+    /// It is a menu rather than three buttons beside the field because what the three share is *that
+    /// there will be a picture that already exists somewhere* — one on disk, two on the screen — and the
+    /// names are what tell them apart. A row of glyphs each needing its own explanation is how a toolbar
+    /// becomes a memory test; one `+` that lists what it can add is what this platform does.
+    ///
+    /// **Sketch is deliberately not one of them.** It is the one entry in this row that *makes* a
+    /// picture rather than finding one, so it is not a fourth line of a list about where pictures come
+    /// from — it is the button beside this one, at the same weight. Folding it in would also have cost
+    /// it its second reason for being a button: a reader who wants to draw something can see that they
+    /// can.
+    private var attachMenu: some View {
+        Menu {
+            Button("Choose File…") { pickingFiles = true }
+            Divider()
+            // **The keystroke comes from the binding, so the platform draws it.** These two items carry
+            // the same shortcuts the Edit menu does, which is what puts them in AppKit's own
+            // key-equivalent column — the grey, right-aligned glyphs every other menu in this app has.
+            // Spelling them into the title was tried first and does not work: a custom label view is
+            // dropped by the menu, so the item came out as plain "Take Screenshot" with nothing to
+            // tell it from the other one.
+            //
+            // Two items on one binding is safe here, and the reason is worth writing down: this menu
+            // exists only while it is open, and a menu bar is searched before the key window — so ⌘⇧S
+            // always runs the *Edit* menu's item, and a reader who presses it with this menu open gets
+            // the same action from the row in front of them. One command, two places it is written.
+            Button("Take Screenshot") { actions.screenshot(hiding: false) }
+                .keyboardShortcut(Screenshot.onScreen)
+            Button("Take Screenshot Without This Window") { actions.screenshot(hiding: true) }
+                .keyboardShortcut(Screenshot.withoutWindow)
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 24, height: 24)
+                .background(.quaternary, in: Circle())
+        }
+        // Borderless, the same style the model picker next to it uses: a menu inside this card is a
+        // control on this surface, not a button the platform draws a bezel around.
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(!enabled)
+        .help("Add an image")
+        .accessibilityLabel("Add an image")
     }
 
     private var editor: some View {
@@ -383,22 +488,12 @@ struct Composer: View {
 
     private var toolbar: some View {
         HStack(spacing: 8) {
-            Button {
-                pickingFiles = true
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 24, height: 24)
-                    .background(.quaternary, in: Circle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!enabled)
-            .help("Attach an image")
+            attachMenu
 
-            // Beside the attach button, because it is the same decision — a picture for this message —
+            // Beside the attach menu, because it is the same decision — a picture for this message —
             // taken the other way round: the reader has no file, so this is where one can be made.
             Button {
-                sketching = true
+                actions.picture = .blank
             } label: {
                 Image(systemName: "pencil.tip")
                     .font(.system(size: 11, weight: .semibold))
@@ -408,6 +503,9 @@ struct Composer: View {
             .buttonStyle(.plain)
             .disabled(!enabled)
             .help("Sketch an idea")
+            // The glyph is the whole label, so the words are what VoiceOver has to go on — the same
+            // reason the menu beside it carries one, and the reason the dictate button does.
+            .accessibilityLabel("Sketch an idea")
 
             dictate
 
@@ -730,16 +828,26 @@ enum PastedImage {
 
 /// A picture this side made, left somewhere the shell can read it.
 ///
-/// The one place the convention lives, because there are now two producers: the clipboard, and the
-/// sketch sheet. A second copy of "write PNG bytes into a UUID-named file under the temporary
-/// directory" is how the two would come to disagree about which directory gets cleaned up — and the
-/// shell deletes exactly the file it was handed, so a file in the wrong place is a file that stays.
+/// The one place the convention lives, because there are now three producers: the clipboard, the
+/// sketch pad, and a screenshot the app is about to mark up. A second copy of "write PNG bytes into a
+/// UUID-named file under the temporary directory" is how two of them would come to disagree about
+/// which directory gets cleaned up — and the shell deletes exactly the file it was handed, so a file
+/// in the wrong place is a file that stays.
 enum TemporaryImage {
-    static func write(_ png: Data, named name: String) -> String? {
+    /// A place to put one, before there are any bytes to put in it.
+    ///
+    /// For the one producer that does not have the picture yet: `screencapture` is handed a path and
+    /// writes it itself, so the name has to exist first. Everything else about the file is the same,
+    /// which is why this is not a second convention.
+    static func path(named name: String) -> URL? {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("wei-images", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = directory.appendingPathComponent("\(name)-\(UUID().uuidString).png")
+        return directory.appendingPathComponent("\(name)-\(UUID().uuidString).png")
+    }
+
+    static func write(_ png: Data, named name: String) -> String? {
+        guard let file = path(named: name) else { return nil }
         do {
             try png.write(to: file)
         } catch {
@@ -977,7 +1085,7 @@ private struct StatusLine: View {
         .animation(.default, value: client.conversation.usage)
     }
 
-    /// The left half: what is happening, or what just happened.
+    /// The left half: what is happening, or what the whole conversation has cost.
     ///
     /// The status first, because while a turn runs it is the only thing that changes and a reader
     /// watching a long turn is watching it — and because every other thing the status carries (which
@@ -985,31 +1093,21 @@ private struct StatusLine: View {
     /// fact there is. The shell clears it when a turn ends, and that is what makes room for the
     /// figures underneath.
     ///
-    /// The last turn's own numbers rather than the session totals: the line under a composer is read
-    /// by someone deciding whether to ask another question, and what the last one cost is the number
-    /// that answers that.
+    /// Then the **session's** cumulative figures, not the last turn's. The turn's own are already at the
+    /// end of that turn in the transcript (the shell ends every turn with a note row: "3 model calls ·
+    /// 2 tool calls · $0.01"), so repeating them here put the same numbers on screen twice — and the
+    /// figures that were nowhere else were these. The line sits under the composer, where the question
+    /// being asked is "where does this conversation stand", and the turn's bill is answerable by
+    /// scrolling to the end of it. See `Usage::sessionSummary`.
     private var summary: String {
         let status = client.conversation.status
         if !status.isEmpty { return status }
-        // Why nothing can be sent, if that is the case, and before the figures: a turn's cost is
+        // Why nothing can be sent, if that is the case, and before the figures: a session's spend is
         // interesting and a missing key is a wall, and this is where a reader looks on their way to
         // typing. It used to live in the window's subtitle, which is now the project and its count —
         // and a machine with no key must not be a machine that says nothing about it.
         if let blocked = client.blocked { return blocked }
-        guard let last = client.conversation.usage?.last else { return "" }
-        var parts: [String] = []
-        parts.append("\(last.modelCalls) model call\(last.modelCalls == 1 ? "" : "s")")
-        if last.toolCalls > 0 {
-            parts.append("\(last.toolCalls) tool call\(last.toolCalls == 1 ? "" : "s")")
-        }
-        parts.append("\(TokenText.compact(last.input)) in / \(TokenText.compact(last.output)) out")
-        // Thinking tokens, when the provider reports them. They are part of what the turn cost and
-        // invisible in the answer, which is exactly the case where a reader wonders why a one-line
-        // reply was expensive.
-        if let thinking = last.reasoning, thinking > 0 {
-            parts.append("\(TokenText.compact(thinking)) thinking")
-        }
-        return parts.joined(separator: " · ")
+        return client.conversation.usage?.sessionSummary ?? ""
     }
 }
 
@@ -1127,12 +1225,21 @@ private struct UsagePanel: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("This session")
                 .font(.system(size: 11, weight: .semibold))
-            rows
-            Divider()
-            HStack {
-                Text("Total").fontWeight(.semibold)
-                Spacer()
-                Text(usage.cost).fontWeight(.semibold).monospacedDigit()
+            // A session that has asked nothing gets a sentence rather than a column of zeroes. It is
+            // the one panel in the app that can be opened on nothing at all, and eight rows reading
+            // `0` answer "why is this empty" worse than one line does — the same rule the ring follows
+            // by drawing itself only once there is something to measure.
+            if usage.turns == 0 && usage.contextFigure == 0 {
+                Text("Nothing sent yet")
+                    .foregroundStyle(.secondary)
+            } else {
+                rows
+                Divider()
+                HStack {
+                    Text("Total").fontWeight(.semibold)
+                    Spacer()
+                    Text(usage.cost).fontWeight(.semibold).monospacedDigit()
+                }
             }
         }
         .font(.system(size: 11))
@@ -1155,7 +1262,10 @@ private struct UsagePanel: View {
             row("cost", last.cost)
             section("Session")
         }
-        row("replies", "\(usage.turns)")
+        // "Model calls" rather than "replies": the number counts the priced calls the totals cover
+        // (assistant messages plus the summarization behind each compaction), and it is the same word
+        // the transcript ends every turn with — one term per concept, on both surfaces.
+        row("model calls", "\(usage.turns)")
         row("input", TokenText.exact(usage.input))
         if usage.cacheRead > 0 {
             let share = usage.cacheHit.map { " (\($0)% cached)" } ?? ""

@@ -116,6 +116,20 @@ fn Labels::forget(self : Labels, path : String) -> Unit {
 }
 
 ///|
+/// When the cache last saw this path, or 0 when it has not.
+///
+/// The modification time is otherwise only known to whoever listed the store — the sidebar's own
+/// listing, one refresh ago. The offer that says *which* conversation was deleted has a path and
+/// nothing else, and a row that is gone cannot be asked for its modification time; asking the cache
+/// is what keeps the notice naming the session the way the row that was clicked on did.
+fn Labels::modified_of(self : Labels, path : String) -> Int64 {
+  match self.entries.get(path) {
+    Some((modified, _, _)) => modified
+    None => 0L
+  }
+}
+
+///|
 fn prefix_of(text : String, limit : Int) -> String {
   if text.length() <= limit {
     text
@@ -554,11 +568,7 @@ pub fn page_of(
   for index in start..<end {
     page.push(rows[index])
   }
-  let oldest = if page.length() == 0 {
-    ""
-  } else {
-    page_row_id(page[0])
-  }
+  let oldest = if page.length() == 0 { "" } else { page_row_id(page[0]) }
   (page, oldest, start > 0)
 }
 
@@ -624,12 +634,13 @@ fn page_fields(page : (Array[Json], String, Bool)) -> Array[(String, Json)] {
 /// is looking at the wrong session, and a startup on a resumed session, where it is looking at none.
 fn say_history(path : String, session : @core.Session) -> Unit {
   emit(
-    session_event(path, "history", page_fields(page_of(
-      history_rows(session),
-      "",
-      page_max_turns(),
-      page_max_bytes(),
-    ))),
+    session_event(
+      path,
+      "history",
+      page_fields(
+        page_of(history_rows(session), "", page_max_turns(), page_max_bytes()),
+      ),
+    ),
   )
 }
 
@@ -641,12 +652,18 @@ fn say_history(path : String, session : @core.Session) -> Unit {
 /// rows the shell has not written down yet, which is the same reason a re-show sends no history at all.
 fn say_earlier(path : String, session : @core.Session, before : String) -> Unit {
   emit(
-    session_event(path, "earlier", page_fields(page_of(
-      history_rows(session),
-      before,
-      page_max_turns(),
-      page_max_bytes(),
-    ))),
+    session_event(
+      path,
+      "earlier",
+      page_fields(
+        page_of(
+          history_rows(session),
+          before,
+          page_max_turns(),
+          page_max_bytes(),
+        ),
+      ),
+    ),
   )
 }
 
@@ -664,13 +681,43 @@ fn session_model(session : @core.Session) -> String {
 }
 
 ///|
-/// Start a session in the same directory, and show it.
+/// Start a session in one project, and show it.
+///
+/// `dir` is the project the host asked for — the one the reader is looking at, named by the control
+/// they clicked. The web UI has always worked this way (its row carries `data-new="<cwd>"`); what
+/// this fixes is the macOS window, whose middle column lists *one* project while the shell only knew
+/// the project of the session on screen. "New Session" under project B therefore landed in project
+/// A, which is the mistake the row's own tooltip (`New session in this project`) was promising not
+/// to make.
+///
+/// Empty means "the same directory as the session on screen". That is the honest answer for a host
+/// with no project to name — an empty store, where nothing lists the open session yet, and a
+/// hand-typed `wei-cli` line — and it is the fallback rather than the rule.
+///
+/// **Deliberately not `new_in`.** That one means "add a workspace": it writes the marker file and
+/// says `workspace added: …` on the status line. This one only opens a session, which is what a
+/// reader clicking "New Session" under a project that is *already* in the sidebar asked for. Writing
+/// a marker here would be a second copy of a fact the store already holds, and a sentence about a
+/// workspace that did not change.
+///
+/// The path is canonicalised for the reason `new_in` does it: `/new` typed by hand is a path a
+/// reader thinks in, and the store has to see one spelling per directory.
 ///
 /// The file is not written here, and that is deliberate rather than lazy: a session with nothing in
 /// it is a header-only file nobody asked for, and the first prompt is what writes the first line. The
 /// store therefore does not list it yet — `say_sessions` carries it anyway.
-async fn Shell::create(self : Shell) -> Unit {
-  self.open_fresh(self.shown().cwd)
+async fn Shell::create_in(self : Shell, dir : String) -> Unit {
+  if dir == "" {
+    self.open_fresh(self.shown().cwd)
+    return
+  }
+  match @platform.canonical_dir(dir) {
+    Some(cwd) => self.open_fresh(cwd)
+    // Possible rather than theoretical: the directory can be gone between the list that named it and
+    // this line. Said rather than silently leaving the reader where they were, because a click on
+    // "New Session" that produced nothing is a click that did not work.
+    None => say_error("not a directory: \{dir}")
+  }
 }
 
 ///|
@@ -832,31 +879,391 @@ fn Shell::clear_attachments(self : Shell) -> Unit {
   say_images(open)
 }
 
+// ── deleting ───────────────────────────────────────────────────────────────
+
 ///|
-/// Take a session out of the store, by renaming it aside.
+/// The conversation that was just deleted, so the host can offer it back.
 ///
-/// Not the one that is open, which is a request that cannot be carried out and would leave the window
-/// showing a file that is no longer in the list. Refused rather than done quietly.
-async fn Shell::discard(self : Shell, path : String) -> Unit {
+/// Pure, so the shape can be pinned from the writing side without a store on disk — the same
+/// arrangement as `sessions_event` and `models_event`.
+///
+/// The path is the routing field *and* a payload field, and that is not redundant: the routing says
+/// which session this is about — and it is about one that is no longer in the list — while the payload
+/// is what `restore` takes. One is the wire's envelope, the other is the shell's own command line
+/// (`/restore <path>`), and they are the same string for the same reason: a session is its file.
+///
+/// `restorable` is what decides whether the host draws a way back at all, and the shell is the side
+/// that knows: a delete renames the file aside and a *purge* removes it, and no amount of looking at
+/// the click tells the two apart. An offer drawn from the click is an Undo button on a conversation
+/// that is gone — which is where this whole line of the wire began (see `macos/README.md`).
+fn deleted_event(path : String, label : String, restorable : Bool) -> Json {
+  session_event(path, "deleted", [
+    ("path", Json::string(path)),
+    ("label", Json::string(label)),
+    ("restorable", Json::boolean(restorable)),
+  ])
+}
+
+///|
+/// Say which conversation just went, and whether there is a way back.
+///
+/// The label is what the host draws its line with, read by the caller because the moment this is said
+/// is the last moment the file is there to be described.
+fn say_deleted(path : String, label : String, restorable : Bool) -> Unit {
+  emit(deleted_event(path, label, restorable))
+}
+
+///|
+/// Take a session out of the store: out of the list, and — when the reader asked for it — off the disk.
+///
+/// **The session on screen is replaced rather than refused.** It used to be refused — "cannot delete
+/// the session that is open" — and the cost of that was a rule the reader has to learn for no benefit:
+/// they clicked Delete on the row they were looking at, and the answer was that they should look
+/// somewhere else first. What the refusal was standing in for is real, though, and stays: the window
+/// cannot be left showing a file that is no longer in the list, and `Shell::shown` panics when nothing
+/// is. So the replacement is decided and **installed** before the file moves — between those two lines
+/// "there is always something on screen" is true at every point, which is the whole of what the order
+/// buys.
+///
+/// Three refusals stay, and none of them is about the file: a turn appending to it (that file is being
+/// written *now* — reachable since more than one conversation can run at once, so a reader can switch
+/// away from a long turn and then clear it out of the list), a background job it started, and nothing
+/// there to delete at all.
+///
+/// The order is the web UI's (`ui/requests.mbt`): the states, then the file. A turn is asked about
+/// before the file is, because the two can disagree for a moment — a turn that has *just* started is
+/// running already, and its session may not have written its first line yet — and it is the running turn
+/// that must not be deleted out from under, file or no file.
+///
+/// **`purge` is the one irreversible thing in this program.** It comes from a checkbox the reader has
+/// to tick (off by default), and it is the difference between renaming the file aside and removing it:
+/// what the host is told afterwards is the same event, because both are "that conversation is gone from
+/// the list" — the `restorable` field is the one part that differs, and it is what keeps an Undo button
+/// off a file that is not there to put back.
+async fn Shell::discard(self : Shell, path : String, purge~ : Bool) -> Unit {
   if path == "" {
     say_error("delete: no session path")
     self.say_sessions()
     return
   }
-  if path == self.current {
-    say_error("cannot delete the session that is open")
-  } else if !@platform.path_exists(path) {
-    say_error("that session is already gone")
-  } else if self.open_of(path) is Some(open) && open.busy {
-    // The one case where deleting would lose work rather than tidy up: a turn is appending to this file
-    // right now. Reachable since more than one conversation can run at once — the reader can switch away
-    // from a long turn and then clear it out of the sidebar while it is still writing.
+  if self.open_of(path) is Some(open) && open.busy {
     say_error("cannot delete a session with a turn running — stop it first")
+    self.say_sessions()
+    return
+  }
+  if self.jobs.live_count(path) > 0 {
+    // The other state that outlives the file: a job the conversation started would keep running with
+    // no row to find it on, and no way to stop it from the window.
+    say_error("cannot delete a session with a background job still running")
+    self.say_sessions()
+    return
+  }
+  if !@platform.path_exists(path) {
+    say_error("that session is already gone")
+    self.say_sessions()
+    return
+  }
+  // Read before the file moves, and while the cache still knows what it looked like: the offer the
+  // host draws says *which* conversation went, and a row that is gone cannot be asked.
+  let label = self.label_of(path, self.labels.modified_of(path))
+  // Decided before the file moves, and that is not tidiness: the successor is found by asking the store
+  // what is in this project, and the doomed session is still the newest file in it — nothing in a
+  // listing tells "the one being deleted" apart from "the one to show instead".
+  let successor = if path == self.current {
+    Some(self.successor_after(path))
+  } else {
+    None
+  }
+  if purge {
+    @platform.purge_session(path)
   } else {
     @platform.delete_session(path)
-    self.labels.forget(path)
+  }
+  self.labels.forget(path)
+  // The registry is "the sessions this process may have a turn running in", and one that has left the
+  // store is not: left there it would keep a file the reader can no longer see, and `say_sessions`
+  // would go on reading a `busy` flag off a conversation nothing lists. This is the only path on which
+  // the registry shrinks.
+  ignore(self.opens.extract_if(open => open.path == path))
+  // Said before the window moves: the offer names the conversation that went, and the host is about to
+  // be handed a different one. `restorable` is the checkbox: a purged file is not waiting to be put
+  // back, and the host is told which of the two happened rather than left to assume.
+  say_deleted(path, label, !purge)
+  match successor {
+    Some(open) => {
+      // Displayed by hand rather than through `show`, and the difference is the whole of a bug this
+      // would otherwise have: `show` refuses a path that is not on disk — which is the right answer for
+      // a reader asking for a file that is not there, and the wrong one here, where the successor can
+      // legitimately be a session nobody has written yet. Refusing it would leave `current` pointing at
+      // a session that has just left the registry, and `shown` panics on that.
+      //
+      // Whether the host has seen this one is what decides between the two halves of the pair, and the
+      // registry is the side that knows: a session this process holds has been shown, so the host has
+      // its rows and a replay would replace them with less. `display` before the question would answer
+      // it "yes" every time.
+      let held = self.open_of(open.path) is Some(_)
+      self.display(open)
+      if held {
+        self.say_show(open)
+      } else {
+        self.say_open(open)
+      }
+    }
+    None => ()
   }
   self.say_sessions()
+}
+
+///|
+/// Something to look at once the session on screen is gone.
+///
+/// Three answers in order of cost, and the same three the web UI gives (`ui/requests.mbt`'s
+/// `next_session_after`): another session this process already holds in that project, the newest one
+/// saved there, and finally a brand-new one. The last is not a fallback for a bug — a store with one
+/// session in it has one session, and the window still has to show something.
+///
+/// An `Open` rather than a path, because the caller has to be able to *install* it without asking the
+/// disk a second time: the newest session in a project is not on disk in the fresh case, and by the time
+/// the caller has moved the file, the listing that produced this answer is out of date.
+async fn Shell::successor_after(self : Shell, path : String) -> Open {
+  let shown = self.shown()
+  for open in self.opens {
+    if open.path != path && open.cwd == shown.cwd {
+      return open
+    }
+  }
+  for
+    stored in @platform.list_sessions(
+      @core.session_dir_for(self.root, shown.cwd),
+    ) {
+    if stored.path == path {
+      continue
+    }
+    match self.open_of(stored.path) {
+      Some(open) => return open
+      None =>
+        if @platform.path_exists(stored.path) {
+          // Read the way a switch reads one, repair included: a log written by a process that died holds
+          // a tool call with no answer, and a window opened on it that could not send would be a dead end
+          // the reader got to by deleting something else.
+          let loaded = @agent.repair_session(
+            @platform.load_session(stored.path),
+            stored.path,
+            @env.now().reinterpret_as_int64(),
+          )
+          return Open::new(
+            stored.path,
+            loaded.header.cwd,
+            session_model(loaded),
+            loaded,
+          )
+        }
+    }
+  }
+  // A session nobody has written yet: created here and shown, and the first prompt is what puts a line
+  // in the store. It is what "there is no other session" looks like as something to look at — and its
+  // model is the one in force, the same rule a new session follows everywhere else.
+  let (session, created) = fresh_session(self.root, shown.cwd)
+  Open::new(created, shown.cwd, shown.model_id, session)
+}
+
+// ── the projects ───────────────────────────────────────────────────────────
+
+///|
+/// Whether this project may leave the list yet.
+///
+/// The same two states that keep a session from being deleted, asked of the whole project: a turn
+/// running in any of its sessions is appending to a log this is about to move out from under the
+/// sidebar, and a job it started is a process whose output nobody can reach any more.
+fn Shell::project_idle(self : Shell, cwd : String) -> Bool {
+  for open in self.opens {
+    if open.cwd != cwd {
+      continue
+    }
+    if open.busy {
+      say_error("a turn is running in this project — stop it first")
+      return false
+    }
+    if self.jobs.live_count(open.path) > 0 {
+      say_error("a background job is still running in this project")
+      return false
+    }
+  }
+  true
+}
+
+///|
+/// Take a project out of the sidebar: the row, the sessions under it, and — with the checkbox — the
+/// conversations themselves.
+///
+/// **Not the folder.** The working directory is the reader's; what moves is the store's own slice of
+/// it, `~/.wei/sessions/--Users-me-src--`, which is why the dialog can say the project is untouched
+/// and mean it. Without the checkbox that is a rename, and every session is still on disk under a
+/// `.removed` name; with it the directory is emptied. Both halves live in `platform/session.mbt`.
+///
+/// The window cannot go on showing a session whose project has left, so the session on screen is
+/// re-homed first — before the directory moves, while the candidate is still a session the registry
+/// can be asked about (`rehome_after`).
+///
+/// Addressed by working directory rather than by store directory, like every other project command:
+/// the path is what the host has, and the store's name for it cannot be decoded back into a path.
+async fn Shell::remove_project(
+  self : Shell,
+  cwd : String,
+  delete~ : Bool,
+) -> Unit {
+  if cwd == "" {
+    say_error("remove: no project path")
+    self.say_sessions()
+    return
+  }
+  if !self.project_idle(cwd) {
+    self.say_sessions()
+    return
+  }
+  // The listing has the last word: it is what the reader is looking at, and it is where the label and
+  // the session count come from. A project it does not list is a project already gone — refused rather
+  // than removed again, because "there is nothing there" and "that is not this project" are the same
+  // answer to the store.
+  let mut found : @platform.StoredWorkspace? = None
+  for stored in @platform.list_workspaces(self.root) {
+    if stored.cwd == cwd {
+      found = Some(stored)
+      break
+    }
+  }
+  let stored = match found {
+    Some(stored) => stored
+    None => {
+      say_error("that project is not in the list")
+      self.say_sessions()
+      return
+    }
+  }
+  let label = workspace_label(stored)
+  let sessions = stored.sessions.length()
+  let leaving = self.shown().cwd == cwd
+  let successor = if leaving { Some(self.rehome_after(cwd)) } else { None }
+  // The rename is the removal: everything after this is about a project that is already out of the
+  // list, which is why the failure branch below returns before touching anything else.
+  let aside = match @platform.remove_workspace(self.root, cwd) {
+    Some(aside) => aside
+    None => {
+      // Nothing moved — the store does not list this project, or the rename failed. Said plainly: a
+      // click that appears to do nothing is the one outcome the reader cannot act on.
+      say_error("could not remove \{label}")
+      self.say_sessions()
+      return
+    }
+  }
+  // And the emptying is of the aside-copy, after the rename. A failure here is reported with the path,
+  // because that is where the conversations are: the reader asked for them gone and has to be able to
+  // go and finish the job. This is the only irreversible act in the program.
+  if delete && !@platform.purge_workspace(aside) {
+    say_error(
+      "\{label} removed, but its \{sessions} sessions could not be deleted — they are at \{aside}",
+    )
+    self.say_sessions()
+    return
+  }
+  // The registry is "the sessions this process may have a turn running in", and a session whose
+  // project has left the list is not one the reader can reach — left there it would keep a file
+  // nothing lists, and `say_sessions` would go on reading a `busy` flag off it. Labels go with them:
+  // the cache is keyed by path, and a path under the name the directory had is a path that is gone.
+  for open in self.opens {
+    if open.cwd == cwd {
+      self.labels.forget(open.path)
+    }
+  }
+  ignore(self.opens.extract_if(open => open.cwd == cwd))
+  match successor {
+    Some(open) => {
+      // The same pair the two session paths send, and the same reason for choosing between them: a
+      // session this process already holds has been shown, so the host has its rows and a replay would
+      // replace them with less.
+      let held = self.open_of(open.path) is Some(_)
+      self.display(open)
+      if held {
+        self.say_show(open)
+      } else {
+        self.say_open(open)
+      }
+    }
+    None => ()
+  }
+  let what = if delete {
+    // The `sessions == 0` case is a project with nothing in it: there was no checkbox, and there was
+    // nothing for one to have deleted.
+    if sessions == 0 {
+      "project removed: \{label}"
+    } else {
+      "project and \{sessions} sessions removed: \{label}"
+    }
+  } else if sessions == 0 {
+    "project removed: \{label}"
+  } else {
+    "project removed: \{label} · \{sessions} sessions kept"
+  }
+  // Said on the session now on screen, which is why the re-homing above comes first: the status line is
+  // the only thing that reports a project whose row is no longer there to look at.
+  say_status(self.current, what)
+  self.say_sessions()
+}
+
+///|
+/// Where the window goes when the project it was in leaves the list.
+///
+/// **Another project's session, in the order the sidebar would put them**, because that is the one thing
+/// the reader can predict: the window goes where they would have clicked. Three answers, the same three
+/// `successor_after` gives and for the same reason — the cheapest first:
+///
+/// 1. a session this process already holds, and it must be in a *different* project: everything the
+///    registry has in the one being removed is about to be dropped from it, and a window left on a session
+///    the store no longer lists would put the removed project straight back on the sidebar (`say_sessions`
+///    always lists the session on screen, under the project it belongs to);
+/// 2. failing that (every session open is in this project) the *top* of the store — the newest session of
+///    the most recently used other project, which is the first row the sidebar will draw. Costing one file
+///    read, on the one path where the alternative is an empty window;
+/// 3. and failing that a brand-new session in the home directory, which is the place `working_dir` already
+///    names for "the process has nowhere in particular to work". A fresh session in the doomed project
+///    would make an empty row that persists for exactly as long as the reader leaves it unused, and one of
+///    the project's own *saved* sessions would have the same problem as an open one.
+///
+/// The model is the one in force, the same rule a new session follows everywhere else.
+async fn Shell::rehome_after(self : Shell, cwd : String) -> Open {
+  for open in self.opens {
+    if open.cwd != cwd {
+      return open
+    }
+  }
+  // Read before the directory moves, which is why this is here rather than after the removal: once the
+  // store directory is renamed aside the listing no longer holds this project, and the rule below — "the
+  // topmost project that is not this one" — would then be free to pick the very sessions being removed.
+  for stored in @platform.list_workspaces(self.root) {
+    if stored.cwd == cwd || stored.sessions.is_empty() {
+      continue
+    }
+    let newest = stored.sessions[0]
+    if self.open_of(newest.path) is Some(open) {
+      return open
+    }
+    // Read the way a switch reads one, repair included: a log written by a process that died holds a
+    // tool call with no answer, and a window opened on one that could not send would be a dead end the
+    // reader got to by removing something else.
+    let loaded = @agent.repair_session(
+      @platform.load_session(newest.path),
+      newest.path,
+      @env.now().reinterpret_as_int64(),
+    )
+    return Open::new(
+      newest.path,
+      loaded.header.cwd,
+      session_model(loaded),
+      loaded,
+    )
+  }
+  let (session, path) = fresh_session(self.root, self.home)
+  Open::new(path, self.home, self.shown().model_id, session)
 }
 
 // ── history ────────────────────────────────────────────────────────────────
@@ -875,6 +1282,12 @@ priv struct Draft {
   detail : String
   /// Tools only: the call this row answers.
   call_id : String
+  /// A **question's** pictures, already as wire pairs. Empty for every other kind of row.
+  ///
+  /// On the draft rather than looked up at the end, which is how a tool's output has to be done: a
+  /// result arrives in a later message than the call it answers, while these are in the very message
+  /// the words are in.
+  images : Array[(String, String)]
 }
 
 ///|
@@ -918,12 +1331,17 @@ fn blocks_of(kind : String, text : String) -> Json {
 /// labelled is a paragraph the reader will read as an answer — the label is not decoration, it is
 /// what makes the row say what it is.
 fn note_draft(id : String, text : String, label : String) -> Draft {
-  { kind: "note", id, text, name: label, detail: "", call_id: "", }
+  { kind: "note", id, text, name: label, detail: "", call_id: "", images: [], }
 }
 
 ///|
-fn text_draft(kind : String, id : String, text : String) -> Draft {
-  { kind, id, text, name: "", detail: "", call_id: "", }
+fn text_draft(
+  kind : String,
+  id : String,
+  text : String,
+  images? : Array[(String, String)] = [],
+) -> Draft {
+  { kind, id, text, name: "", detail: "", call_id: "", images, }
 }
 
 ///|
@@ -975,8 +1393,78 @@ fn content_text(content : Array[@core.Content]) -> String {
 }
 
 ///|
-/// The conversation so far, as the rows the host would have built from the events.
+/// The text of a **question**, with its pictures left out.
 ///
+/// `content_text` beside it keeps the `(image attachment)` line for every other reader of the same
+/// text: a tool result for a model that read a file, and the answer text a text-only model is shown.
+/// What differs is who draws it. The host draws a question's pictures as pictures now, so a bubble
+/// underneath saying a picture is there describes one thing twice.
+///
+/// A question that is **only** a picture therefore comes out as an empty string, which is the point:
+/// that is what makes it draw as a picture with no caption rather than as a caption with no picture.
+fn user_text(content : Array[@core.Content]) -> String {
+  let out = StringBuilder()
+  for block in content {
+    match block {
+      @core.Text(text) => {
+        if out.to_string() != "" {
+          out.write_string("\n")
+        }
+        out.write_string(text)
+      }
+      // The one difference from `content_text`: a picture contributes no words here.
+      _ => ()
+    }
+  }
+  out.to_string()
+}
+
+///|
+/// One picture as the host decodes it — `RowImage`'s two fields, and nothing else.
+///
+/// **Deliberately not the shape `images_event` builds** for the composer's attach list. That one is
+/// about a *file* the reader picked, so it carries a `path`: the path is the row's identity and what a
+/// remove names. This is about a picture inside a message, where the identity is the message it is in
+/// and a path would be a fact about the sender's disk that the reader of the transcript cannot use.
+/// Two questions, two shapes.
+fn image_row(mime_type : String, data : String) -> Json {
+  Json::object(
+    Map([("mime", Json::string(mime_type)), ("data", Json::string(data))]),
+  )
+}
+
+///|
+/// The pictures in a message, in the order they were sent.
+///
+/// Paired rather than turned into `Json` here, so that this is useful to both spellings the wire has:
+/// `say_user` takes the pairs and `history_rows` turns them into rows with `image_row`.
+fn content_images(content : Array[@core.Content]) -> Array[(String, String)] {
+  let out : Array[(String, String)] = []
+  for block in content {
+    match block {
+      @core.Image(data~, mime_type~) => out.push((mime_type, data))
+      _ => ()
+    }
+  }
+  out
+}
+
+///|
+/// The same, from the composer's attachments.
+///
+/// Two functions rather than one because the two lists are two different things: `Attachment` is a
+/// file the reader attached (it has a path, and lives on `Open` until the turn sends it), while
+/// `@core.Content` is a block of a message that has already gone. `say_user` is handed the first and
+/// the history is read for the second.
+fn attached_images(items : Array[Attachment]) -> Array[(String, String)] {
+  let out : Array[(String, String)] = []
+  for attachment in items {
+    out.push((attachment.mime_type, attachment.data))
+  }
+  out
+}
+
+///|
 /// Rows rather than events, because a history has no timing to it: every block in it is finished,
 /// every tool has its output, and replaying it as a stream of deltas would be inventing an afternoon
 /// of arrivals that all happened at once.
@@ -998,9 +1486,13 @@ fn history_rows(session : @core.Session) -> Array[Json] {
   for message in session.context().messages {
     match message {
       @core.User(user) => {
-        let text = content_text(user.content)
-        if text != "" {
-          drafts.push(text_draft("user", next_id(), text))
+        let text = user_text(user.content)
+        let images = content_images(user.content)
+        // A question with no words is still a question, which is the sharper half of this: an
+        // image-only prompt has no text at all, and a row skipped for having none would drop the
+        // message — and the turn that answered it — from the transcript entirely.
+        if text != "" || images.length() > 0 {
+          drafts.push(text_draft("user", next_id(), text, images~))
         }
       }
       @core.Assistant(assistant) =>
@@ -1023,6 +1515,7 @@ fn history_rows(session : @core.Session) -> Array[Json] {
                 name,
                 detail: @core.tool_summary(arguments),
                 call_id: id,
+                images: [],
               })
             }
             _ => ()
@@ -1041,6 +1534,7 @@ fn history_rows(session : @core.Session) -> Array[Json] {
             name: result.tool_name,
             detail: "",
             call_id: result.tool_call_id,
+            images: [],
           })
         }
         results.set(
@@ -1070,6 +1564,10 @@ fn history_rows(session : @core.Session) -> Array[Json] {
         // between the call and its result. The row is left without one rather than given an excuse.
         ("", false)
     }
+    let pictures : Array[Json] = []
+    for (mime_type, data) in draft.images {
+      pictures.push(image_row(mime_type, data))
+    }
     rows.push(
       Json::object(
         Map([
@@ -1089,6 +1587,10 @@ fn history_rows(session : @core.Session) -> Array[Json] {
           ("detail", Json::string(draft.detail)),
           ("output", Json::string(output)),
           ("error", Json::boolean(is_error)),
+          // Last, and on **every** row, empty for most of them: a field that appeared and disappeared
+          // would be one more shape for the host to decode, and its default is the empty list either
+          // way. The same reasoning the live stream follows in `say_user`.
+          ("images", Json::array(pictures)),
         ]),
       ),
     )

@@ -56,3 +56,17 @@ AppKit 出现的地方都是**平台 API 是 AppKit 的**，不是视图：
 写下来，免得它变成教条：**当某件必须做的事在 SwiftUI 里做不到或慢到不能用**，而且
 （a）`swiftinterface` 里没有等价物，（b）不是配置问题。那时的做法是**局部**用 `NSViewRepresentable`
 包一个 AppKit 视图，并在这个 ADR 里追加一条 —— 不是整体转向。
+
+## 追加一：删除确认用了 `NSAlert`（2026-09-19）
+
+**事由**：确认对话框里需要多一个「顺便把磁盘上的文件也删掉」的勾选框。`confirmationDialog` 的
+actions/message 虽然收 `ViewBuilder`，但对话框最终是一组按钮，别的视图不会到；`swiftinterface` 里也
+没有等价物（`dialogSuppressionToggle` 是「别再问我」——不是同一个问题）。没有勾选框就只能用第二种
+按钮（「Delete and Remove」），让读者对比两个标签找差别 —— 那比对话框多一个控件更差。
+
+**做法**：`RootView.swift` 的 `DeleteConfirmation` 用 `NSAlert` + `accessoryView` 放一个
+`NSButton(checkboxWithTitle:)`。它**不是** ADR 里说的那种情况（没有包 AppKit 视图，不是
+`NSViewRepresentable`）—— 它是**平台的对话框**，和菜单栏、剪贴板同一类：SwiftUI 的 alert 底下本来就是
+它，而且整个对话框（标题、按钮、勾选框）都是平台画的，`Wei` 的设计 token 不参与，所以「两套 token 会漂」
+这个理由在这里不成立。反过来说，**这里不该做的事是把 NSAlert 当成「以后用 AppKit 画界面也行」的先例**：
+它成立的根据是「系统里只有这一个对话框带 accessoryView」，而不是「AppKit 更好用」。

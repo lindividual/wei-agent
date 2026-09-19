@@ -74,6 +74,60 @@ final class EventTests: XCTestCase {
         XCTAssertEqual(text, "no session at /nope.jsonl")
     }
 
+    /// The conversation that was deleted: the path that puts it back, and whether there is one.
+    ///
+    /// This event is the one place a *click's outcome* travels: the shell refuses a delete with work
+    /// going on in the session, and it replaces the session on screen rather than refusing that — so the
+    /// host cannot know from the click alone whether a file moved, or which one. The offer to undo is
+    /// drawn from here, and its Undo button sends this path back.
+    ///
+    /// `restorable` is the checkbox: the same event carries a delete that renamed the file aside and one
+    /// that removed it, and only this field tells them apart. The literals are the ones
+    /// `macos/appffi/app_wbtest.mbt` asserts from the writing side.
+    func testADeletedSessionCarriesThePathToRestoreIt() throws {
+        let kept = try XCTUnwrap(
+            Envelope.decode(
+                line: #"{"kind":"deleted","session":"/store/a.jsonl","path":"/store/a.jsonl","label":"set up the project","restorable":true}"#
+            )
+        )
+        // Routed by the session that went, which is no longer in the list — the offer has to be told
+        // apart from an event about the conversation the window has already moved to.
+        XCTAssertEqual(kept.session, "/store/a.jsonl")
+        guard case let .deleted(path, label, restorable) = kept.event else {
+            return XCTFail("expected deleted, got \(kept.event)")
+        }
+        XCTAssertEqual(path, "/store/a.jsonl")
+        XCTAssertEqual(label, "set up the project")
+        XCTAssertTrue(restorable)
+
+        // The purge: the same event with the one field that says there is nothing to put back.
+        let gone = try XCTUnwrap(
+            Envelope.decode(
+                line: #"{"kind":"deleted","session":"/store/a.jsonl","path":"/store/a.jsonl","label":"set up the project","restorable":false}"#
+            )
+        )
+        guard case let .deleted(_, _, goneRestorable) = gone.event else {
+            return XCTFail("expected deleted, got \(gone.event)")
+        }
+        XCTAssertFalse(goneRestorable)
+    }
+
+    /// A shell that predates the checkbox only ever renamed the file aside, so an event without the
+    /// field still means "there is a way back". A missing field that decoded as `false` would silently
+    /// remove the Undo button against an older shell, which is the kind of disagreement this whole
+    /// read-the-names-by-hand arrangement exists to catch.
+    func testADeletedSessionFromAnOlderShellIsStillRestorable() throws {
+        let envelope = try XCTUnwrap(
+            Envelope.decode(
+                line: #"{"kind":"deleted","session":"/store/a.jsonl","path":"/store/a.jsonl","label":"set up the project"}"#
+            )
+        )
+        guard case let .deleted(_, _, restorable) = envelope.event else {
+            return XCTFail("expected deleted, got \(envelope.event)")
+        }
+        XCTAssertTrue(restorable)
+    }
+
     func testAPieceNamesItsBlock() throws {
         let event = try XCTUnwrap(decode(#"{"kind":"reply","id":"reply-1","delta":"hi"}"#))
         guard case let .reply(id, delta) = event else {

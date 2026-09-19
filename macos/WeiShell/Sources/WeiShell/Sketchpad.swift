@@ -3,16 +3,22 @@ import SwiftUI
 
 import WeiModel
 
-/// The sheet a sketch is drawn in: paper, five tools, and one button that puts it on the composer.
+/// The sheet a picture is drawn in: paper, five tools, and one button that puts it on the composer.
 ///
-/// It exists because some things are shorter to say as a picture — a box, an arrow, three circles and
-/// a label — and the alternative was leaving the app for it (draw somewhere else, screenshot, drag the
-/// screenshot back) to make a picture the reader could have drawn in three seconds.
+/// **Two ways in, one sheet.** It is the blank paper the pencil opens, and it is the screenshot the
+/// `+` menu's two screen items hand over to be marked up — the same tools over a picture that is already
+/// there, because a reader who has just drawn a region around a bug wants to point at the line inside
+/// it, and that is one gesture rather than two features. The whole of the difference is `under`.
+///
+/// The blank sheet exists because some things are shorter to say as a picture — a box, an arrow, three
+/// circles and a label — and the alternative was leaving the app for it (draw somewhere else,
+/// screenshot, drag the screenshot back) to make a picture the reader could have drawn in three
+/// seconds.
 ///
 /// Where it stops is the point of it: **this is a way to make a picture, not a drawing app.** No
 /// layers, no colours, no selection, no fill, no text tool. Each of those would be a feature nobody
-/// asked for on the way to "draw a box and send it", and every one of them is a thing to learn before
-/// the first box. Five tools, undo, clear, done.
+/// asked for on the way to "point at this and send it", and every one of them is a thing to learn
+/// before the first mark. Five tools, undo, clear, insert.
 ///
 /// What it produces is an image on the next prompt, through the same path the clipboard uses: a
 /// temporary file the shell reads, sniffs and deletes (`attachTemporary`). So nothing here has to know
@@ -20,6 +26,17 @@ import WeiModel
 struct Sketchpad: View {
     /// The picture, once the reader has decided it says what they meant.
     let insert: (Data) -> Void
+    /// The picture this sheet was opened *on*, if it was opened on one.
+    ///
+    /// `nil` is the blank sheet the pencil opens. A picture means this is a screenshot being marked up:
+    /// the same paper, the same five tools, and the capture underneath them — which is the whole of the
+    /// difference, and the reason this is one sheet rather than two features.
+    let under: NSImage?
+
+    init(under: NSImage? = nil, insert: @escaping (Data) -> Void) {
+        self.under = under
+        self.insert = insert
+    }
 
     @Environment(\.dismiss) private var dismiss
 
@@ -39,35 +56,73 @@ struct Sketchpad: View {
     /// is history rather than a mistake still waiting to be fixed.
     @State private var cleared: [Sketch.Stroke] = []
 
-    /// The paper, in points. Fixed, and that is the decision: the strokes are in this coordinate space
-    /// and the PNG is this rectangle, so a sketch drawn in a small window and one drawn in a large
-    /// window are the same picture, and nothing has to be re-laid-out on the way out.
+    /// The paper, in points and in pixels: the shape the marks are made in, and the resolution the
+    /// picture goes out at.
     ///
-    /// 640 × 420 is the shape of a window and a little narrower than the composer: room for two boxes
-    /// and an arrow between them, which is what the first sketch anybody draws is.
-    private static let paper = CGSize(width: 640, height: 420)
+    /// The blank sheet is the fixed one it has always been — 640×420 points at 2×, which is the
+    /// 1280×840 pixels the model is shown. **A screenshot brings its own both**, and that is why this
+    /// is not two constants any more: the tool writes the display's dpi into the file, so the image's
+    /// `size` is the capture's own points and its representation's pixels are its own pixels, and
+    /// `Sketch.Paper.fitting` is the rule that puts the two on one sheet. Which corner a drag started
+    /// from is arithmetic on numbers and is tested; this is the same kind of arithmetic.
+    ///
+    /// The two are kept apart because of what the export is: **the capture's own pixels.** A
+    /// 1470×956-point screenshot of a 2× display goes out as 2940×1912 rather than as the 1360×880
+    /// that a 680-point sheet at the screen's own 2× would hold. The model is being shown a picture of
+    /// a screen, and it should get the screenshot rather than a copy of it that has been through this
+    /// window.
+    private var paper: Sketch.Paper {
+        guard let under, under.size.width > 0, under.size.height > 0 else {
+            return Sketch.Paper(size: Self.blank, scale: Self.exportScale)
+        }
+        return Sketch.Paper.fitting(
+            pixels: under.pixelSize,
+            points: under.size,
+            into: Self.envelope
+        )
+    }
 
-    /// Twice the points, because the reader of this picture has no screen. At 1× the ink is two and a
-    /// half pixels and every diagonal is a staircase, which is the difference between a diagram and a
-    /// smudge — the model is being asked to read shapes, and it should not have to squint.
+    /// The blank sheet, in points: the shape of a window and a little narrower than the composer — room
+    /// for two boxes and an arrow between them, which is what the first sketch anybody draws is.
+    private static let blank = CGSize(width: 640, height: 420)
+
+    /// The blank sheet's resolution. Twice its points, because the reader of this picture has no screen:
+    /// at 1× the ink is two and a half pixels and every diagonal is a staircase.
     private static let exportScale: CGFloat = 2
+
+    /// How big any sheet may be, either way.
+    ///
+    /// Room for a window's worth of screenshot and still a sheet rather than the window: a picture the
+    /// reader had to pan would be a picture they cannot mark up in one gesture.
+    private static let envelope = CGSize(width: 680, height: 440)
 
     var body: some View {
         VStack(spacing: Wei.Space.regular) {
-            paper
+            paperView
             controls
         }
         .padding(Wei.Space.regular)
-        // One column, the paper's width: a sheet that resized would give the reader a second question
-        // ("how big is this picture?") with no useful answer, since the answer is decided on the way out.
-        .frame(width: Self.paper.width + Wei.Space.regular * 2)
+        // One column, the paper's width — **or as wide as the control row needs, whichever is wider.**
+        // A sheet that resized would give the reader a second question ("how big is this picture?") with
+        // no useful answer, since the answer is decided on the way out. The floor is the ceiling on how
+        // small a *picture* can make the sheet: a drag around a single word is 90 points of paper, and a
+        // sheet as narrow as that squeezed the row's five words down to a few points each.
+        .frame(width: max(paper.size.width, Self.controlsFloor) + Wei.Space.regular * 2)
     }
+
+    /// How narrow the sheet is allowed to get, whatever the picture is.
+    ///
+    /// Measured from the blank sheet's own row, which is where these five buttons fit at their natural
+    /// sizes: its content runs 415…1055 of a 640-point paper, of which 16 is the spacer's floor and the
+    /// rest is the tools, Undo, Clear, Cancel and Insert. The row is left alone below this and the paper
+    /// is centred in whatever room is left over.
+    private static let controlsFloor: CGFloat = 420
 
     // ── the paper ─────────────────────────────────────────────────────────
 
-    private var paper: some View {
-        SketchCanvas(strokes: strokes, draft: draft)
-            .frame(width: Self.paper.width, height: Self.paper.height)
+    private var paperView: some View {
+        SketchCanvas(strokes: strokes, draft: draft, under: under)
+            .frame(width: paper.size.width, height: paper.size.height)
             // White whatever the appearance is. Paper is paper: the marks are made in black, and a
             // canvas that followed dark mode would be a hole in the ink rather than a place to draw.
             //
@@ -99,7 +154,7 @@ struct Sketchpad: View {
                 RoundedRectangle(cornerRadius: Wei.Radius.panel, style: .continuous)
                     .strokeBorder(Wei.Palette.separator, lineWidth: 1)
             )
-            .accessibilityLabel("Sketch paper")
+            .accessibilityLabel(under == nil ? "Sketch paper" : "Screenshot, to mark up")
     }
 
     /// Press, drag, release — the whole life of every mark.
@@ -136,23 +191,33 @@ struct Sketchpad: View {
                 .disabled(strokes.isEmpty && cleared.isEmpty)
                 .keyboardShortcut("z", modifiers: .command)
                 .help("Undo the last mark (⌘Z)")
-            // The whole drawing at once, for the case Undo is the wrong shape for: the sketch went
-            // wrong early and the reader wants the paper back. It does not ask first — ⌘Z puts it
-            // back, and a dialog in front of a scratch drawing is friction in front of the common case.
+            // The whole drawing at once, for the case Undo is the wrong shape for: the marks went wrong
+            // early and the reader wants the paper back. It does not ask first — ⌘Z puts it back, and a
+            // dialog in front of a scratch drawing is friction in front of the common case.
+            //
+            // **It clears the marks and never the paper.** Over a screenshot that is the difference
+            // between a button that does nothing and a button that throws away the picture the reader
+            // just took: Undo and Clear are about the drawing, and the drawing is what is counted here.
             Button("Clear", action: clear)
                 .disabled(strokes.isEmpty)
+                .help(under == nil ? "Remove the marks" : "Remove the marks, and keep the picture")
 
             Spacer(minLength: Wei.Space.loose)
 
             Button("Cancel") { dismiss() }
                 .keyboardShortcut(.cancelAction)
-            Button("Insert", action: insertSketch)
+            // The mark the reader expects on a sheet they are done with, and the same shape either way:
+            // a sketch and a marked-up screenshot are each one picture for this message, and what they
+            // have in common is that the message is not sent until it is inserted.
+            Button("Insert", action: attach)
                 .buttonStyle(.borderedProminent)
                 // The same keystroke the composer sends with, because it is the same decision: this
                 // message is done being written.
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(strokes.isEmpty)
-                .help("Attach this sketch to your message (⌘↩)")
+                // Nothing to insert is impossible over a picture, and it is what an empty piece of paper
+                // means: a blank 640×420 PNG on the prompt is a picture that says nothing.
+                .disabled(under == nil && strokes.isEmpty)
+                .help("Attach this \(under == nil ? "sketch" : "screenshot") to your message (⌘↩)")
         }
         .font(Wei.Font.control())
     }
@@ -173,28 +238,40 @@ struct Sketchpad: View {
 
     // ── out ───────────────────────────────────────────────────────────────
 
-    /// Send the drawing to the composer, and close.
-    private func insertSketch() {
-        guard let png = render() else { return }
+    /// Send the picture to the composer, and close.
+    private func attach() {
+        guard let png = PictureExport.png(paper: paper, strokes: strokes, under: under) else { return }
         insert(png)
         dismiss()
     }
+}
 
-    /// The drawing, as the bytes that go into the composer.
-    ///
-    /// Rendered from **the same view the paper draws** — the same `SketchCanvas`, at the same size — so
-    /// what gets sent cannot drift from what was seen: there is one rendering of a stroke in this file
-    /// and the PNG is a second *sizing* of it, not a second implementation of it.
-    ///
-    /// The paper is fixed, which is what makes this total: the content has a size, the ink is inside it,
-    /// and rendering a view that draws cannot come back empty. So a `nil` here is not a case with
-    /// anything to say to the reader — the sheet simply stays open, with the drawing still in it.
-    private func render() -> Data? {
-        let content = SketchCanvas(strokes: strokes, draft: nil)
-            .frame(width: Self.paper.width, height: Self.paper.height)
+/// The picture a sheet produces, as the bytes that go into the composer.
+///
+/// A type of its own rather than a method on the sheet, because it is the half of this feature that can
+/// be **checked without a window** — and it is the half where being wrong is invisible. The paper's own
+/// pixel size, the picture underneath the ink, and the ink's own place in the file are all things the
+/// reader cannot see going wrong: the sheet on screen would look right either way, and the mistake would
+/// only surface as a model answering about a different picture.
+///
+/// It is rendered from **the same view the paper draws** — the same `SketchCanvas`, at the same size —
+/// so what gets sent cannot drift from what was seen: there is one rendering of a stroke in this file
+/// and the PNG is a second *sizing* of it, not a second implementation of it. The picture underneath is
+/// drawn by that same view for the same reason.
+///
+/// The paper has a size whichever it is, which is what makes this total: the content has a size, the ink
+/// is inside it, and rendering a view that draws cannot come back empty. So a `nil` here is not a case
+/// with anything to say to the reader — the sheet simply stays open, with the picture still in it.
+enum PictureExport {
+    @MainActor
+    static func png(paper: Sketch.Paper, strokes: [Sketch.Stroke], under: NSImage?) -> Data? {
+        let content = SketchCanvas(strokes: strokes, draft: nil, under: under)
+            .frame(width: paper.size.width, height: paper.size.height)
             .background(.white)
         let renderer = ImageRenderer(content: content)
-        renderer.scale = Self.exportScale
+        // The paper's own scale rather than the screen's: a screenshot's sheet is usually *smaller* than
+        // the picture it shows, and what goes out is that picture's own pixels (see `Sketchpad.paper`).
+        renderer.scale = paper.scale
         renderer.isOpaque = true
         guard let image = renderer.cgImage else { return nil }
         // From the `CGImage` rather than through `NSImage.tiffRepresentation`: the pixel dimensions of
@@ -213,6 +290,9 @@ struct Sketchpad: View {
 private struct SketchCanvas: View {
     let strokes: [Sketch.Stroke]
     let draft: Sketch.Draft?
+    /// The picture being marked up, if any. Under the ink, and the whole of what makes a screenshot's
+    /// sheet a different thing from a blank one.
+    let under: NSImage?
 
     /// The ink. Black rather than the app's text colour, which would be white in dark mode — this is
     /// drawn on paper, not on the window.
@@ -224,7 +304,16 @@ private struct SketchCanvas: View {
     )
 
     var body: some View {
-        Canvas { context, _ in
+        Canvas { context, size in
+            // First, so every mark is on top of it. `draw(_:in:)` scales the picture to the rectangle
+            // — the rectangle is the paper the caller already fitted it to (`Sketch.Paper`), so this is
+            // a fit that has been worked out rather than one left to the drawing.
+            if let under, size.width > 0, size.height > 0 {
+                context.draw(
+                    Image(nsImage: under),
+                    in: CGRect(origin: .zero, size: size)
+                )
+            }
             for stroke in strokes { Self.draw(stroke, into: &context) }
             // The draft last, so the mark being made is drawn over the ones already there — the same
             // place it will be in once it is kept.
@@ -313,5 +402,22 @@ extension Sketch.Tool {
         case .rectangle: return "rectangle"
         case .ellipse: return "circle"
         }
+    }
+}
+
+/// How many pixels a picture really is.
+///
+/// Which is *not* `size × displayScale`: the size of an image loaded from bytes is its own scale
+/// applied to its own pixels (a capture taken on a 2× display reports 1470×956 for 2940×1912 pixels,
+/// because the file carries 144 dpi), and the screen this app is on has nothing to do with it. The
+/// representation is where the pixels are, so the representation is what is asked.
+///
+/// Falls back to the point size, which is what a picture with no resolution of its own means: one
+/// pixel per point. Both come from outside this app — a decoder and a file — and `Sketch.Paper` floors
+/// a zero, because a zero here would be a `NaN` in a size that is used as a frame.
+extension NSImage {
+    var pixelSize: CGSize {
+        guard let rep = representations.first else { return size }
+        return CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
     }
 }

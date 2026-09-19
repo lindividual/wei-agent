@@ -360,3 +360,79 @@ async test "restoring a session that is already back is a no-op" {
   let listing = list_sessions(dir)
   assert_eq(listing.length(), 1)
 }
+
+///|
+/// Removing a project takes its row away and leaves every conversation on disk.
+///
+/// The two halves of the design are what this pins: the store directory is *renamed* (so all the
+/// sessions are still there, one rename away from being back), and the listing is what stops showing
+/// it — `list_workspaces` is the only reader that has to know the suffix exists.
+async test "removing a project keeps its sessions, and hides them from the listing" {
+  let root = session_scratch("workspace-remove")
+  let dir = "\{root}/--work--"
+  write_workspace(dir, { cwd: "/work", title: None, })
+  let one = "\{dir}/2020-01-01T00-00-00.000Z_abc12345.jsonl"
+  create_session(one, header("abc12345", "/work"))
+  append_entry(one, user_entry("a question", None))
+  // A second project, so "out of the listing" is distinguishable from "the listing broke".
+  let other = "\{root}/--elsewhere--"
+  write_workspace(other, { cwd: "/elsewhere", title: None, })
+  assert_eq(list_workspaces(root).length(), 2)
+
+  // What the caller gets back is where the project went, and that is the only way back to it: the
+  // listing no longer knows it, so nothing else can find the directory again.
+  let aside = match remove_workspace(root, "/work") {
+    Some(aside) => aside
+    None => fail("a listed project must be removable")
+  }
+  assert_eq(aside, "\{dir}.removed")
+  let left = list_workspaces(root)
+  assert_eq(left.length(), 1)
+  assert_eq(left[0].cwd, "/elsewhere")
+  // The conversation is where it was, under the name the rename produced.
+  assert_true(path_exists("\{aside}/\{one.split("/").last().unwrap()}"))
+  // And `--resume <id>` agrees with the sidebar: a session in a project the reader has removed is not
+  // one the store will find by id.
+  assert_true(find_session(root, "abc12345") is None)
+  // Removing it again moves nothing, and that is an answer rather than an error — including for a path
+  // the store never had.
+  assert_true(remove_workspace(root, "/work") is None)
+  assert_true(remove_workspace(root, "/never-added") is None)
+  // And the other project still comes back, so "not found" is about the ask and not about the store
+  // having given up.
+  assert_true(remove_workspace(root, "/elsewhere") is Some(_))
+}
+
+///|
+/// The same, with the checkbox: the directory is emptied as well as unlisted.
+///
+/// The order is the property worth pinning — the rename happens first, so a removal that fails leaves
+/// the reader in the recoverable state rather than a half-emptied project that is still listed.
+async test "removing a project with its sessions empties the directory" {
+  let root = session_scratch("workspace-delete")
+  let dir = "\{root}/--work--"
+  write_workspace(dir, { cwd: "/work2", title: None, })
+  let one = "\{dir}/2020-01-01T00-00-00.000Z_def67890.jsonl"
+  create_session(one, header("def67890", "/work2"))
+  append_entry(one, user_entry("a question", None))
+
+  // The two steps a caller takes, in the order that matters: the rename first, then emptying what the
+  // rename produced. A failure between them leaves the project out of the list with its conversations
+  // on disk — the recoverable half — rather than half emptied and still listed.
+  let aside = match remove_workspace(root, "/work2") {
+    Some(aside) => aside
+    None => fail("a listed project must be removable")
+  }
+  assert_true(purge_workspace(aside))
+  assert_true(list_workspaces(root).is_empty())
+  assert_false(
+    path_exists(dir),
+    msg="the store directory itself should be gone",
+  )
+  assert_false(path_exists(aside), msg="nothing should be left aside")
+  // A path that was never in the store is refused rather than renamed, and a second emptying finds
+  // nothing — which the caller has to be told, because its sentence says the conversations are still
+  // on disk and that is only true if this answer is honest.
+  assert_true(remove_workspace(root, "/work2") is None)
+  assert_false(purge_workspace(aside))
+}

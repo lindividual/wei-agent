@@ -132,6 +132,10 @@ struct RootView: View {
         } detail: {
             ConversationView(
                 client: client,
+                actions: actions,
+                // The project the toolbar's plus creates in — the same resolved value the session list
+                // is listing, so the button and the list can never disagree about "this project".
+                browsing: browsed,
                 onRename: {
                     // The same dialog as the row's own context menu, started from this column because the
                     // name is written *here*: a reader who wants it different is looking at it.
@@ -162,6 +166,18 @@ struct RootView: View {
         // the same conversation stays open is not undone a moment later.
         .onChange(of: client.currentPath) { _, _ in browsing = client.currentWorkspace }
         .onAppear { browsing = client.currentWorkspace }
+        // **Handed to the app, because `⌘N` is defined there.** The command and the two buttons that
+        // carry it out are one command, so they have to name one project — `browsed` rather than
+        // `browsing`, because that is the value those buttons pass and the fallback is part of the answer
+        // (a project the store has not listed yet still has an open session in it). Recomputing it in the
+        // menu bar instead would be a second definition of "the project this window is browsing", which is
+        // how the two drifted apart in the first place.
+        //
+        // No `onAppear` to seed it, deliberately: the initial `""` is not a missing value. A window that
+        // has not chosen a project and a window whose reader chose none are the same state, and the shell
+        // answers both with the project on screen — which is what `browsed` computes to when there is
+        // nothing chosen yet.
+        .onChange(of: browsed) { _, project in actions.browsing = project }
         // Choosing a directory to start a session in. `.folder` rather than an `NSOpenPanel`: this is the
         // same `fileImporter` the composer uses for images, it attaches to the window as a sheet, and the
         // host is the process that has a desktop session — the whole of `platform/picker.mbt`'s argument,
@@ -175,7 +191,7 @@ struct RootView: View {
             // answered. An unreadable answer is not a thing to explain either — the shell checks the path
             // it is given, and it is the side that can say why.
             guard case let .success(urls) = result, let url = urls.first else { return }
-            client.newSession(in: url.path)
+            client.addWorkspace(url.path)
         }
         // **One rename dialog for both columns.** It used to live in the session list, which was right
         // while the list was the only place a session could be named. The pencil is now in the conversation
@@ -271,7 +287,7 @@ private struct WorkspaceList: View {
                 SectionTitle("Workspaces")
                 addWorkspace
                 ForEach(client.groups) { group in
-                    WorkspaceRow(group: group)
+                    WorkspaceRow(group: group, onRemove: { remove(group) })
                         .tag(group.cwd)
                 }
             }
@@ -401,6 +417,32 @@ private struct WorkspaceList: View {
         .buttonStyle(.plain)
     }
 
+    /// Ask, then remove: the dialog is the whole of what this decides.
+    ///
+    /// **Nothing is changed here**, the same rule the session list follows: the row stays until the shell
+    /// says the store changed, because the shell is the side that reads the disk and the side that can
+    /// refuse — a turn is running in that project, or a job it started is still alive. A list that removed
+    /// the row from the click would have to put it back when the answer came, and a row that flickers is
+    /// worse than one that leaves a moment late.
+    ///
+    /// The count is the row's own, which is the number the reader can see under that project in the middle
+    /// column — the two must not be able to disagree (see `DeleteConfirmation.askAboutProject`).
+    private func remove(_ group: SessionGroup) {
+        DeleteConfirmation.askAboutProject(
+            label: group.label,
+            sessions: group.sessions.count
+        ) { answer in
+            switch answer {
+            case .cancel:
+                break
+            case .keepFile:
+                client.removeWorkspace(group.cwd, deletingSessions: false)
+            case .removeFile:
+                client.removeWorkspace(group.cwd, deletingSessions: true)
+            }
+        }
+    }
+
 }
 
 /// The platform's search field, placed by the view that owns the query.
@@ -516,6 +558,10 @@ private struct RunningSessionRow: View {
 /// conversation — so without a mark, browsing away from a running session hides where it is.
 private struct WorkspaceRow: View {
     let group: SessionGroup
+    /// Called when this row's menu asks for the project to go. The dialog belongs to the column, for the
+    /// same reason a session row's does: it is one question about one row, and the row is the thing that
+    /// cannot draw a sheet on the window.
+    let onRemove: () -> Void
 
     /// The width of a row's leading glyph slot — the same slot in the add row above, so every label in this
     /// list starts at the same place whatever its glyph measures. 18 is `folder`'s advance at the control
@@ -543,6 +589,16 @@ private struct WorkspaceRow: View {
         }
         // The path, because two projects can share a name and the name is all there is room for.
         .help(group.cwd)
+        // **The only way out of this list, and it is one item.** A project can be removed and cannot be
+        // renamed (`write_workspace`'s title has never been set — `macos/README.md` has it as future work),
+        // so a menu with one entry is the honest size of it. It is reachable at all because a list with no
+        // way to take a row out again is a list that only grows, and the only other way out is a shell and
+        // an `rm -rf` of a directory the reader has to know the name of.
+        .contextMenu {
+            // No `role: .destructive` here, unlike the session row: what is destroyed is decided by the
+            // checkbox in the dialog this opens, so red would promise a deletion that may not happen.
+            Button("Remove Project…", action: onRemove)
+        }
     }
 }
 
@@ -576,9 +632,6 @@ private struct SessionList: View {
     /// Called when a row's menu asks to rename it. The dialog itself belongs to the window: the same one is
     /// started from beside the conversation's own name.
     let onRename: (SessionRow) -> Void
-    /// The session deleted most recently, so the list can offer it back. The file was renamed rather than
-    /// removed, so this is a convenience on top of a recovery that was already possible.
-    @State private var deleted: (path: String, label: String)?
     @State private var undoTimer: Task<Void, Never>?
 
     /// How long the offer to undo a delete stands. The same window the web UI uses, and for the same
@@ -671,11 +724,16 @@ private struct SessionList: View {
                         .font(Wei.Font.control(.semibold))
                 }
             }
-            if let deleted {
+            // **Only when there is something to put back.** A purge removes the file, and an Undo button
+            // on a file that is not there is a button that lies — so the shell says which of the two
+            // happened (`restorable`) and this draws nothing for the other. The row vanishing is the
+            // report a purge gets; a line saying so would be a second sentence about a fact the reader
+            // just watched happen.
+            if let deleted = client.deleted, deleted.restorable {
                 SwiftUI.Section {
                     UndoRow(label: deleted.label) {
                         client.restore(deleted.path)
-                        self.deleted = nil
+                        undoTimer?.cancel()
                     }
                 }
             }
@@ -700,6 +758,14 @@ private struct SessionList: View {
                     .padding(.horizontal, 24)
             }
         }
+        // The offer to undo a delete is the shell's — it is what the shell saw happen to the store — and
+        // the *clock* on it is this side's: how long a line is worth drawing is a fact about a window.
+        // Keyed on the path rather than on the tuple, which is not `Equatable`; two deletes of two
+        // conversations are two clocks, and the second replaces the first.
+        .onChange(of: client.deleted?.path) { _, path in
+            guard let path else { return }
+            offerShown(path)
+        }
     }
 
     /// Adding one, as the *first* row of the list it adds to.
@@ -719,7 +785,7 @@ private struct SessionList: View {
     /// as a button among rows that are documents.
     private var newSession: some View {
         Button {
-            client.newSession()
+            client.newSession(in: browsing)
         } label: {
             HStack(spacing: Wei.Space.tight) {
                 Image(systemName: "plus")
@@ -748,16 +814,41 @@ private struct SessionList: View {
             : "No project selected."
     }
 
+    /// Ask, then delete: the dialog is the whole of what this decides.
+    ///
+    /// **Nothing is changed here.** The row stays until the shell says the file moved — the list that
+    /// arrives right after a delete is the shell's own account of what is in the store, and one that
+    /// guessed at it would have to take the guess back when the delete was refused. The offer to undo
+    /// comes back the same way, as a `deleted` event, rather than being drawn from the click.
     private func delete(_ row: SessionRow) {
-        client.delete(row.path)
-        deleted = (row.path, row.label)
-        // The offer withdraws itself. A button that waits forever is a button that is still there
-        // tomorrow, and by then it is not an undo any more — it is a piece of the interface nobody can
-        // account for.
+        DeleteConfirmation.ask(label: row.label) { answer in
+            switch answer {
+            case .cancel:
+                break
+            case .keepFile:
+                client.delete(row.path)
+            case .removeFile:
+                // The one act in this program that cannot be undone. It is the checkbox, in the dialog
+                // the reader is still looking at when they tick it.
+                client.purge(row.path)
+            }
+        }
+    }
+
+    /// The offer has arrived: give it the window it stands for, and then take it down.
+    ///
+    /// A button that waits forever is a button that is still there tomorrow, and by then it is not an undo
+    /// any more — it is a piece of the interface nobody can account for. The clock is this side's because
+    /// how long a line is worth drawing is a fact about a window; the offer itself is the shell's, and this
+    /// only asks for it to expire.
+    private func offerShown(_ path: String) {
         undoTimer?.cancel()
         undoTimer = Task {
             try? await Task.sleep(for: Self.undoWindow)
-            if !Task.isCancelled { deleted = nil }
+            guard !Task.isCancelled else { return }
+            // Only when this is still the offer that was up: a second delete replaces the first, and its
+            // own clock must not be cut short by the one it replaced.
+            if client.deleted?.path == path { client.undoOfferExpired() }
         }
     }
 }
@@ -791,9 +882,9 @@ private struct StatusChip: View {
 
 /// The line that says what was deleted, with the way back.
 ///
-/// The web UI shows the same thing, over the same window, and it earns its place the same way: the file is
-/// renamed rather than removed, so this is a convenience on top of a recovery that was already there — but
-/// a reader who deleted the wrong row should not have to open Finder to find out.
+/// Drawn only for a delete that can be undone (`DeletedSession.restorable`): the file is renamed rather
+/// than removed, so this is a convenience on top of a recovery that was already possible — but a reader
+/// who deleted the wrong row should not have to open Finder to find out.
 private struct UndoRow: View {
     let label: String
     let undo: () -> Void
@@ -833,8 +924,6 @@ private struct SessionRowView: View {
     let workspace: String?
     let onRename: () -> Void
     let onDelete: () -> Void
-
-    @State private var confirmingDelete = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Wei.Space.tiny) {
@@ -896,20 +985,153 @@ private struct SessionRowView: View {
             // item that vanishes with the selection is a menu item nobody finds.
             Button("Rename…", action: onRename)
             Divider()
-            // The file is renamed aside rather than removed, and the list offers it back for a few seconds
-            // — so the confirmation says what actually happens rather than warning about a loss that will
-            // not occur.
-            Button("Delete Session", role: .destructive) { confirmingDelete = true }
+            // The question — including the one about the file — is `DeleteConfirmation`'s: an `NSAlert`,
+            // because it is the one dialog on this system that takes a checkbox beside its buttons.
+            Button("Delete Session", role: .destructive, action: onDelete)
         }
-        .confirmationDialog(
-            "Delete “\(row.label)”?",
-            isPresented: $confirmingDelete,
-            titleVisibility: .visible
-        ) {
-            Button("Delete", role: .destructive) { onDelete() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("The conversation file is renamed .deleted, and you can undo this from the list.")
+    }
+}
+
+/// Ask before deleting a session, with the one extra question a delete can have.
+///
+/// **An `NSAlert` rather than `.confirmationDialog`, and only because of the checkbox.** That checkbox is
+/// the reader's answer to "and the file?" — unticked, the conversation leaves the list and its log is
+/// renamed aside, which is the recoverable thing this app has always done; ticked, the log is removed,
+/// which is the only act in this program that cannot be undone. The question belongs in the dialog that
+/// asks whether to delete at all: a second dialog after it would be two questions for one decision, and a
+/// second *button* ("Delete and Remove") makes the reader compare two labels to find the difference.
+///
+/// The same dialog, and the same checkbox, asks about a whole project (`askAboutProject`): the row and the
+/// conversations under it are two sizes of one act, and the thing that made a checkbox necessary — an
+/// irreversible outcome that a plain confirmation cannot express — is the same in both.
+///
+/// SwiftUI has no equivalent to offer. `confirmationDialog`'s builders take views, but the dialog is a
+/// list of buttons — nothing else in it arrives — and `dialogSuppressionToggle` is a different question
+/// ("do not ask me again"). So this is AppKit, and it is the platform *dialog* rather than a platform
+/// view: the same category as the menu bar and the pasteboard in ADR-0008, and SwiftUI's own alerts are
+/// NSAlerts underneath. The tokens are not involved — the platform draws this whole thing, title bar
+/// included — which is the same reason the system's own "Delete Note?" needs no design system.
+@MainActor
+enum DeleteConfirmation {
+    /// What the reader chose.
+    ///
+    /// Named for the *file*, which is the thing at stake: a session's log is one file and a project's is a
+    /// directory of them, and "keep the file" covers both.
+    enum Answer {
+        case cancel
+        /// Out of the list; what was there is renamed aside and can be put back.
+        case keepFile
+        /// Out of the list and off the disk. Nothing can put it back.
+        case removeFile
+    }
+
+    /// What one of these dialogs says, as data.
+    ///
+    /// Split out of `present` so the sentences can be checked without a window, which is the same split
+    /// `Sketch` makes for the sketchpad and for the same reason: a dialog that is drawn wrong and a dialog
+    /// that *says* the wrong thing are different mistakes, and only the first one needs a screen. These
+    /// words are the whole of what tells a reader whether their code is at risk, so they are worth a test
+    /// rather than an eyeball.
+    struct Prompt: Equatable {
+        let title: String
+        let body: String
+        /// The first button, which is Return. The second is always Cancel, and is not stored because it is
+        /// never the difference between two dialogs.
+        let confirm: String
+        /// The checkbox beside the buttons, or `nil` when there is nothing for one to decide.
+        let checkbox: String?
+    }
+
+    /// What the question about one conversation says. Every delete has this checkbox — the file is always
+    /// there to be removed.
+    static func prompt(label: String) -> Prompt {
+        Prompt(
+            title: "Delete “\(label)”?",
+            body: "The conversation leaves the list.",
+            confirm: "Delete",
+            checkbox: "Also delete the file on disk (cannot be undone)"
+        )
+    }
+
+    /// The same about one project.
+    ///
+    /// The count goes in both sentences, and the caller passes `SessionGroup.sessions.count` — the number
+    /// of rows the reader can see under that project — so the dialog cannot disagree with the sidebar it
+    /// just came from.
+    ///
+    /// **The body says the folder is not touched**, and that is the sentence this dialog exists for: the
+    /// row is named after a directory and the button says "Remove", so without it a reader is entitled to
+    /// think their source tree is about to go. It is said first, before the part about the conversations.
+    ///
+    /// **No checkbox for a project with nothing in it.** The checkbox in the session dialog was added
+    /// because a loss the dialog would otherwise announce can be turned into a bigger one; with no
+    /// conversations there is no such loss, and "Also delete its 0 conversations" would be a control that
+    /// cannot do anything. `nil` is what the caller draws no accessory view for.
+    static func projectPrompt(label: String, sessions: Int) -> Prompt {
+        let conversations = sessions == 1 ? "conversation" : "conversations"
+        return Prompt(
+            title: "Remove “\(label)”?",
+            body: sessions == 0
+                ? "The project is a folder on disk and is not touched."
+                : "The project is a folder on disk and is not touched. Its \(sessions) \(conversations)"
+                    + " leave the list.",
+            confirm: "Remove",
+            checkbox: sessions == 0
+                ? nil
+                : "Also delete its \(sessions) \(conversations) (cannot be undone)"
+        )
+    }
+
+    /// The question about one conversation.
+    static func ask(label: String, then answer: @escaping (Answer) -> Void) {
+        present(prompt(label: label), then: answer)
+    }
+
+    /// The question about one project, whose checkbox is about every conversation in it.
+    static func askAboutProject(
+        label: String,
+        sessions: Int,
+        then answer: @escaping (Answer) -> Void
+    ) {
+        present(projectPrompt(label: label, sessions: sessions), then: answer)
+    }
+
+    /// Put the question up, and answer on the way back.
+    ///
+    /// A sheet on the window the reader is looking at, and a free-standing alert only when there is no
+    /// window to hang it on (a test, or a launch before the window exists) — an app-modal panel that
+    /// covers every window for a question about one row would be worse than the fallback is cheap.
+    private static func present(_ prompt: Prompt, then answer: @escaping (Answer) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = prompt.title
+        alert.alertStyle = .warning
+        alert.informativeText = prompt.body
+        alert.addButton(withTitle: prompt.confirm)
+        alert.addButton(withTitle: "Cancel")
+
+        var remove: NSButton?
+        if let checkbox = prompt.checkbox {
+            let box = NSButton(checkboxWithTitle: checkbox, target: nil, action: nil)
+            // **Off**, which is the default this dialog exists to preserve: the recoverable removal is what
+            // the app has always done, and a reader who does not read the checkbox still gets that.
+            box.state = .off
+            alert.accessoryView = box
+            remove = box
+        }
+
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            // The first button is the action, and the checkbox only *modifies* it: a ticked box with a
+            // cancelled dialog removes nothing, which is what "Cancel" has to mean.
+            guard response == .alertFirstButtonReturn else {
+                answer(.cancel)
+                return
+            }
+            answer(remove?.state == .on ? .removeFile : .keepFile)
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(alert.runModal())
         }
     }
 }
@@ -929,6 +1151,16 @@ private struct SessionRowView: View {
 /// status line, which says it under the field where a reader is looking anyway (`ShellClient.blocked`).
 private struct ConversationView: View {
     @ObservedObject var client: ShellClient
+    /// What the window is in the middle of: the composer's `+` menu and the Edit menu both write the
+    /// picture sheet through this, so both have to be looking at the same one.
+    @ObservedObject var actions: WindowActions
+    /// The project the toolbar's plus starts a session in: the one this window is browsing, resolved
+    /// (`RootView.browsed`), so it is the same value the session list beside it is listing.
+    ///
+    /// Passed in rather than read from `client.currentWorkspace`, and that is the whole fix: the two
+    /// disagree exactly while the reader is browsing a project they have not opened a session in, which
+    /// is when "New Session" was landing in the wrong one.
+    let browsing: String
     /// Starts the window's rename dialog for the session on screen. Beside the name, because that is the
     /// thing it changes.
     let onRename: () -> Void
@@ -971,6 +1203,7 @@ private struct ConversationView: View {
                 : nil,
             onContinue: { client.continueTurn() },
             onDismiss: { client.dismissTurn() },
+            onLoadEarlier: { client.loadEarlier(client.conversation.oldestRowID) },
             scroll: scroll,
             // The first row has to clear the toolbar *and* this column's own bar.
             topMargin: Wei.Control.toolbar + (sessionName == nil ? 0 : titleHeight)
@@ -984,6 +1217,7 @@ private struct ConversationView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 Composer(
                     client: client,
+                    actions: actions,
                     enabled: client.state != .starting,
                     // A prompt went out, so the reader is asking rather than reading back: the transcript
                     // follows again from here, whatever it had been told before.
@@ -1095,7 +1329,7 @@ private struct ConversationView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    client.newSession()
+                    client.newSession(in: browsing)
                 } label: {
                     // A plus rather than `square.and.pencil`. The pencil-square is the *document* metaphor
                     // (Notes' "new note"), and in this window it reads as "write", next to a pencil that
@@ -1155,6 +1389,33 @@ final class WindowActions: ObservableObject {
     /// Whether the folder chooser is open. Owned here rather than by the view that draws it, so the
     /// menu bar can open it too.
     @Published var choosingFolder = false
+
+    /// Which project this window is browsing, mirrored from `RootView.browsing` so that the menu bar's
+    /// "New Session" (⌘N) names the same project the toolbar's plus and the list's own row do.
+    ///
+    /// The only thing here that travels *the other way* — the view tree telling the app — and that is
+    /// the point of it: which project the reader is looking at is a window fact (see `RootView.browsing`
+    /// for why the shell must not own it), so a command defined beside the app has no other way to know
+    /// it. The alternative, `client.currentWorkspace`, is the project of the session *on screen*, and
+    /// that is precisely the answer this bug came from: ⌘N under project B would create in project A,
+    /// while the tooltip on the button it shares a command with promises "New session in this project".
+    ///
+    /// Empty is a real value, not a missing one: it is a window with nothing to name yet, and the shell
+    /// answers it with the project on screen — which is the right answer when the reader has not chosen
+    /// one either.
+    @Published var browsing = ""
+
+    /// The picture sheet, if one is open: blank paper, or a screenshot to mark up.
+    ///
+    /// Owned here for the same reason as the folder chooser, and it is the same argument twice: the
+    /// composer's `+` menu and the Edit menu both open it, and the two must be answering one question
+    /// rather than each remembering their own. The screenshot commands are on `WindowActions` too
+    /// (see `Screenshot.swift`), because a command written twice is a command that can come to mean
+    /// two things.
+    @Published var picture: PictureSheet?
+    /// A screenshot that did not happen. `nil` when there is nothing to say — which includes the
+    /// reader having cancelled one, deliberately: see `ScreenshotOutcome`.
+    @Published var shotTrouble: ScreenshotTrouble?
 }
 
 /// Where the transcript is scrolled to, and whether it should keep up with what arrives.
@@ -1206,6 +1467,69 @@ private final class TranscriptScroll: ObservableObject {
     /// Whether a new row should be scrolled to. Read at the moment a revision arrives, rather than
     /// published: nothing is drawn differently either way.
     var following: Bool { follow.following }
+
+    // ── paging ─────────────────────────────────────────────────────────────
+    //
+    // The transcript arrives a page at a time (newest first), and scrolling to the top asks for the
+    // page before it. Two things make that not jump under the reader, and both are here rather than in
+    // the view body because they are decisions with numbers in them:
+    //
+    // - **when to ask**: near the top, but not *at* it — a request that only fires once the reader is
+    //   already staring at the first row arrives a beat too late to hide;
+    // - **where to keep the eye**: the height the transcript gains when the page lands, added back to
+    //   the offset. The view does the arithmetic (it is the only side that knows the geometry); this
+    //   holds the intent.
+
+    /// Whether a page has been asked for and not yet arrived.
+    ///
+    /// One request in flight at a time. A scroll view reports the top on every frame it stays there, and
+    /// each of those would otherwise be another request — for a page the shell would answer by sending
+    /// the same rows again.
+    var awaitingPage = false
+
+    /// How close to the top counts as "ask for more". A screen's worth, so the page is in flight while
+    /// the reader still has something to read.
+    private let pageTrigger: CGFloat = 600
+
+    /// Whether the top of the transcript is close enough to ask for the page before it.
+    ///
+    /// Three conditions, and the second one is the one a measurement put there:
+    ///
+    /// - `hasEarlier` is the shell's own answer about whether such a page exists, which is why a session
+    ///   that fits in one page never arms this — nothing asks for rows that are not there;
+    /// - **the reader is not following** — they have scrolled up, which is the transcript's existing
+    ///   notion of "they are reading something above". Starting a page from "the offset happens to be
+    ///   near the top" instead was measured loading **three pages in a row on a switch**: the old
+    ///   session's offset is near zero when the new one's rows arrive, so the trigger fired before the
+    ///   landing at the end, and each page it added kept the offset near the top for the next one. The
+    ///   follow rule and this one were also fighting over the same revision — one trying to put the
+    ///   reader at the end, the other adding rows above them;
+    /// - one request in flight at a time, because a scroll view reports the same offset on every frame
+    ///   it stays there and each report would otherwise be another request.
+    func shouldLoadEarlier(offset: CGFloat, hasEarlier: Bool) -> Bool {
+        guard hasEarlier, !awaitingPage, !follow.following else { return false }
+        return offset < pageTrigger
+    }
+
+    /// A page was asked for.
+    func pageRequested() {
+        awaitingPage = true
+    }
+
+    /// A page arrived (or the shell answered with nothing, which is also an answer).
+    func pageArrived() {
+        awaitingPage = false
+    }
+}
+
+/// The two numbers the transcript's paging is decided from: where it is scrolled to, and how tall it is.
+///
+/// A named pair rather than a tuple because `onScrollGeometryChange` needs an `Equatable` carrier and
+/// because the two travel together — the follow rule reads the bottom, the paging rules read the top and
+/// the height, and all three are the same geometry.
+private struct Geometry: Equatable {
+    var offset: CGFloat
+    var height: CGFloat
 }
 
 /// Where the bottom of the transcript is, reported to the view that decides whether to follow.
@@ -1270,6 +1594,9 @@ private struct TranscriptView: View {
     let interruptedPrompt: String?
     let onContinue: () -> Void
     let onDismiss: () -> Void
+    /// Ask the shell for the page of rows before the oldest one on screen. Called when the reader
+    /// scrolls near the top and the shell says there is more (`Conversation.hasEarlier`).
+    let onLoadEarlier: () -> Void
     @ObservedObject var scroll: TranscriptScroll
 
     /// How far below the window's top edge the first row must start — the toolbar, plus whatever bar this
@@ -1279,6 +1606,20 @@ private struct TranscriptView: View {
 
     /// The app-wide scroll monitor, installed while the transcript is on screen. See `onAppear`.
     @State private var monitor: Any?
+
+    /// Where the transcript is scrolled to, and how tall it is — as state, because the paging decision
+    /// is made from them and a decision cannot be made from a callback.
+    ///
+    /// `ScrollGeometry` rather than the preference pass the follow rule uses: this wants the offset and
+    /// the content size *as they change*, which is what `onScrollGeometryChange` reports, and it wants
+    /// them before the reader reaches the very top.
+    @State private var offset: CGFloat = 0
+    @State private var contentHeight: CGFloat = 0
+    /// What the content height was when the last page was asked for, so the height it gains when the
+    /// page lands can be told from a re-layout of the same rows.
+    @State private var heightAtRequest: CGFloat = 0
+    /// The scroll position, held so a page can be landed on without moving the reader's eye.
+    @State private var scrollTarget = ScrollPosition(idType: String.self)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1396,6 +1737,37 @@ private struct TranscriptView: View {
             // thing — this is still there, you are scrolling past it. `.soft` is the subtle variant; `.hard`
             // is the stronger one, and `nil` (or `scrollEdgeEffectHidden`) turns the whole thing off.
             .scrollEdgeEffectStyle(.soft, for: .top)
+            // The geometry, as state. `onScrollGeometryChange` reports offset *and* content size, which
+            // are exactly the two numbers both paging decisions are made from.
+            .onScrollGeometryChange(for: Geometry.self) { geometry in
+                Geometry(offset: geometry.contentOffset.y, height: geometry.contentSize.height)
+            } action: { _, now in
+                offset = now.offset
+                contentHeight = now.height
+                if scroll.shouldLoadEarlier(offset: now.offset, hasEarlier: conversation.hasEarlier) {
+                    heightAtRequest = now.height
+                    scroll.pageRequested()
+                    onLoadEarlier()
+                }
+            }
+            // **A page lands without the reader's eye moving.** Prepending rows above the viewport makes
+            // the content taller, and a scroll view keeps its offset — so the text the reader was reading
+            // slides down by exactly the height that was added. The fix is arithmetic rather than a
+            // `scrollTo`: add the delta back to the offset, in a scroll position, which is the only way to
+            // write an offset directly (`ScrollViewReader` can only jump to an id).
+            //
+            // Guarded on "the rows grew while a page was in flight" — a revision with no page outstanding
+            // is a live turn appending at the *bottom*, where moving the offset would fight the follow
+            // rule instead of helping it.
+            .scrollPosition($scrollTarget)
+            .onChange(of: conversation.rows.count) { old, new in
+                guard scroll.awaitingPage, new > old else { return }
+                let delta = contentHeight - heightAtRequest
+                scroll.pageArrived()
+                guard delta > 0 else { return }
+                // The new offset, in the same coordinate space `contentOffset.y` is read in.
+                scrollTarget.scrollTo(y: offset + delta)
+            }
             .onChange(of: revision) { _, _ in
                 guard scroll.following, let end = WeiModel.endOf(conversation.rows) else { return }
                 // Deferred by one turn of the run loop, for the same reason the switch below is: a row that
@@ -1787,12 +2159,35 @@ private struct RowView: View {
     var body: some View {
         switch row.kind {
         case .user:
-            Text(row.text)
-                .font(Wei.Font.body())
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Wei.Palette.highlightWash, in: RoundedRectangle(cornerRadius: Wei.Radius.control))
-                .frame(maxWidth: .infinity, alignment: .trailing)
+            // **A question is its pictures and its words, in that order, right-aligned with the
+            // bubble.** The pictures come first because that is the order they were attached in and
+            // the order the model is shown them in (an image block with the prompt), and because a
+            // message that read picture-then-words on screen and words-then-picture in the log would
+            // be one thing described two ways.
+            //
+            // One `SentPictures` for the whole list rather than a loop here, because a row of them is
+            // one thing with its own question — how many fit on a line, and which one the reader has
+            // opened — and a `ForEach` in this view would be that question asked in the wrong place.
+            VStack(alignment: .trailing, spacing: SentPictures.gap) {
+                SentPictures(images: row.images)
+                if !row.text.isEmpty {
+                    Text(row.text)
+                        .font(Wei.Font.body())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Wei.Palette.highlightWash,
+                            in: RoundedRectangle(cornerRadius: Wei.Radius.control)
+                        )
+                        // **Selectable, like every other row of the transcript.** It was not — alone
+                        // among the rows — which is the one place a reader is most likely to want to
+                        // copy from: the message is their own words, and it is what they re-send, edit
+                        // or quote. An image-only question has no text to select, and that is why the
+                        // empty case is skipped rather than drawn as an empty bubble.
+                        .textSelection(.enabled)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
 
         case .reply:
             // The parse if the shell has sent one, the raw text if it has not. Either way the words are

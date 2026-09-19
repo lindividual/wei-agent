@@ -128,6 +128,51 @@ test "the session list carries its workspaces and their sessions" {
 }
 
 ///|
+/// A deleted conversation, as the host hears about it.
+///
+/// The event exists because the *outcome* of a delete is not knowable from the click: the shell refuses
+/// one with a turn running in it, or a background job still going, and it replaces the session on
+/// screen rather than refusing that. A host that put its own offer up would be announcing a delete that
+/// may not have happened.
+///
+/// The path is in the payload as well as in the routing field, and this test is where that is stated:
+/// the routing is the envelope's (which session this is about), the payload is what `/restore` takes.
+/// `restorable` is the other half of the same point — the checkbox turned "the file is renamed aside"
+/// into "the file is gone", and only this side knows which one was asked for.
+test "a deleted session is announced with its path, its label and whether it can come back" {
+  let kept = deleted_event(
+    "/store/--tmp--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl", "set up the project",
+    true,
+  )
+  inspect(
+    kept.stringify(),
+    content=(
+      #|{"kind":"deleted","session":"/store/--tmp--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl","path":"/store/--tmp--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl","label":"set up the project","restorable":true}
+    ),
+  )
+  // The purge: the same event, and the one field that says there is nothing to put back. The host is
+  // told rather than left to infer it, because an Undo button on a removed file is a button that lies.
+  let gone = deleted_event(
+    "/store/--tmp--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl", "set up the project",
+    false,
+  )
+  inspect(
+    gone.stringify(),
+    content=(
+      #|{"kind":"deleted","session":"/store/--tmp--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl","path":"/store/--tmp--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl","label":"set up the project","restorable":false}
+    ),
+  )
+  // And it is *not* a `status`: that event says what the shell is doing, and the host draws it as a
+  // line under the composer. Which conversation just left the store is a different fact, and the one
+  // that decides whether an Undo button has anything to offer.
+  let fields = match kept {
+    Json::Object(fields) => fields
+    _ => fail("a deleted event is not an object")
+  }
+  assert_true(fields.get("kind") is Some(Json::String("deleted")))
+}
+
+///|
 /// The row field that had to become per-session: `running` is read from the registry rather than
 /// inferred, because with more than one turn possible "is a turn running" is no longer a question about
 /// the process.
@@ -205,12 +250,62 @@ test "history keeps one row per tool, with its output attached" {
     #|{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-08-23T06:26:20.662Z","message":{"role":"toolResult","toolCallId":"call-1","toolName":"bash","content":[{"type":"text","text":"a.txt"}],"isError":false,"timestamp":3}}
   let rows = history_rows(@core.parse_session_file(text))
   // **The question carries no parse, and that is the rule rather than an omission.** `blocks` is read
-  // by the host in exactly one place — `RootView`'s `case .reply` — and a question is drawn as
-  // `Text(row.text)`; a parse for it is bytes nobody reads (see `draws_markdown`, where the measurement
-  // is written down). The tool row is `null` for a different reason: it has no text to parse.
+  // by the host in exactly one place — `RootView`'s `case .reply` — and a question is drawn from
+  // `text` and `images`; a parse for it is bytes nobody reads (see `draws_markdown`, where the
+  // measurement is written down). The tool row is `null` for a different reason: it has no text to
+  // parse.
+  //
+  // `images` is on every row, empty for all of them here: a field that appeared and disappeared would
+  // be one more shape for the host to decode, and its default is the empty list either way.
   inspect(
     rows.map(row => row.stringify()).join("\n"),
-    content="{\"kind\":\"user\",\"id\":\"h-1\",\"text\":\"list it\",\"complete\":true,\"blocks\":null,\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false}\n{\"kind\":\"tool\",\"id\":\"h-2\",\"text\":\"\",\"complete\":true,\"blocks\":null,\"name\":\"bash\",\"detail\":\"ls\",\"output\":\"a.txt\",\"error\":false}",
+    content="{\"kind\":\"user\",\"id\":\"h-1\",\"text\":\"list it\",\"complete\":true,\"blocks\":null,\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false,\"images\":[]}\n{\"kind\":\"tool\",\"id\":\"h-2\",\"text\":\"\",\"complete\":true,\"blocks\":null,\"name\":\"bash\",\"detail\":\"ls\",\"output\":\"a.txt\",\"error\":false,\"images\":[]}",
+  )
+}
+
+///|
+/// **A question's picture comes back with the question.** It is in the log, and it used to be drawn
+/// nowhere: the reader's own message showed only its words, so a screenshot they had just sent read as
+/// one that had not gone.
+///
+/// An image-only prompt is the sharper half of the same fact: there is no text at all, and a row that
+/// was skipped for having no text would drop the message entirely.
+test "history gives a question its pictures" {
+  let text =
+    #|{"type":"session","version":3,"id":"s1","timestamp":"2026-08-23T06:26:15.210Z","cwd":"/tmp"}
+    #|{"type":"message","id":"m1","parentId":null,"timestamp":"2026-08-23T06:26:18.662Z","message":{"role":"user","content":[{"type":"image","data":"AAA=","mimeType":"image/png"},{"type":"text","text":"what is this?"}],"timestamp":1}}
+    #|{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-08-23T06:26:19.662Z","message":{"role":"user","content":[{"type":"image","data":"BBB=","mimeType":"image/jpeg"}],"timestamp":2}}
+  let rows = history_rows(@core.parse_session_file(text))
+  assert_eq(
+    rows[0].stringify(),
+    "{\"kind\":\"user\",\"id\":\"h-1\",\"text\":\"what is this?\",\"complete\":true,\"blocks\":null,\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false,\"images\":[{\"mime\":\"image/png\",\"data\":\"AAA=\"}]}",
+  )
+  // The picture-only one: no text, one picture, and it is still a row.
+  assert_eq(
+    rows[1].stringify(),
+    "{\"kind\":\"user\",\"id\":\"h-2\",\"text\":\"\",\"complete\":true,\"blocks\":null,\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false,\"images\":[{\"mime\":\"image/jpeg\",\"data\":\"BBB=\"}]}",
+  )
+}
+
+///|
+/// The text of a question does **not** say "(image attachment)" any more — the picture is drawn
+/// instead, and a bubble under a picture that says a picture is there is one thing described twice.
+///
+/// The placeholder stays for every other reader of the same text, which is what makes this a property
+/// of the *question* rather than a change to `content_text`: a tool result for a model that read a
+/// file, and the answer text a text-only model is shown, still have to say it in words.
+test "a question's own text leaves the pictures out" {
+  let content = [
+    @core.Content::Image(data="AAA=", mime_type="image/png"),
+    @core.Content::Text("what is this?"),
+  ]
+  assert_eq(user_text(content), "what is this?")
+  assert_eq(content_text(content), "(image attachment)\nwhat is this?")
+  // And a question that is only a picture says nothing at all, which is what makes it draw as a
+  // picture with no bubble under it.
+  assert_eq(
+    user_text([@core.Content::Image(data="AAA=", mime_type="image/png")]),
+    "",
   )
 }
 
@@ -885,6 +980,31 @@ test "a continued turn says so" {
 }
 
 ///|
+/// **The prompt carries its pictures with it.** It is the only moment they can: the shell empties the
+/// composer in the same breath, so a host that read them from `images` afterwards would be drawing a
+/// composer that no longer has them.
+///
+/// Echoed rather than pointed at by path, and that is the same decision `core` makes about the log: the
+/// file behind a picture may be temp, may be gone, and may never have existed on the reader's machine.
+test "a prompt carries the pictures it was sent with" {
+  let json = event("user", [
+    ("text", Json::string("what is this?")),
+    ("continued", Json::boolean(false)),
+    (
+      "images",
+      Json::array([
+        image_row("image/png", "AAA="),
+        image_row("image/jpeg", "BBB="),
+      ]),
+    ),
+  ])
+  inspect(
+    json.stringify(),
+    content="{\"kind\":\"user\",\"text\":\"what is this?\",\"continued\":false,\"images\":[{\"mime\":\"image/png\",\"data\":\"AAA=\"},{\"mime\":\"image/jpeg\",\"data\":\"BBB=\"}]}",
+  )
+}
+
+///|
 /// A session says whether it holds an interrupted turn, and which question it was asked.
 ///
 /// The host draws a notice with two ways out while this is true, and continuing is what makes it
@@ -960,6 +1080,14 @@ test "a bare command word is not a prompt" {
   assert_true(command_of("/detach") is Detach(""))
   assert_true(command_of("/open") is Open(""))
   assert_true(command_of("/delete") is Delete(""))
+  // The other answer to "and the file?", and a word rather than a flag inside the other one: the two
+  // are two intentions, and a reader of a wire log can see which was asked for.
+  assert_true(command_of("/purge") is Purge(""))
+  assert_true(command_of("/purge /store/a.jsonl") is Purge("/store/a.jsonl"))
+  // The two halves of removing a project, spelled as two words for the same reason: one answer leaves
+  // the conversations on disk and the other does not, and a wire log should say which was asked for.
+  assert_true(command_of("/workspace-remove") is WorkspaceRemove(""))
+  assert_true(command_of("/workspace-delete") is WorkspaceDelete(""))
   assert_true(command_of("/rename") is Rename("", ""))
   assert_true(command_of("/key") is SaveKey(""))
   // A word that is not a command at all is still a prompt: a reader may well type `/foo` meaning it.
@@ -1176,6 +1304,57 @@ test "new-in keeps the path whole, and a bare one is not a prompt" {
 }
 
 ///|
+/// "New session" carries the project the reader is looking at, and the two new-session words do not
+/// get in each other's way.
+///
+/// **This is the bug the window had.** The middle column lists *one* project while the shell knew only
+/// the project of the session on screen, so `/new` with no payload created the session in the old
+/// project — and the window, following `currentPath`, moved its own selection back there. The payload
+/// is what fixes it: the reader's project crosses with the click, the same way the web UI's row has
+/// always carried `data-new`. The bare form stays, and means "where the session on screen is".
+///
+/// The near-miss worth pinning is the pair: `/new-in /x` must not be read as `/new` with the project
+/// `-in /x`, and `-` is not a space, so it cannot be — but that is exactly the kind of assumption a
+/// test is for.
+test "new-session names its project, and is not confused with new-in" {
+  assert_true(command_of("/new") is NewSession(""))
+  assert_true(command_of("/new /Users/me/src") is NewSession("/Users/me/src"))
+  // A path is a path here too: a directory called `my work` is an ordinary thing to have.
+  assert_true(
+    command_of("/new /Users/me/my work/wei")
+    is NewSession("/Users/me/my work/wei"),
+  )
+  // The other word keeps its own meaning: this one adds a workspace, and its payload is not shifted
+  // by the new parse sitting next to it.
+  assert_true(command_of("/new-in /Users/me/src") is NewIn("/Users/me/src"))
+  // And the word alone is a command rather than prose — the rule that keeps a truncated command from
+  // being billed for as a question.
+  assert_true(command_of("explain /new to me") is Prompt("explain /new to me"))
+}
+
+///|
+/// A project's path crosses whole, spaces and all — the same rule a chosen folder follows.
+///
+/// The two words differ only in the answer to "and the conversations?", so they share this: neither
+/// splits its argument, and `/workspaces` (the plural, which is what somebody will type) is still an
+/// ordinary message rather than a command that silently does something.
+test "the two ways to remove a project keep the path whole" {
+  assert_true(
+    command_of("/workspace-remove /Users/me/src")
+    is WorkspaceRemove("/Users/me/src"),
+  )
+  assert_true(
+    command_of("/workspace-delete /Users/me/my work/wei")
+    is WorkspaceDelete("/Users/me/my work/wei"),
+  )
+  // A path with a trailing separator is the chooser's spelling, not a different project.
+  assert_true(
+    command_of("/workspace-remove /tmp/x/") is WorkspaceRemove("/tmp/x/"),
+  )
+  assert_true(command_of("/workspaces") is Prompt("/workspaces"))
+}
+
+///|
 /// Stop reaches the command that is running, and reaches it once.
 ///
 /// This is the difference between a stop that works and a stop that looks like it works: the `aborting`
@@ -1270,17 +1449,25 @@ fn rows_of(turns : Int, fill? : Int = 10) -> Array[Json] {
   let mut n = 0
   for turn in 0..<turns {
     n += 1
-    rows.push(Json::object(Map([
-      ("kind", Json::string("user")),
-      ("id", Json::string("h-\{n}")),
-      ("text", Json::string("question \{turn}")),
-    ])))
+    rows.push(
+      Json::object(
+        Map([
+          ("kind", Json::string("user")),
+          ("id", Json::string("h-\{n}")),
+          ("text", Json::string("question \{turn}")),
+        ]),
+      ),
+    )
     n += 1
-    rows.push(Json::object(Map([
-      ("kind", Json::string("reply")),
-      ("id", Json::string("h-\{n}")),
-      ("text", Json::string("x".repeat(fill))),
-    ])))
+    rows.push(
+      Json::object(
+        Map([
+          ("kind", Json::string("reply")),
+          ("id", Json::string("h-\{n}")),
+          ("text", Json::string("x".repeat(fill))),
+        ]),
+      ),
+    )
   }
   rows
 }
@@ -1328,7 +1515,10 @@ test "the page before a cursor ends where the cursor is" {
   let (fourth, fourth_oldest, none) = page_of(rows, third_oldest, 3, 1_000_000)
   assert_eq(ids_of(fourth), ["h-1", "h-2"])
   assert_eq(fourth_oldest, "h-1")
-  assert_true(none == false, msg="that was the first row, so there is no page before it")
+  assert_true(
+    none == false,
+    msg="that was the first row, so there is no page before it",
+  )
   assert_true(first.length() > 0)
 }
 
@@ -1342,9 +1532,9 @@ test "a page is never empty, however small the budget" {
   assert_eq(ids_of(page), ["h-7", "h-8"])
   assert_eq(oldest, "h-7")
   assert_true(more)
-  // And a session that *is* one page long is returned whole, budget or no budget: this is the path
-  // every ordinary session takes, and it must not be able to come back empty.
-  let (all, first, none) = page_of(rows_of(2), "", 6, 1)
+  // And a short session with a real budget is ONE page — which is the path every ordinary session
+  // takes, and the reason this feature does not engage at all for them.
+  let (all, first, none) = page_of(rows_of(2), "", 6, 262144)
   assert_eq(ids_of(all), ["h-1", "h-2", "h-3", "h-4"])
   assert_eq(first, "h-1")
   assert_true(none == false)
@@ -1375,7 +1565,12 @@ test "a page always starts on a question" {
 /// A cursor this session does not have — a stale request, or a session rewritten under the host — is
 /// answered with the newest page rather than with nothing.
 test "an unknown cursor is answered with the newest page" {
-  let (page, oldest, more) = page_of(rows_of(5), "h-does-not-exist", 2, 1_000_000)
+  let (page, oldest, more) = page_of(
+    rows_of(5),
+    "h-does-not-exist",
+    2,
+    1_000_000,
+  )
   assert_eq(oldest, "h-7")
   assert_true(more)
   assert_eq(ids_of(page), ["h-7", "h-8", "h-9", "h-10"])
