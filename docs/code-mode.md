@@ -68,7 +68,8 @@ edit_text(text, old, new)           // -> String          old 必须恰好出现
 | 项 | 做法 |
 |---|---|
 | staging | 会话级的临时目录 `<home>/.wei/scratch/<session-id>/`，**在工作区之外**（实测 `/tmp` 也能跑，依赖从全局 cache 解析） |
-| 编译产物 | `--target-dir` 指向同一个目录，所以工作区的 `_build` 不受影响 |
+| 编译产物 | `--target-dir` 指向 staging 下的 `target/` 子目录，所以工作区的 `_build` 不受影响 |
+| target 为什么多一层 | `moon run <file> --target-dir X` 实际用的是 `X/<文件名>`，不是 `X`。直接给 staging 目录，等于要求把 `<stage>/script.mbtx` 当目录，而它就是源文件，`moon` 会拒绝（`target directory ... exists and is not a directory`）。多一层把源文件和构建目录分开 |
 | 热编译 | **复用同一个目录就是缓存**（实测冷 0.27–0.35s、热 0.03s）。不需要 openseek 的 157 行 build cache |
 | cwd | 工作区根目录，相对路径才能落到项目上 |
 | 执行 | `@process.collect_output_merged` 起 `moon run --target native <staged>`；错误与输出都在返回值里 |

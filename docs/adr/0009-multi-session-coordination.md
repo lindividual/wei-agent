@@ -3,8 +3,9 @@
 - **状态**：已采纳（并记录一个已知缺口）
 - **日期**：2026-09-19
 - **相关**：`docs/macos-pitfalls.md`（多实例那条）、`macos/README.md`（「浏览 ≠ 打开」、每会话一份转录）、
-  `core/tools.mbt`（`Concurrency`）、`core/tool_plan.mbt`、`agent/driver.mbt`（`run_tools`）、
+  `core/tools.mbt`（`Concurrency`）、`agent/driver.mbt`（`run_tools`）、
   `core/jobs.mbt`（`~/.wei/jobs.json` 是全局的）
+  · **`core/tool_plan.mbt` 已删（2026-09-19）**，见下面「顺手记下来的那件事」
 
 ## 背景
 
@@ -91,16 +92,38 @@ lead 的 —— 他们的修法是让子 agent **直接写文件系统**，不�
 真要修的话，最小形状**不是**这套登记表，而是**每会话一个锁文件**（`flock` 或 `O_EXCL`，内容写 pid）——
 它比「一目录登记表」更小、更对症，因为目标只有「互斥」而没有「发现」。触发条件建议是：真的撞上一次。
 
-另一件顺手记下来的：`core/tool_plan.mbt` 的注释说并发安全性「Decided from the arguments, not the tool
+### 顺手记下来的那件事：已经删了（2026-09-19）
+
+（原本这里记的是：）`core/tool_plan.mbt` 的注释说并发安全性「Decided from the arguments, not the tool
 name：reading two different files is safe, reading and writing the same file is not」，但
 `agent/driver.mbt` 的 `run_tools` 实际填的是 `tool.concurrency is Safe`（**工具级静态标志**）。
-也就是说「从参数判」这个意图**写了注释、没有实现**。它是 B/E 的前置件，也是 P2 唯一必须新写的东西；
-同一个改动还会让 `[read, bash, read]` 这种批次的调度变好。
+也就是说「从参数判」这个意图**写了注释、没有实现**。
+
+**处理方式是删，不是接上。** 量出来的事实：生产代码里对这个模块的唯一引用是
+`ignore(@core.plan_shape(plans))`——注释自己写着 “The shape is not used to reorder execution today”，
+而 `plan_segments` 从来没有被调用过。`run_tools` 的文档注释更直接地说 segmentation “is applied for its
+ordering guarantee”——**顺序其实只来自那个 `for` 循环**。于是删掉：`core/tool_plan.mbt`（76 行）、
+`core/tool_plan_test.mbt`（88 行）、`run_tools` 里 15 行填充代码、`core/tool_test.mbt` 里两条测试，
+并把那段谎话注释改成实情。
+
+为什么是删而不是接上：触发条件（本 ADR 自己写的）是「真的撞上一次」，而不是「将来也许要并发」。
+而留着它的代价比 164 行大——它让读者以为调度在运行。这也正是上面那个实例登记表的同一条理由，
+**同一份 ADR 里已经写过一次**。
+
+**删除暴露出来的两件事**（都记下来，没有跟着删）：
+
+1. **`ToolDef.concurrency` 现在没有读者了。** 它仍然携带真实信息（`read` / `glob` / `note` 是 `Safe`，
+   `bash` / `write` / `edit` / `script` 是 `Exclusive`），所以保留，但把注释改成说实话：**已声明、
+   未被查询**。若将来真要并发执行器，这就是它要读的东西；在那之前它是一份诚实的分类，而不是一个
+   假装在调度的模块。
+2. **`builtin_tool(name)`（单数查找）现在只剩测试在用。** 唯一的生产调用点就在被删的那段里。
+   保留（`pub`，且 3 个测试文件用它），但它现在是一条只在测试里有读者的 API。
 
 ## 什么时候回头看这份 ADR
 
-- 读者**真的撞上**两个会话写同一个文件、且丢了改动 → 做 P2（路径级事实），并顺手把 `tool_plan` 的
-  参数级判定补上（见上）。
+- 读者**真的撞上**两个会话写同一个文件、且丢了改动 → 做 P2（路径级事实）。**注意：**
+  那时要写的是一个新的判定（从参数算的路径级安全），**不是**复活 `tool_plan`：被删掉的那个是从
+  工具名算的，而 P2 要的正是这个仓库还没做过的那一半。
 - 要做**跨进程沟通**（已声明的方向）→ 那时设计 socket 协议，presence/活性从连接来，并顺手定
   「同一会话跨进程互斥」怎么做（锁文件 vs 协议内声明）。
 - 一个会话开始**经常**要等另一个的测试/迁移 → 先看 F（idle 通知）够不够，不要直接跳到编排。

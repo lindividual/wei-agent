@@ -63,6 +63,10 @@ async fn run_script(probe : Probe, cwd : String) -> (Int, String) {
   }
   let dir = @fs.tmpdir(prefix="wei-scriptcheck")
   let path = "\{dir}/script.mbtx"
+  // `moon` turns `--target-dir X` into `X/<basename of the file>`, so the build
+  // directory must not be the one holding the source: sampling `dir` here and in
+  // `run_script` is what keeps this check honest about the real staging layout.
+  let target = "\{dir}/target"
   @fs.write_file(
     path,
     @utf8.encode(
@@ -70,7 +74,7 @@ async fn run_script(probe : Probe, cwd : String) -> (Int, String) {
     ),
   )
   let argv : Array[String] = [
-    "run", "--target", "native", path, "--target-dir", dir,
+    "run", "--target", "native", path, "--target-dir", target,
   ]
   for arg in probe.args {
     argv.push(arg)

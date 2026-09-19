@@ -1,6 +1,6 @@
 # ADR-0010：会话分叉是「复制一个新文件」；花费从分叉点起算
 
-- **状态**：已采纳（**尚未实现**；本 ADR 记的是决定与验收标准）
+- **状态**：已采纳，**已实现**（2026-09-19。验收标准的覆盖情况见文末「实现状态」）
 - **日期**：2026-09-19
 - **相关**：`docs/adr/0009-multi-session-coordination.md`（同会话两个 writer 会 fork 日志；这里刻意做了那个
   操作的一种受控版本）、`core/session_entry.mbt`（`SessionHeader.parent_session`）、
@@ -191,3 +191,27 @@
 | 9 | 子能真发一条消息跑通，**第一次请求不被拒** | 真机 |
 | 10 | 删掉父之后子仍能打开 | 真机 |
 | 11 | 失败路径（父文件被外部删掉 / 写不进去）：`say_error` + 不切走 + 不留半截行 | `moon test` + 真机 |
+
+## 实现状态（追加于 2026-09-19，本 ADR 从头到尾读完一遍之后）
+
+**这个决定已经落地了**，所以上面那张表的每一行现在都有归宿 —— 不再是「待实现的标准」，而是「去哪看」：
+
+| # | 在哪 |
+|---|---|
+| 1 | `core/session_fork_test.mbt`「a fork gets a new identity and keeps its parent's directory」、「the copied entries keep their ids and their order」、「the fork marker and the name are appended」 |
+| 2 | 同文件「a fork of an interrupted session does not open with an interrupted turn」 |
+| 3 | 同文件「a fork has spent nothing…」、「spending in a fork is the fork's own」、「the parent's spending is not in the fork」 |
+| 4 | 同文件「the name is the prefix and the parent's name, verbatim」；端到端在 `macos/appffi/app_wbtest.mbt`「a fork's file says where it came from, and names itself after the parent」 |
+| 5 | 同文件「a fork of a fork starts from its own marker」 |
+| 6 | `moon test` 那半在 `app_wbtest.mbt`「forking a session with nothing in it is refused, and writes nothing」；`swift test` 那半在 `WeiModelTests` 的按钮禁用 |
+| 7–10 | **真机项，仍未自动验证**（这条是这份 ADR 里唯一还欠着的一半） |
+| 11 | `app_wbtest.mbt`「a fork that cannot be written says so, and leaves nothing half-done」 |
+
+**为什么 11 是最后才有的**：它一直写在表里，而下面没有东西 —— 不是因为没写测试，而是因为
+**失败无法被表达**。`@platform.write_session` 当时返回 `Unit`，一封写失败就 raise 出去；而 `fork` 在到达
+那一行之前，还会先在 `label_of` 的 `path_exists` 里撞上另一个 raise（`@fs.exists` 在 ENOTDIR 时抛而不答
+`false`）。两个都改掉之后，第 11 条才第一次可测。经过和结论记在
+`docs/adr/0011-decision-and-emission-are-separate.md` 的决策 7。
+
+**7–10 为什么仍然是真机项**：它们问的是「窗口做了什么」——多出一行、子被选中、父还在跑、删掉父之后
+子仍能打开。这些没有一个能在这里断言，因为 `macos/appffi` 不做窗口。

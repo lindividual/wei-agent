@@ -1,0 +1,22 @@
+{"kind":"ready","session":"/store/s.jsonl","model":"DeepSeek V4 Flash (deepseek-v4-flash)","cwd":"/tmp","key":"DEEPSEEK_API_KEY"}
+{"kind":"session","session":"/store/s.jsonl","cwd":"/tmp","model":"DeepSeek V4 Flash (deepseek-v4-flash)","interrupted":false,"interrupted_prompt":""}
+{"kind":"elsewhere","session":"/store/other.jsonl","path":"/store/other.jsonl","outcome":"finished"}
+{"kind":"history","session":"/store/s.jsonl","rows":[{"kind":"user","id":"h-1","text":"wire fixture","complete":true,"blocks":null,"name":"","detail":"","output":"","error":false,"images":[],"skill":null}],"oldest":"h-1","has_more":false}
+{"kind":"earlier","session":"/store/s.jsonl","rows":[{"kind":"user","id":"h-1","text":"wire fixture","complete":true,"blocks":null,"name":"","detail":"","output":"","error":false,"images":[],"skill":null}],"oldest":"h-1","has_more":false}
+{"kind":"sessions","workspaces":[{"cwd":"/tmp","label":"tmp","current":true,"sessions":[{"path":"/store/s.jsonl","id":"s1","label":"wire fixture","modified":1756000000000,"current":true,"running":false}]}]}
+{"kind":"deleted","session":"/store/s.jsonl","path":"/store/s.jsonl","label":"the reader's name","restorable":true}
+{"kind":"blocks","session":"/store/s.jsonl","id":"reply-1-1","from":0,"blocks":[{"t":"h","level":2,"spans":[{"t":"text","text":"Heading"}]},{"t":"p","spans":[{"t":"text","text":"with "},{"t":"code","text":"code"}]}]}
+{"kind":"settings","key":"environment","env":true,"saved":false,"mode":"code","path":"/tmp/settings.json","skills":[],"instructions":"Run the tests with moon test.","instructions_source":"saved","limits":{"rounds":{"value":"200","source":"default"},"cost":{"value":"1","source":"default"},"seconds":{"value":"1800","source":"default"}}}
+{"kind":"user","session":"/store/s.jsonl","text":"what is this?","continued":false,"images":[]}
+{"kind":"reply","session":"/store/s.jsonl","id":"reply-1","delta":"hello"}
+{"kind":"thinking","session":"/store/s.jsonl","id":"think-1","delta":"let me think"}
+{"kind":"images","session":"/store/s.jsonl","items":[{"path":"/tmp/shot.png","mime":"image/png","data":"AAA="}],"can_send":true}
+{"kind":"usage","session":"/store/s.jsonl","turns":3,"total":5500,"input":1200,"output":300,"cache_read":4000,"cache_write":0,"reasoning":0,"prompt":2000,"context":3000,"context_source":"provider","overhead":1300,"window":128000,"compact_soon":false,"cost":"0.000263","cost_input":"0.000168","cost_output":"0.000084","cost_cache_read":"0.000011","cost_cache_write":"0.000000","cache_hit":"77"}
+{"kind":"models","session":"/store/s.jsonl","items":[{"id":"deepseek-v4-flash","label":"DeepSeek V4 Flash","vision":true,"prices":{"input":"0.14","output":"0.28","cached":"0.0028"}},{"id":"deepseek-flash","label":"DeepSeek V4.1 Flash","vision":true,"prices":{"input":"0.30","output":"1.20","cached":"0.0060"}},{"id":"deepseek-v4-pro","label":"DeepSeek V4 Pro","vision":false,"prices":{"input":"1.32","output":"3.96","cached":"0.0440"}}],"current":"deepseek-v4-flash","unit":"US dollars per million tokens — in · out · cached"}
+{"kind":"think","session":"/store/s.jsonl","items":[{"id":"off","label":"Off","detail":"fastest and cheapest; answers may be shallower","default":false},{"id":"low","label":"Low","detail":"thinks briefly; a sooner first word","default":false},{"id":"high","label":"High","detail":"thinks before answering","default":true},{"id":"max","label":"Max","detail":"thinks longest; slowest and dearest","default":false}],"current":"high"}
+{"kind":"jobs","items":[{"id":"bash-1","kind":"bash","label":"npm run dev","status":"running","age_ms":2000,"pids":[4242],"session":"/store/s.jsonl"}]}
+{"kind":"tool","session":"/store/s.jsonl","id":"tool-1","name":"bash","detail":"ls","done":true,"output":"a.txt","error":false}
+{"kind":"status","session":"/store/s.jsonl","text":"thinking…"}
+{"kind":"note","session":"/store/s.jsonl","text":"they asked for a parser","name":"context compacted"}
+{"kind":"end","session":"/store/s.jsonl","text":"","calls":19,"tools":3,"cost":"0.000000"}
+{"kind":"error","session":"/store/s.jsonl","text":"the turn failed: connection reset"}

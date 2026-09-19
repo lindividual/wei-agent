@@ -3,6 +3,9 @@
 - **状态**：已采纳
 - **日期**：2026-09-13
 - **相关**：`ui/requests.mbt`、`ui/requests_wbtest.mbt`、`ui/main.mbt`、`server/http.mbt`
+  · **同一条原则在主线那一侧的第二次应用：ADR-0011**（决定与发射分开；`Shell::of(World)` 是那边
+  的测试入口）。本 ADR 里「interface 就是测试面」这个判断，后来的代价是：它只在 Web 那一侧做了，
+  而 macOS 那一侧（现在唯一在投放的前端）直到 ADR-0011 才有等价物。
 
 ## 背景
 

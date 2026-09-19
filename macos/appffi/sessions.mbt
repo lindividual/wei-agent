@@ -785,13 +785,21 @@ fn Shell::say_history(
   path : String,
   session : @core.Session,
 ) -> Unit {
-  self.emit(
-    session_event(
-      path,
-      "history",
-      page_fields(
-        page_of(history_rows(session), "", page_max_turns(), page_max_bytes()),
-      ),
+  self.emit(history_event(path, session))
+}
+
+///|
+/// The whole transcript as one event, from the session rather than from the shell.
+///
+/// Split out for the reason the others are — the field names are the contract with the host — and for
+/// one more: this is the event the fixture file pins, and a kind the host must decode cannot be the one
+/// kind built inline where nothing can call it.
+fn history_event(path : String, session : @core.Session) -> Json {
+  session_event(
+    path,
+    "history",
+    page_fields(
+      page_of(history_rows(session), "", page_max_turns(), page_max_bytes()),
     ),
   )
 }
@@ -808,18 +816,21 @@ fn Shell::say_earlier(
   session : @core.Session,
   before : String,
 ) -> Unit {
-  self.emit(
-    session_event(
-      path,
-      "earlier",
-      page_fields(
-        page_of(
-          history_rows(session),
-          before,
-          page_max_turns(),
-          page_max_bytes(),
-        ),
-      ),
+  self.emit(earlier_event(path, session, before))
+}
+
+///|
+/// The page before one the host already has, from the session rather than from the shell.
+fn earlier_event(
+  path : String,
+  session : @core.Session,
+  before : String,
+) -> Json {
+  session_event(
+    path,
+    "earlier",
+    page_fields(
+      page_of(history_rows(session), before, page_max_turns(), page_max_bytes()),
     ),
   )
 }

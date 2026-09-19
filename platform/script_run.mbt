@@ -10,6 +10,13 @@
 ///
 /// It lives outside the workspace because a script must not leave `_build`
 /// artifacts, temp files, or a stray `.mbtx` in the project it is working on.
+///
+/// The build goes in a `target` subdirectory rather than in the staging
+/// directory itself. `moon run <file> --target-dir X` does not use `X`: it uses
+/// `X/<basename of file>`. Pointing it at the staging directory asks for
+/// `<stage>/script.mbtx` as a directory while `<stage>/script.mbtx` is the source
+/// file, and `moon` refuses ("target directory ... exists and is not a
+/// directory"). One extra level keeps the source and the build dir apart.
 
 ///|
 /// How long a script may run before it is killed, in milliseconds.
@@ -92,6 +99,10 @@ pub async fn run_script(arguments : Json, cwd : String) -> @core.ToolOutput {
   // One file name per workspace: the body changes between calls, the path does
   // not, which is what keeps the compiled packages warm.
   let path = "\{dir}/script.mbtx"
+  // `moon` appends the source file's name to this, so the real build directory
+  // is `<dir>/target/script.mbtx`. It has to not be `<dir>/script.mbtx`: that is
+  // the source file.
+  let target = "\{dir}/target"
   // `recursive=true` does not mean "tolerate an existing directory": it throws
   // on one. The directory existing is the normal case from the second call on.
   if !@fs.exists(dir) {
@@ -109,7 +120,7 @@ pub async fn run_script(arguments : Json, cwd : String) -> @core.ToolOutput {
   // The bundle's args come from this tool's own `args` array; a script sees them
   // as argv after its own name.
   let argv : Array[String] = [
-    "run", "--target", "native", path, "--target-dir", dir,
+    "run", "--target", "native", path, "--target-dir", target,
   ]
   for arg in @core.arg_strings(arguments, "args") {
     argv.push(arg)

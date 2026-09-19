@@ -1,6 +1,7 @@
 # ADR-0011：事件的决定与发射分开，壳的出口是一个值；`Shell` 由「已读到的事实」组装
 
-- **状态**：已采纳（**第一步已实现，方法体迁移未完成**；本 ADR 记的是决定与剩余工作）
+- **状态**：已采纳，**决策 1–7 已实现**；剩下约 48 个 `Shell::` 方法体仍直接做真 IO，那部分未迁移
+  （见文末「已知缺口」）
 - **日期**：2026-09-19
 - **相关**：`macos/appffi/app.mbt`、`macos/appffi/sessions.mbt`、`macos/appffi/settings.mbt`、
   `macos/appffi/ffi.mbt`、`macos/appffi/host_stub.c`、`macos/appffi/app_wbtest.mbt`、
