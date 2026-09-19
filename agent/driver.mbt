@@ -951,11 +951,15 @@ async fn compact_if_needed(
 ///|
 /// Execute every tool call from one assistant message, appending each result.
 ///
-/// Calls run in the order the model asked for them. The scheduler's segmentation
-/// is applied for its ordering guarantee, but the calls are executed one at a
-/// time: with 88.7% of real batches being a single call, concurrency would add
-/// machinery for a case that rarely arises. The segmentation is still worth
-/// having, because it is what a future concurrent executor would consult.
+/// **Calls run one at a time, in the order the model asked for them.** That used to be a `for` loop
+/// around a paragraph about a scheduler: the doc said the segmentation was "applied for its ordering
+/// guarantee" while `plan_segments` was never called — the only thing computed was a debug shape, and
+/// it was passed to `ignore`. So the order here comes from the loop and not from any policy, which is
+/// the honest description and also the reason the module went away.
+///
+/// Serial execution is still the right default and the reason has not changed: 88.7% of real batches
+/// hold a single call, so a rolling pool would add machinery for a case that barely occurs. If it ever
+/// does occur, that is when a policy gets written — against a caller that wants it.
 async fn run_tools(
   ctx : AgentContext,
   session : @core.Session,
@@ -969,22 +973,6 @@ async fn run_tools(
   if calls.is_empty() {
     return (session, 0)
   }
-  let plans : Array[@core.ToolCallPlan] = []
-  for block in calls {
-    let name = match block {
-      @core.ToolCall(name~, ..) => name
-      _ => ""
-    }
-    let safe = match @core.builtin_tool(name) {
-      Some(tool) => tool.concurrency is @core.Safe
-      None => false
-    }
-    plans.push({ name, is_concurrency_safe: safe, })
-  }
-  // The shape is not used to reorder execution today; computing it keeps the
-  // policy exercised and would be the input to a parallel executor.
-  ignore(@core.plan_shape(plans))
-
   let mut current = session
   let mut executed = 0
   for block in calls {

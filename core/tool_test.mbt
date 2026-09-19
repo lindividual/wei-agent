@@ -38,11 +38,14 @@ test "every upstream tool has a counterpart here" {
   assert_eq(names.join(","), "bash,read,write,edit,glob,grep,note,script")
 }
 
-// ── Scheduling policy ──────────────────────────────────────────────────────
+// ── Which tools are read-only ──────────────────────────────────────────────
 
 ///|
-/// The read-only tools may overlap; the ones that touch the world may not. This
-/// is the whole basis for the scheduler's segmenting.
+/// The read-only tools may overlap; the ones that touch the world may not.
+///
+/// Kept as a fact about each tool rather than as a scheduler's input: nothing consults it today (there
+/// is no scheduler — see `run_tools`), and a classification that is *true* is worth declaring even
+/// while nothing reads it. What was not worth keeping is the module that claimed to schedule on it.
 test "only read-only tools are concurrency safe" {
   for tool in builtin_tools() {
     let expected = match tool.name {
@@ -52,28 +55,4 @@ test "only read-only tools are concurrency safe" {
     }
     assert_eq(tool.concurrency, expected, msg="concurrency of \{tool.name}")
   }
-}
-
-///|
-/// A batch of read-only calls collapses into one segment; anything else presents
-/// a barrier. Checked through the real tool definitions rather than synthetic
-/// plans, so the policy and the scheduler stay in agreement.
-test "a read-only batch from real tools is one segment" {
-  let calls : Array[ToolCallPlan] = [
-    { name: "read", is_concurrency_safe: true, },
-    { name: "grep", is_concurrency_safe: true, },
-    { name: "glob", is_concurrency_safe: true, },
-  ]
-  assert_eq(plan_shape(calls), "PPP")
-}
-
-///|
-test "a mixed batch from real tools keeps the barrier" {
-  let calls : Array[ToolCallPlan] = [
-    { name: "read", is_concurrency_safe: true, },
-    { name: "bash", is_concurrency_safe: false, },
-    { name: "write", is_concurrency_safe: false, },
-    { name: "read", is_concurrency_safe: true, },
-  ]
-  assert_eq(plan_shape(calls), "PEEP")
 }

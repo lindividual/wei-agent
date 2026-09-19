@@ -17,7 +17,13 @@
 /// read-only ones are read-only unconditionally, neither earns its keep.
 
 ///|
-/// How a call may be scheduled relative to others in the same batch.
+/// Whether a tool only reads, so that two calls to it could be in flight together.
+///
+/// **Declared but not consulted.** There is no scheduler: `run_tools` runs every call in the order the
+/// model asked for, and this classification is not part of that decision (see `core/tool_test.mbt`).
+/// It is here because it is a true fact about each tool — `read`, `glob` and `note` touch nothing
+/// outside the session, and `bash`, `write`, `edit` and `script` do — and because whoever writes a
+/// concurrent executor will want it. What is *not* here is a module that claims to schedule on it.
 pub(all) enum Concurrency {
   /// May run alongside other safe calls.
   Safe

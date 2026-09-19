@@ -67,6 +67,27 @@ struct Composer: View {
     /// chain, and the field kept its text. Owning the state is what makes the send path correct by
     /// construction, and it is why nothing above this view needs to see the draft at all (ADR-0007).
     @State private var draft = ""
+    /// What each session's box held when the reader last left it, by session path.
+    ///
+    /// **The draft is per session, and it was per window.** `draft` is this view's own state — correct,
+    /// for the reason above — but a `@State` belongs to the view's *position* in the tree rather than to
+    /// what the view is drawing. Switching sessions swaps the conversation and the transcript and leaves
+    /// this view exactly where it was, so whatever had been typed came along to the next session, and the
+    /// question could be sent into a conversation it was not written for. Nothing was drawn wrong; the
+    /// box simply outlived what it was about.
+    ///
+    /// **A stash rather than `.id(client.currentPath)`.** Both isolate; only one remembers. An id that
+    /// changes makes SwiftUI throw the view away, which empties the box on the way out *and* on the way
+    /// back — and a reader who starts a sentence, glances at another session and returns would find it
+    /// gone. Remembering is the same call the transcript already made: `ShellClient` keeps a conversation
+    /// per session precisely so that coming back finds what was there, and a half-written message is no
+    /// different a thing to come back to.
+    ///
+    /// Written when a session is *left* rather than on every keystroke: while a session is on screen the
+    /// box is the truth about its draft, and a dictionary write per character would be a second copy of
+    /// it that nothing reads until the next switch. Bounded by the sessions visited in this run, and the
+    /// same lifetime the transcripts have.
+    @State private var parkedDrafts: [String: String] = [:]
     let enabled: Bool
     /// Called after a message has gone out. It is a closure because the caller owns the scroll
     /// behaviour, and it is safe to be a closure because it carries no state: what it does is tell a
@@ -144,6 +165,14 @@ struct Composer: View {
         // `/skill:de` offers one skill, and the reader who was on row four of the whole list is now on
         // nothing at all.
         .onChange(of: draft) { _, _ in picked = 0 }
+        // The box is per session: put down what this one holds and pick up what the next one was holding.
+        // See `parkedDrafts`. The two halves are one handler and not two, because split across an
+        // `onChange(of: draft)` they would race over "which session does this text belong to" — and the
+        // wrong answer there is the whole bug, coming back by another route.
+        .onChange(of: client.currentPath) { previous, current in
+            if !previous.isEmpty { parkedDrafts[previous] = draft }
+            draft = parkedDrafts[current] ?? ""
+        }
         // One column for the card and the line under it, capped and centred. The cap is what makes
         // this read as a card floating over the conversation rather than a bar across the bottom of
         // the window: the same arrangement the web UI uses (its composer is `clamp(680, 64%, 920)`
