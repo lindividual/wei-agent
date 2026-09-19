@@ -2,7 +2,8 @@
 
 - **状态**：已采纳
 - **日期**：2026-09-15
-- **相关**：`core/code_mode.mbt`、`core/system_prompt.mbt`、`platform/tools.mbt`、`platform/jobs.mbt`、`platform/fs.mbt`、`core/settings.mbt`、`html/settings.mbt`
+- **相关**：`core/code_mode.mbt`、`core/system_prompt.mbt`、`platform/tools.mbt`、`platform/jobs.mbt`、`platform/fs.mbt`、`core/settings.mbt`（设置面板的渲染在 `macos/WeiShell/Sources/WeiShell/SettingsView.swift`；
+  原 `html/settings.mbt` 已删）
   · **ADR-0009 的追加（2026-09-19）**：这份决定与 `core/tool_plan.mbt` 是**二选一**的，而这份决定赢了 ——
   「一个动词 + 模型在一次调用里自己组合」取代了「多个动词 + 壳来调度这一批」。那个模块因此已删。
 

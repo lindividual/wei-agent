@@ -1,7 +1,7 @@
 # 用本地小模型做「工具输出压缩 + 上下文压缩」——方案调研
 
 > **2026-09-19 更新：已经跑过一轮测量，结论要改。**
-> 见 `spikelocalsum/`（含 README 与可复跑的脚本）。三条实测结果推翻了下面第 2 条的排序：
+> 见 `docs/native-compression-spike.md`（spike 目录本身已删，脚本不再可复跑）。三条实测结果推翻了下面第 2 条的排序：
 >
 > 1. **账单差异几乎全来自「裁剪边界放在哪」，而不是「裁什么」。** 裁剪动作完全相同的四行，
 >    只是 `recent_window` 不同，是 $8.01 / $9.06 / $12.51 / $13.67（现状），**差 1.7 倍**。
@@ -16,7 +16,7 @@
 > 另一个要记的负结果：**完全重复的工具结果只占 1.1%**，所以「同工具同参数」这类纯规则无可拓。
 > 本机（Mac14,2 / M2 / 8GB / region 中国）的 Apple Foundation Models 不可用
 > （`deviceNotEligible`，`OS_ELIGIBILITY_DOMAIN_FOUNDATION_MODELS` 因 `DEVICE_REGION_CODE` 不通过），
-> 所以 `spikelocalsum/afm/` 只验证到「流程跑通、能干净地报告设备不支持」，
+> 所以当年的 `afm/` 工具只验证到「流程跑通、能干净地报告设备不支持」，
 > **模型质量与延迟在本机没有数据**——而那正是决定成败的那个数。
 
 **结论先行。**
@@ -158,7 +158,7 @@ DeepSeek 的前缀缓存按**请求 messages 数组的字节前缀**命中。这
 
 | 方式 | 接入成本 | 上下文/能力 | 备注 |
 |---|---|---|---|
-| **① 本地 OpenAI 兼容 server**（Ollama / llama.cpp `llama-server` / LM Studio） | **最低**。`--base-url` 已存在（`ui/cli.mbt`，默认 `https://api.deepseek.com`），复用 `platform/http.mbt` + `request_model` | 取决于模型，可到 32k+ | 用户自己装 server；对测试极友好——`agent/driver_test.mbt` 的 `with_fake_model` 就是同一套 |
+| **① 本地 OpenAI 兼容 server**（Ollama / llama.cpp `llama-server` / LM Studio） | **最低**。`DEEPSEEK_BASE_URL` 已存在（环境变量，默认 `https://api.deepseek.com`；原先的 `--base-url` 随 `ui/` 一起删了），复用 `platform/http.mbt` + `request_model` | 取决于模型，可到 32k+ | 用户自己装 server；对测试极友好——`agent/driver_test.mbt` 的 `with_fake_model` 就是同一套 |
 | **② Apple Foundation Models**（Swift 侧） | 中。要新加一条 MoonBit↔Swift 的请求/响应 FFI | 端侧 ~3B，**约 4k token 的 session 窗口**，要求 macOS 26 + Apple Intelligence | 零下载、免费、不出机器；**只够做 A/B 里的短任务**，做不了 compaction |
 | **③ MLX Swift / CoreML 在进程内** | 高。要自己做模型下载/安装/内存管理 | 可自选 0.6B–8B | 仓库已有先例：`VoiceCapture.swift` 的 `AssetInventory` 下载安装流程可以照搬 |
 | **④ llama.cpp 静态链进 native 二进制** | 最高。跨架构构建、FFI、内存 | 自选 | 单文件自包含，但会把这套本就复杂的 `macos/build-moonbit.sh` 再推高一层 |
@@ -199,7 +199,7 @@ DeepSeek 的前缀缓存按**请求 messages 数组的字节前缀**命中。这
 ## 7. 推荐路线（分阶段，每阶段有验收标准）
 
 **阶段 0（不接模型）**
-- 基线已经量完 (见 `spikelocalsum/README.md`)：工具输出占 54.4%、思考 44.4%；瘦身免费拿走 57%，
+- 基线已经量完 (见 `docs/native-compression-spike.md`)：工具输出占 54.4%、思考 44.4%；瘦身免费拿走 57%，
   剩下 90.9% 是工具输出；其中 48.6% 在 4KB 阈值以下（模型唯一纯新增的部分）。
 - 「同工具同参数、文件 hash 未变」这类可证明已死的冗余**只占 1.1%**——这条不用再图了。
 - 真正值得做的第一件免费事：**`recent_window: 20 → 2`（`advance_step: 8 → 1`），值 $4.61/13.67。**
@@ -210,14 +210,14 @@ DeepSeek 的前缀缓存按**请求 messages 数组的字节前缀**命中。这
 **阶段 1（离线，本地模型只读语料）**
 - **阻塞点：先要有一台能跑模型的机器。** 本机 Apple Foundation Models 不可用
   （`deviceNotEligible`，region 不通过），所以现在是「工具建好了、数据没有」。
-  两条路：换一台符合条件的 Mac（macOS 26.4+、Apple Intelligence 已开）跑 `spikelocalsum/afm/`，
+  两条路：换一台符合条件的 Mac（macOS 26.4+、Apple Intelligence 已开）跑那套 `afm/` 工具（已删，见 git 历史），
   或者先用方式 ①（本地 OpenAI 兼容 server）把同样的问题答一遍——`score.py` 对两者一视同仁。
 - 在回放语料上量三个数：**压缩比、事实召回、延迟**（外加同一输入重跑是否逐字一致——
   稳定是能否落盘冻结的前提，`afm/Harness.swift` 已内置 `--repeat`）。
 - 验收：事实召回 100%（路径/命令/错误行）；延迟低到能进工具路径，否则就是后台队列。
 
 **阶段 2（实时，写时压缩）**
-- 顺序按 `spikelocalsum/` 的实测调整：**先**做阶段 0 那两件不用模型的事（$4.61 + $2.29），
+- 顺序按那次 spike 的实测调整：**先**做阶段 0 那两件不用模型的事（$4.61 + $2.29），
   **然后**才让模型接手 4KB 以下那 48.6%——因为模型只能从 $6.77 走到 $5.92，而一个窗口参数就值 $4.61。
 - 触发条件：只在结果 > 1KB 时触发（4KB 以下才是模型纯新增的部分）；摘要 + keep_ranges 作为
   `custom` entry 落盘，`trim` 优先用；设置面板加开关，默认关。

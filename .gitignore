@@ -8,12 +8,12 @@ target
 # `moon info` output. Generated, and nothing here is consumed as a library.
 pkg.generated.mbti
 
-# 方案C 的 spike 记录（已弃用，仅存档）
-spike-native/
-
-# markdown 跨 C 边界的开销测量（已弃用，仅存档）：结论是 `md/` 直接在 MoonBit 里调用，
-# 不走 C 边界，所以这个测量回答的问题最终设计不问。
-mdspike/
+# 三个 spike 目录已经删掉（2026-09-19）：
+#   spike-native/   只剩一个 .bak，方法 C 的残留
+#   mdspike/        markdown 跨 C 边界的开销测量 —— 结论是 `md/` 直接在 MoonBit 里调用，
+#                   这个测量最终回答的是一个设计不再问的问题
+#   spikelocalsum/  本地模型压缩工具输出的测量（172MB，含 20 个 tracked 脚本）——
+#                   结论保留在 `docs/native-compression-spike.md`
 
 # SwiftPM 的构建产物，以及 `macos/build-moonbit.sh` 生成的 MoonBit 归档
 macos/WeiShell/.build/

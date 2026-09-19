@@ -1,8 +1,0 @@
-import {
-  "moonbitlang/core/encoding/utf8",
-  "moonbitlang/core/json",
-}
-
-supported_targets = "+native"
-
-pkgtype(kind: "executable")

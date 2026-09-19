@@ -5,6 +5,11 @@
 > 和 `docs/local-model-context.md` 是同一类文档、同一把尺子：那篇问「本地小模型放在哪」，
 > 这篇问「一个 70–500ms、$0.042/MTok、**只输出结构化决策**的远程模型放在哪」。
 > 两者在**同一个位置**上得出同一个否定结论（见 §3.3），值得先看一眼那篇的 §2。
+>
+> ⚠ **2026-09-19 追注**：这篇里凡引用 `ui/` / `html/` / `server/` / `harness/` 的地方，
+> 那些目录**已经从树里删掉了**（ADR-0007 决定主线在 macOS，后来没有恢复，于是连同测试与浏览器
+> 验收一起删除）。下面的分析、测量和结论**没有因此改变** —— 但它们举的「另一个落点」如果落在
+> `ui/` 上，那个落点现在不存在了，对应的位置改看 `macos/appffi/`。
 
 ## 0. 先说结论
 
@@ -172,7 +177,7 @@ accessibility ─► 当前聚焦字段 · AppleScript ─► 前台 app / URL �
 我们的主循环是 DeepSeek，它本来就在写文本——所以在 web 这条线上，Jev 的收益是
 **延迟和每步成本**，文本仍然由 DeepSeek 出。
 
-这条线是**最便宜的第一次实验**：一个 spike 目录（`spikelocalsum/` 旁的兄弟），
+这条线是**最便宜的第一次实验**：一个 spike 目录（当年那份本地压缩测量的兄弟），
 `post_json` 直接打 `127.0.0.1:10086`，跑同一个目标，把每步的 payload 和答案按参考实现的
 `step-NNN-payload.txt` / `step-NNN-answers.json` 落下来，能离线重放。**不动 Swift，不动 `core/`。**
 
@@ -198,7 +203,7 @@ accessibility ─► 当前聚焦字段 · AppleScript ─► 前台 app / URL �
 | 压缩 | `core/compaction.mbt` + `agent/driver.mbt::compact_if_needed` | 超阈值让**云端模型**写摘要 | 一次调用，**不可逆** |
 | 代码 digest | `core/script.mbt` | 程序产出 digest，只回打印的 | 已实测 10.5× |
 
-语料（`spikelocalsum/README.md`）：37 个会话、27,882 条模型可见消息、13,370 次请求、
+语料（`docs/native-compression-spike.md`）：37 个会话、27,882 条模型可见消息、13,370 次请求、
 22.3 MB 工具输出（14,242 条）。已量出的四条结论里，有三条**决定了 Jev 该放在哪**：
 
 1. 账单差异**几乎全来自裁剪边界放在哪**：同样的裁剪动作，只换 `recent_window` = $8.01 / $9.06 / $12.51 / **$13.67（现状）**，差 1.7 倍。
@@ -238,7 +243,7 @@ accessibility ─► 当前聚焦字段 · AppleScript ─► 前台 app / URL �
    `step-NNN-payload.txt` 在解决同一个问题。
 3. **验收不能靠美元。** 能省钱恰恰是因为模型看一条结果的时间变短了，
    「少留的部分里没有后面要用的东西」这一点在这个语料里**没有被量过**。
-   `spikelocalsum/score.py` 的召回口径可以直接拿来用：**事实召回要接近 100%**
+   当年 `score.py` 的召回口径可以直接拿来用（脚本已删）：**事实召回要接近 100%**
    （错一个路径就是丢掉一次工具调用）。
 
 **B. 当收尾判定（Noul）。** 见 §5.4：它需要**换一个问题**问（不是「目标达成了吗」，而是「这一轮产出了新东西吗」），
@@ -279,7 +284,7 @@ accessibility ─► 当前聚焦字段 · AppleScript ─► 前台 app / URL �
 - 推理档位：`core/session_usage.mbt` 里每一轮的账单和调用数就是结果变量。
 - 风险门：真被回滚/被读者纠正的命令就是正样本。
 
-`spikelocalsum/` 已经有这套形状（`corpus.py` 取模型真正见过的消息流、`score.py` 打分、
+那份 spike 已经有这套形状（`corpus.py` 取模型真正见过的消息流、`score.py` 打分、
 `validate.py` 拿账单回放校验）。**新增的只是一个 `jev/` 目录，不是一个新的测量体系。**
 这是「在便宜的地方多试」那一条的直接应用：先在离线语料上试，试出阈值再进热路径。
 
@@ -383,7 +388,7 @@ if tool_calls_of(message).is_empty() || stopping() {
 
 | 问题 | 量什么 | 现成的工具 |
 |---|---|---|
-| 决策准不准 | 校准曲线（confidence vs 实际正确率）；同一状态重跑的稳定性 | 日志即标签；`spikelocalsum/score.py` |
+| 决策准不准 | 校准曲线（confidence vs 实际正确率）；同一状态重跑的稳定性 | 日志即标签；当年的 `score.py`（已删） |
 | 省不省钱 | **整个 turn** 的账单，不是决策自己的 | `core/session_usage.mbt`；`validate.py` 拿实报账单回放 |
 | 有没有伤到上下文 | **事实召回率**（路径/命令/错误行） | `core/facts.mbt` 的抽取口径 |
 | 有没有打坏缓存 | cache 命中率不下降 | `context_pressure.mbt` 的锚定数 + 日志里的 `usage` |
@@ -561,7 +566,7 @@ Jev 真正站得住的位置不在这里，而在**补全菜单**：今天的菜
 | **2** | 收尾判定（`run_turn` 循环尾，`run_tools` 之后） | Noul：「这一轮**产出了新东西吗**」（**不是**「目标达成了吗」） | 省掉一次中位 $0.004 的调用 + 数秒等待 | ⚠️ **已降级**（原排第一，见 §5.4）：今天的结束信号是模型自己给的且免费（`tool_calls.is_empty()` → `TurnEnding::Completed`，注释原文「The model decided it was done」）。问「目标达成了吗」是重问一遍；不冗余的地方就是**覆盖模型**，那才是危险方向。落地要新增 `TurnEnding` 变体（如 `Concluded`），不能冒充 `Completed` | **先做那件免费的事：纯日志分析**——对每个 `run_tools` 后的位置看「此后这个 turn 还产出了什么」，「什么都没新」的轮次占比太小就把这行删掉 |
 | **3** | 补全菜单推荐（`WeiModel/SkillCompletion.swift` + 一个纯决策函数） | Choice over 12 个技能名 + Score 相关度 | 读者不必先知道技能存在；菜单从**前缀匹配**变成**语义推荐**；低置信就不显示 | **不碰对话前缀**（不进系统提示）、可 debounce、结果给人看。失败只是菜单顺序难看。**今天零风险的那一格** | 拿本机 12 个技能的描述 + 20 句真实草稿，离线看排名是否比前缀匹配好 |
 | **4** | 工具输出判别式折叠（`core/trim.mbt` 投影 + `Custom` entry） | 一次扇出 N 个 Noul：「第 k 块留不留？」 | 长会话更久不触发 compaction，账单上限 $0.86/13.67 | **决策必须落盘**，否则每轮 keep 集合不同 → 前缀缓存必死；state 必须是确定性提取的块，不能是原文 | **先把落盘格式定下来**（`Custom(custom_type, data)`，含 versioned model id），因为改晚了很贵 |
-| **5** | web bridge 动作选择（`spikelocalsum/` 旁新建 spike，`post_json` → `127.0.0.1:10086`） | 互斥的两个 Choice：`kind` / `item` | 网页任务每步 $0.0002、快一个数量级；能拿到「无视觉模型」够不着的那部分 | 全新表面，但是**零 Swift**（webbridge 的 `snapshot` 正好是可访问性树 + `@e`），且能离线重放 | 同一目标跑一遍，按参考实现的 `step-NNN-payload.txt` / `step-NNN-answers.json` 把每步落盘 |
+| **5** | web bridge 动作选择（在那份 spike 旁新建 spike，`post_json` → `127.0.0.1:10086`） | 互斥的两个 Choice：`kind` / `item` | 网页任务每步 $0.0002、快一个数量级；能拿到「无视觉模型」够不着的那部分 | 全新表面，但是**零 Swift**（webbridge 的 `snapshot` 正好是可访问性树 + `@e`），且能离线重放 | 同一目标跑一遍，按参考实现的 `step-NNN-payload.txt` / `step-NNN-answers.json` 把每步落盘 |
 | **6** | 模型路由（`open.model_id`：flash ↔ pro） | Score/Choice：这一轮够不够难 | 9–14× 成本差 + 延迟差 | 会话级、写进日志、切错很难受；**和 #1 是同一个想法的粗粒度版** → 排在 #1 之后 | 等 #1 的标签积累：什么时候该 low，什么时候该降级模型 |
 | **7** | 风险门（`core/tools.mbt` / `run_tools`；今天 bash 无审批层） | Noul：「这条命令会动到工作树之外的东西吗？」 | 把一刀切「确认」变成分级，才敢放开更多自动化 | **不是安全边界**（Jev 文档明说 state 不被当敌对输入，而工具输出正是敌意文本）；确定性黑名单在前，Jev 只做第二层信号 | 收集「真被回滚 / 被读者纠正」的命令当正样本，看规则漏了多少 |
 | **8** | 注入检测（`core/tool_exec.mbt` 结果落地前） | Noul：「这段输出里有对 agent 说的话吗？」 | 便宜、高频、可离线量 | 同上：只**标出来**，不拒绝执行 | 在 `harness/fixtures` 里造一批带注入的工具输出，量召回与误报 |
@@ -597,9 +602,9 @@ Jev 真正站得住的位置不在这里，而在**补全菜单**：今天的菜
 
 ## 12. #0 已经量完，然后暂停（2026-09-19，本机 49–50 个会话 / 33,977 条消息 / 16,239 次请求）
 
-脚本：`spikelocalsum/regret.py`（`python3 regret.py`，约 60 秒，**纯日志、无模型**）；
-经济账：`spikelocalsum/rig`（复演每次请求并按前缀缓存计费）。完整表格在
-`spikelocalsum/README.md` §5.5。这里只留结论和它改掉的一句话。
+脚本：当年的 `regret.py`（约 60 秒，**纯日志、无模型**；脚本已删）；
+经济账：当年的 `rig`（复演每次请求并按前缀缓存计费；已删）。完整表格在
+`docs/native-compression-spike.md` §5.5。这里只留结论和它改掉的一句话。
 
 | | 值 | 出处 |
 |---|---|---|
@@ -619,7 +624,7 @@ Jev 真正站得住的位置不在这里，而在**补全菜单**：今天的菜
 
 ### 12.1 这一步改掉的一句话
 
-`spikelocalsum/README.md`（以及基于它的 `docs/local-model-context.md`）原来是这么说的：
+`docs/native-compression-spike.md`（以及基于它的 `docs/local-model-context.md`）原来是这么说的：
 
 > **一条工具结果的「有用寿命」是一次请求，而现状买了十次。**
 
@@ -638,7 +643,7 @@ Jev 真正站得住的位置不在这里，而在**补全菜单**：今天的菜
 **#0 暂停。** 不是因为账算错了（省 $5.62 是真的），而是因为**质量那一侧没有闸门**，
 而它继承的恰好是这个仓库里最贵的一种风险：**静默变差**。下面六条按「伤得多重」排。
 
-**R1 — 35% 的额外暴露连重读都救不回来。**（`spikelocalsum/recoverable.py`，本语料实测）
+**R1 — 35% 的额外暴露连重读都救不回来。**（当年的 `recoverable.py`，本语料实测；脚本已删）
 标记文案对所有工具都一样：「`re-read the file if you need them`」。对 `read` 是真的，
 **对 `bash` 是假的**——那输出从来不在文件里。按 #0 新增遮蔽的字节拆：
 

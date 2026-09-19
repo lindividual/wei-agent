@@ -235,8 +235,11 @@ val refuse_project_removal(named, loads) -> String?      // 3 句
 （`fork` / `discard` / `save_key`），以及 `Prompt`——它会 spawn 一个真 turn，而 `with_task_group`
 会等它，所以那条路故意不在测试里。要盖住它们，得把 IO 也变成值（Effect 列表）。
 
-**`Command` 在 `core` 里没有。** `ui/commands.mbt` 和 `macos/appffi` 各有一份，斜杠命令的解析两处各写
-一遍。这不只是重复：它卡住的是「Web 版能不能删」——只要一边独占着那份语义，删它就是删功能。
+**`Command` 在 `core` 里没有 —— 但原来的理由（「Web 版能不能删」）随 Web UI 一起消失了。**
+`ui/commands.mbt` 和 `macos/appffi` 曾各有一份、斜杠命令的解析两处各写一遍，而那份重复卡住的是
+「删掉 Web 版会不会同时删掉功能」。现在 `ui/` 已删（ADR-0007 追加二），所以这是一条纯内部重构：
+把一个 `priv enum Command` 从 `macos/appffi` 挪到 `core`，好处是解析能被 `core` 的测试覆盖，不再是
+「删一边就丢一半语义」。仍然值得做，但不再是阻塞别的决定的那件事。
 
 ## 什么时候回头看这份 ADR
 
