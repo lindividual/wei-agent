@@ -15,8 +15,8 @@ You can browse and install extra skills here:
 - In the toplevel directory, there is a `moon.mod` file listing module
   metadata.
 
-- **The native macOS shell is the main front end**; `ui/` (the web UI) is paused
-  (see `docs/adr/0007-macos-is-the-main-front-end.md`). Work in `macos/` splits
+- **The native macOS shell is the main front end**; `ui/` (the web UI) is paused.
+  Work in `macos/` splits
   into a MoonBit side (`macos/appffi/`, built into `macos/vendor/libwei.a` by
   `macos/build-moonbit.sh`) and a Swift side (`macos/WeiShell/`). Facts about the
   conversation belong in the MoonBit side; facts about the window belong in the

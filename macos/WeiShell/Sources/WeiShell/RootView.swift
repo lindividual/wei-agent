@@ -1201,7 +1201,7 @@ private struct UnpaintedSelection: NSViewRepresentable {
 /// SwiftUI has no equivalent to offer. `confirmationDialog`'s builders take views, but the dialog is a
 /// list of buttons — nothing else in it arrives — and `dialogSuppressionToggle` is a different question
 /// ("do not ask me again"). So this is AppKit, and it is the platform *dialog* rather than a platform
-/// view: the same category as the menu bar and the pasteboard in ADR-0008, and SwiftUI's own alerts are
+/// view: the same category as the menu bar and the pasteboard, and SwiftUI's own alerts are
 /// NSAlerts underneath. The tokens are not involved — the platform draws this whole thing, title bar
 /// included — which is the same reason the system's own "Delete Note?" needs no design system.
 @MainActor

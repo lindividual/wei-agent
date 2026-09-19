@@ -144,7 +144,7 @@ v1 选 native 的理由：**收益的大头（`check`/`test`/`search`）不需�
 | `platform/scripts/*.mbtx`（新） | 四个预写脚本本体（可单测：能编译、返回形状稳定） |
 | `platform/script_run.mbt`（新） | staging 目录、拼 import+预置库+主体、起 `moon run`、收输出、realpath 越界检查、清理 |
 | `platform/tools.mbt` | `"script" => run_script(...)` |
-| `macos/appffi/` | 转写里显示 `label` 与 `name`/`source`（`ui/` 已删，见 ADR-0007） |
+| `macos/appffi/` | 转写里显示 `label` 与 `name`/`source`（`ui/` 已删） |
 | `README.mbt.md` | 「已知限制」补：与 `bash` 同级信任、工作区边界、没有 moon 时的行为 |
 
 单测：工具 schema（`name`/`source` 二选一）；预置库字符串含全部 6 个函数名（防漂移）；

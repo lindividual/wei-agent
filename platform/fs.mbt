@@ -193,8 +193,8 @@ fn utf8_cut(bytes : Bytes, limit : Int) -> Int {
 /// volume it is on has gone — and every one of this program's sixty-odd callers uses this as a
 /// predicate, not as a question that can fail. A raise out of `label_of` decides what to call a session;
 /// a raise out of `fork` happens *before* the write it was supposed to guard, which is how a failure path
-/// that was written down and reviewed (`docs/adr/0010-session-forking.md`, criterion 11) turned out to be
-/// unreachable: the crash came first.
+/// that was written down and reviewed (a fork that cannot be written says so and leaves nothing
+/// half-done) turned out to be unreachable: the crash came first.
 ///
 /// "Cannot tell" is answered `no`, which is the right answer for all of them. `label_of` falls back from
 /// a file's first question to the session's id; `fork` refuses; `save_key` says the store is not there.

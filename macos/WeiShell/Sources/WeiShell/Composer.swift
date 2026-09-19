@@ -65,7 +65,7 @@ struct Composer: View {
     /// `onKeyPress` handler is installed by an earlier `body`, so a closure handed down captures the
     /// `draft` of *that* body — it read an empty string, cleared a binding that was no longer on the
     /// chain, and the field kept its text. Owning the state is what makes the send path correct by
-    /// construction, and it is why nothing above this view needs to see the draft at all (ADR-0007).
+    /// construction, and it is why nothing above this view needs to see the draft at all.
     @State private var draft = ""
     /// What each session's box held when the reader last left it, by session path.
     ///

@@ -1173,7 +1173,8 @@ fn Shell::say_deleted(
 /// off a file that is not there to put back.
 async fn Shell::discard(self : Shell, path : String, purge~ : Bool) -> Unit {
   // The four facts, read here and decided in one pure place. Each of the four sentences below was
-  // written into a method no test could call — ADR-0003's failure mode, in the file that reports it.
+  // written into a method no test could call — a failure mode this codebase has had before, in the
+  // file that reports it.
   let d : Deletion = {
     path,
     busy: match self.open_of(path) {
@@ -1269,7 +1270,7 @@ priv struct Deletion {
 ///
 /// **Four sentences, and not one of them was tested.** They are the whole of what a reader gets when
 /// a delete does not go through, and they were written into a method nobody could call — which is the
-/// failure ADR-0003 named and fixed on the web side ("five of six refusal messages existed only in the
+/// failure this project has fixed once before ("five of six refusal messages existed only in the
 /// one file with no tests"), and which had quietly happened again here.
 ///
 /// The order is the order of the reader's surprise: nothing named, a turn, a job, a file somebody else
@@ -2023,7 +2024,7 @@ async fn Shell::fork(self : Shell) -> Unit {
   // failure a reader can act on and the one this path had nothing to say about: `write_session` returned
   // `Unit`, so a failed write raised out of here instead. By then nothing had been told to the host, so
   // the error is the only new fact — no list to re-send, no session to switch to, no half row, which is
-  // the whole of what criterion 11 of `docs/adr/0010-session-forking.md` asks for.
+  // everything a fork that cannot be written owes the reader.
   if !@platform.write_session(path, @core.session_file_text(header, entries)) {
     self.say_error("could not write the fork to \{path}")
     return

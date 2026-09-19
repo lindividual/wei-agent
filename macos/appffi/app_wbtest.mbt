@@ -2797,8 +2797,8 @@ async test "no debug log means no file" {
 //
 // Twenty-odd sentences in this package tell a reader why a command did not happen. They are the
 // whole of what a failed command gives back — no error code, no state to inspect, just a line of
-// prose — and until this section, almost none of them had a test. ADR-0003 names this exact failure
-// mode and fixed it on the web side; it had quietly grown back on this one.
+// prose — and until this section, almost none of them had a test. This project has fixed that failure
+// mode once before, elsewhere; it had quietly grown back here.
 //
 // They are pure once the facts are handed in, which is the only reason they can be checked at all.
 
@@ -2967,7 +2967,7 @@ test "every project refusal names a reason" {
 //
 // `fork` is the first operation in this program that *produces* a session file rather than extending
 // one, which makes it the first that can leave a file looking complete and holding half a
-// conversation. ADR-0010 wrote eleven acceptance criteria around it; these are the ones that are about
+// conversation. Eleven acceptance criteria were written for it; these are the ones that are about
 // the shell — the rest are `core`'s, and live in `core/session_fork_test.mbt`.
 
 ///|
@@ -3031,7 +3031,7 @@ async test "forking a session with nothing in it is refused, and writes nothing"
 ///|
 /// A fork copies the parent's history into a file of its own, and tells the host **afterwards**.
 ///
-/// The order is the whole of the first half of ADR-0010's criterion 11 — "先写完再报" — and it is proved
+/// The order is the whole of what "先写完再报" asks for — write first, then report — and it is proved
 /// by the test below rather than here: a write that fails leaves nothing told, which is only possible if
 /// the write came first. What this asserts is that the file exists, that it says where it came from, and
 /// that the host was told about the session that was actually written.
@@ -3064,7 +3064,7 @@ async test "a fork's file says where it came from, and names itself after the pa
   for index in 0..<parent.entries.length() {
     assert_eq(loaded.entries[index].id, parent.entries[index].id)
   }
-  // ADR-0010's criterion 4, end to end: the parent's *displayed* name is its first question, and the
+  // Naming, end to end: the parent's *displayed* name is its first question, and the
   // child's is that with the literal prefix — the two rows have to be told apart in the list.
   assert_true(@platform.read_text(child).contains("(fork) refactor the parser"))
   // And the sentence says the one thing the label cannot: the two are now independent.
@@ -3081,7 +3081,7 @@ async test "a fork's file says where it came from, and names itself after the pa
 ///|
 /// **A fork whose file cannot be written says so, and switches nothing.**
 ///
-/// This is the test that pins ADR-0010's criterion 11 — "*写不进去*: `say_error` + 不切走 + 不留半截行" —
+/// This is the test that pins the write-failure requirement — "*写不进去*: `say_error` + 不切走 + 不留半截行" —
 /// and it was not possible before this change. `@platform.write_session` returned `Unit`, so a failed
 /// write raised out of `fork`: no sentence for the reader, and a raise that would have taken the command
 /// loop's task with it.

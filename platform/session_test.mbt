@@ -442,8 +442,7 @@ async test "removing a project with its sessions empties the directory" {
 ///
 /// `@fs.exists` raises an `OSError` rather than answering `false` when a component of the path is not a
 /// directory. Sixty-odd callers here use this as a predicate, and one of them decides whether a fork's
-/// write-failure path is reachable at all — it was not, because the stat crash came first
-/// (`docs/adr/0010-session-forking.md`, criterion 11).
+/// write-failure path is reachable at all — it was not, because the stat crash came first.
 ///
 /// The two inputs below are the two shapes of "cannot tell": a path *through* a regular file, and a path
 /// under a directory that is not there. Both are answered `no`.

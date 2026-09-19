@@ -44,7 +44,7 @@ pub async fn create_session(
 /// never failing — `write_text` raises, and a raise here travels out through the caller and into the
 /// command loop's task group. So the one outcome a reader needs a sentence about (a store that cannot be
 /// written: a full disk, a read-only volume, a directory that is not there) was the one outcome with no
-/// sentence, and ADR-0010's eleventh acceptance criterion — "写不进去 → `say_error` + 不切走 + 不留半截行"
+/// sentence, and the fork's own criterion for it — "写不进去 → `say_error` + 不切走 + 不留半截行"
 /// — had nothing under it. A `Bool` rather than a raise because the caller is the shell, which has a
 /// reader to tell and a row not to draw; raising would take the loop down instead of the fork.
 pub async fn write_session(path : String, text : String) -> Bool {

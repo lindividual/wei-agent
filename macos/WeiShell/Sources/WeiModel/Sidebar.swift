@@ -119,7 +119,7 @@ public func neighbourSession(rows: [SessionRow], from path: String, step: Int) -
 /// So the rule is split in two, and the split is the point. *Which project was written to last* is the
 /// shell's answer, and it is the **seed**: the first list of a run lays the column out the way the store
 /// has it. After that the window owns the order, because "the list must not rearrange itself under the
-/// reader" is a fact about this window and not about the store (ADR-0007) — and a session that has just
+/// reader" is a fact about this window and not about the store — and a session that has just
 /// been written is not a session the reader has touched.
 ///
 /// What does move is what the list has never seen: it goes to the top of its group. That is the reader's

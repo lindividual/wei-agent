@@ -8,10 +8,9 @@
 ///
 /// So the produced events go into a file. This side **generates and checks** it; the Swift side
 /// (`WeiShell/Tests/WeiShellTests/WireFixtureTests.swift`) **decodes** it. A rename that only one side
-/// made is now a build that fails on that side — which is the whole property, and the reason
-/// `docs/adr/0007-macos-is-the-main-front-end.md` had to be corrected: it claimed `wei-cli` was the
-/// second consumer of this wire. It is not (`wei-cli` prints lines and decodes nothing), so this file is
-/// what makes the seam real rather than hypothetical.
+/// made is now a build that fails on that side — which is the whole property. The second consumer had
+/// to be made rather than assumed: `wei-cli` is not one (it prints lines and decodes nothing), so this
+/// file is what makes the seam real rather than hypothetical.
 ///
 /// **One line per kind**, not per emitter: `blocks_event` and `blocks_frame_event` are two producers of
 /// one kind the host decodes, and the host's question is "can I read this kind" rather than "can I read
