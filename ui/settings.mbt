@@ -185,7 +185,10 @@ async fn render_settings_body(app : App, shown : Runner) -> String {
 async fn settings_view(app : App, shown : Runner) -> @html.SettingsView {
   let instructions = app.instructions(shown.cwd)
   {
-    model: @core.model_spec_for(shown.model_id).0.label(),
+    // The id comes along, because this panel is where a reader looks up "which string am I calling",
+    // and the id is the answer they would type (the web UI has no price columns to compare, so nothing
+    // is paying for the extra characters here).
+    model: @core.model_spec_for(shown.model_id).0.label_with_id(),
     base_url: app.base_url,
     context_window: @core.model_spec_for(shown.model_id).0.context_window,
     address: app.address,

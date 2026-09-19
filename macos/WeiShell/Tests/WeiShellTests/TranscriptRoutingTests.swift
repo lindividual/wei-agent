@@ -167,17 +167,41 @@ final class TranscriptRoutingTests: XCTestCase {
         let client = ShellClient()
         // Before anything arrives: not an error, just not up yet.
         XCTAssertEqual(client.blocked, "starting…")
+        // A shell that is starting is not a shell whose wall can be fixed from Settings, and the view
+        // asks this to decide whether to draw the button — so the two facts are asserted together.
+        XCTAssertFalse(client.missingKeyIsFixableHere)
 
         client.receive(
             #"{"kind":"ready","session":"/store/aaaa.jsonl","model":"DeepSeek V4 Flash","cwd":"/tmp","key":"missing"}"#
         )
-        XCTAssertEqual(client.blocked, "no API key — open Settings")
+        // The fact, not the instruction: the instruction is the button beside it.
+        XCTAssertEqual(client.blocked, "No API key")
+        XCTAssertTrue(client.missingKeyIsFixableHere)
 
         // And a key arrives — saving one re-sends `ready` — so the warning goes away on its own.
         client.receive(
             #"{"kind":"ready","session":"/store/aaaa.jsonl","model":"DeepSeek V4 Flash","cwd":"/tmp","key":"saved"}"#
         )
         XCTAssertNil(client.blocked)
+        XCTAssertFalse(client.missingKeyIsFixableHere)
+    }
+
+    /// **A door the window can be sent through, from a sentence the shell wrote.**
+    ///
+    /// The one control a first run has is on the status line under the composer, and it is there
+    /// because the alternative was a sentence ("open Settings") about a menu command in a window the
+    /// reader had never seen. The panel is a separate scene, so the *pane* travels through this object
+    /// and not through the view tree — which is the part that can silently stop working, hence a test.
+    func testAReaderCanBeSentToTheKeyPane() {
+        let client = ShellClient()
+        client.askForSettings(.key)
+        XCTAssertEqual(client.settingsPane, .key)
+        // A request is an event, not a state: a second press has to be visible as one, or a reader who
+        // left the panel on Turn Limits would press the button and watch nothing happen.
+        let first = client.settingsAsk
+        client.askForSettings(.instructions)
+        XCTAssertEqual(client.settingsPane, .instructions)
+        XCTAssertGreaterThan(client.settingsAsk, first)
     }
 
     /// A shell that could not start at all says that instead, and says which failure it was.

@@ -63,8 +63,11 @@ async fn main {
     ],
     system_prompt: Some("You are a coding agent. Answer concisely."),
     tools: [],
-    // Reasoning on, at the level the catalog actually supports.
-    thinking: @core.deepseek_v4_thinking_levels().resolve(Some("high")),
+    // Reasoning on, at the level this build's default is — asked of the catalog rather than written
+    // down here, so a front end and the app cannot disagree about what an unasked-for turn does.
+    thinking: @core.model_spec_for(@core.default_model_id()).0.thinking_levels.resolve(
+      Some(@core.default_thinking_level()),
+    ),
     max_tokens: None,
     temperature: None,
     // deepseek-v4-flash declares text-only input.

@@ -5,13 +5,31 @@
 /// tool cannot be added without appearing here. The wording is deliberately
 /// terse: a long list of prohibitions mostly teaches the model what not to think
 /// about.
+///
+/// The three conversation-derived sections are **parameters, not a list a caller assembles**.
+/// That is a correction: this used to take `sections : Array[String]`, and the four front ends
+/// each built their own array. Three of them added the skill catalog and the tool-change notice;
+/// the native macOS shell — the main front end — added neither, while its own comment said the
+/// catalog was in the prompt. Nothing failed, because a missing section is not an error: the
+/// model simply never learned that skills exist. Taking the inputs instead of the result makes
+/// that omission unrepresentable, and fixes the section order in one place rather than in four.
+///
+/// An empty input contributes no bytes at all, which is what keeps a workspace with no
+/// `AGENTS.md`, no skills and no mode change sending exactly the prompt it sent before these
+/// sections existed — a section that rendered its own empty heading would invalidate the prefix
+/// cache of every existing session.
 
 ///|
 pub fn build_system_prompt(
   cwd : String,
   tools : Array[ToolDef],
   mode? : ToolMode = Tools,
-  sections? : Array[String],
+  /// The workspace's own instructions (`AGENTS.md`, or the fallback from settings).
+  instructions? : String = "",
+  /// Every skill this turn may use. Empty renders no catalog, not an empty one.
+  skills? : Array[Skill] = [],
+  /// Tools that earlier calls in this conversation used and this turn does not carry.
+  stale_tools? : Array[String] = [],
 ) -> String {
   let out = StringBuilder()
   out.write_string(
@@ -23,17 +41,20 @@ pub fn build_system_prompt(
     out.write_string("- \{tool.name}: \{tool.snippet}\n")
   }
   out.write_string(how_to_work(mode))
-  // In the order given, and skipping the empty ones: a caller assembles these from whatever the
-  // session actually has, and the two callers — the turn and the context figure — must build the
-  // same prompt or the size the bar reports would be of a prompt nobody sent.
-  match sections {
-    Some(texts) =>
-      for text in texts {
-        if text != "" {
-          out.write_string("\n\{text}\n")
-        }
-      }
-    None => ()
+  // The order is deliberate and belongs here rather than to each caller. What the workspace says
+  // goes first because it is the most specific authority on how to work; the catalog next because
+  // it is the model's map of what it can read; the change notice last because it is the one thing
+  // in the prompt that became true mid-conversation, and a reader comparing the prompt to the
+  // request should find the two tool sets named where the change happened rather than buried.
+  for
+    text in [
+      instructions,
+      skill_catalog_prompt(skills),
+      tool_change_prompt(stale_tools, tools),
+    ] {
+    if text != "" {
+      out.write_string("\n\{text}\n")
+    }
   }
   out.to_string()
 }

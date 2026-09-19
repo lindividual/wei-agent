@@ -436,3 +436,32 @@ async test "removing a project with its sessions empties the directory" {
   assert_true(remove_workspace(root, "/work2") is None)
   assert_false(purge_workspace(aside))
 }
+
+///|
+/// **`path_exists` answers for every path, including the ones that cannot be asked about.**
+///
+/// `@fs.exists` raises an `OSError` rather than answering `false` when a component of the path is not a
+/// directory. Sixty-odd callers here use this as a predicate, and one of them decides whether a fork's
+/// write-failure path is reachable at all — it was not, because the stat crash came first
+/// (`docs/adr/0010-session-forking.md`, criterion 11).
+///
+/// The two inputs below are the two shapes of "cannot tell": a path *through* a regular file, and a path
+/// under a directory that is not there. Both are answered `no`.
+async test "path_exists answers false for a path it cannot even ask about" {
+  async fn probe() -> (Bool, Bool, Bool) {
+    make_dirs("_build/session_test")
+    let file = "_build/session_test/not-a-dir-\{@core.new_entry_id()}"
+    write_text(file, "this is a file")
+    // A component of the path is a regular file: `stat` fails with ENOTDIR.
+    let through_a_file = path_exists(file + "/child.jsonl")
+    // A path whose parent was never created: likewise, and this is the one a fresh store hits.
+    let missing_parent = path_exists(file + "-nowhere/deeper/still.jsonl")
+    // And the ordinary answers are unaffected.
+    let the_file_itself = path_exists(file)
+    (through_a_file, missing_parent, the_file_itself)
+  }
+  let (through_a_file, missing_parent, the_file_itself) = probe()
+  assert_false(through_a_file)
+  assert_false(missing_parent)
+  assert_true(the_file_itself)
+}

@@ -206,7 +206,7 @@ test "settings come from the latest change on the path" {
     },
   ])
   let context = session.context()
-  assert_eq(context.thinking_level, "high")
+  assert_eq(context.thinking_level, Some("high"))
   assert_eq(
     context.model,
     Some({ provider: "deepseek", model_id: "deepseek-v4-flash", }),
@@ -216,9 +216,14 @@ test "settings come from the latest change on the path" {
 }
 
 ///|
-test "thinking level defaults to off" {
+/// A log nobody has set a level in says so, rather than claiming thinking is off.
+///
+/// The distinction is the driver's to act on: it records `off` when a turn is asked to run without a
+/// level, so a session that has one means it, and a session that has none is one a default can still
+/// be applied to. `Shell::think_level` is where that happens.
+test "a log with no level records none rather than off" {
   let session = session_with([user_entry("a", None, "hi")])
-  assert_eq(session.context().thinking_level, "off")
+  assert_eq(session.context().thinking_level, None)
 }
 
 ///|

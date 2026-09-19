@@ -95,3 +95,55 @@ test "the catalog is sorted, deduplicated, and escaped" {
   let second = prompt.find("<name>zeta</name>").unwrap()
   assert_true(first < second, msg=prompt)
 }
+
+///|
+/// The catalog reaches the system prompt from the arguments, so no front end can build a prompt
+/// without deciding about it.
+///
+/// This is the regression the signature exists for. The prompt used to take a caller-assembled
+/// `sections : Array[String]`, and the four front ends each built their own: the web UI and the
+/// vim CLI passed the catalog, and the native macOS shell — the main front end — passed neither
+/// the catalog nor the tool-change notice, while a comment in the same file claimed the catalog
+/// was there. A missing section is not an error, so the model simply never learned that any skill
+/// existed: on macOS a skill could only be used by a reader who already knew its name. Taking
+/// `skills` as an argument makes the omission impossible to express, and this checks that the
+/// argument is what reaches the prompt.
+test "the catalog is a parameter of the prompt, not something a caller appends" {
+  let skills : Array[Skill] = [
+    {
+      name: "moonbit-proof",
+      description: "Use when writing proofs.",
+      path: "/s/mp/SKILL.md",
+    },
+  ]
+  let tools = tools_for_mode(ToolMode::Tools)
+  let without = build_system_prompt("/work", tools)
+  let with_catalog = build_system_prompt("/work", tools, skills~)
+  assert_eq(without.contains("<available_skills>"), false)
+  assert_true(with_catalog.contains("<available_skills>"))
+  assert_true(with_catalog.contains("moonbit-proof"))
+  // An empty list renders no catalog, not an empty one: the prompt has to stay byte-identical to
+  // what a workspace with no skills sent before this existed, or every cached prefix is invalidated.
+  assert_eq(build_system_prompt("/work", tools, skills=[]), without)
+}
+
+///|
+/// The three conversation-derived sections appear in a fixed order, and each is last-worded.
+test "the prompt places instructions, catalog and change notice in that order" {
+  let tools = tools_for_mode(ToolMode::Tools)
+  let skills : Array[Skill] = [
+    { name: "demo", description: "A demonstration.", path: "/s/demo/SKILL.md", },
+  ]
+  let prompt = build_system_prompt(
+    "/work",
+    tools,
+    instructions="## Workspace\n\nBe terse.",
+    skills~,
+    stale_tools=["exec"],
+  )
+  let at_instructions = prompt.find("## Workspace").unwrap()
+  let at_catalog = prompt.find("<available_skills>").unwrap()
+  let at_change = prompt.find("## Tools changed").unwrap()
+  assert_true(at_instructions < at_catalog)
+  assert_true(at_catalog < at_change)
+}

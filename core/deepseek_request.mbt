@@ -20,6 +20,12 @@ pub(all) enum Thinking {
 ///|
 /// One supported thinking level and the provider value it maps to. A level
 /// mapped to `None` is recognised but not available for this model.
+///
+/// `None` therefore carries two different meanings and the row says which: `off` is the level
+/// "no thinking", which every model has and which has no provider value because the request
+/// expresses it by *disabling* the `thinking` object; `minimal` on flash and `low` on pro are
+/// levels the model does not have at all. `ModelSpec::thinking_levels` is the one place that reads
+/// the difference (`model_catalog.mbt`).
 pub(all) struct ThinkingLevels {
   /// Level name → provider value, e.g. `"high"` → `"high"`, `"minimal"` → none.
   map : Map[String, String?]
@@ -28,15 +34,24 @@ pub(all) struct ThinkingLevels {
 ///|
 /// Resolve a requested level into the thinking parameters to send.
 ///
-/// An unavailable level falls back to disabled rather than being forwarded
-/// verbatim: sending an effort the model does not support is rejected by the
-/// API, whereas thinking off always works.
+/// `None`, and the name `"off"`, both mean thinking disabled — the two are the same state written
+/// two ways. The name matters as much as the absence because a level read back out of a log is a
+/// string: `agent/driver.mbt` records a turn that was never given a level as `off`, and a session
+/// resumed from that log has to send what it sent the first time.
+///
+/// Every other name is forwarded as the effort, *including a name this table maps to none*. That is
+/// upstream's own resolution (`map[level] ?? level`) and it is pinned by the recorded literal in
+/// `deepseek_request_fixtures` (`thinking_minimal`), so an unavailable level reaches the API as
+/// itself rather than being turned into something nobody asked for. A caller that must not send one
+/// asks `ModelSpec::thinking_levels` first — which is why that function exists.
 pub fn ThinkingLevels::resolve(
   self : ThinkingLevels,
   level : String?,
 ) -> Thinking {
   match level {
     None => Disabled
+    // Named rather than merely absent: a log records the off state as a level name.
+    Some("off") => Disabled
     Some(name) =>
       // upstream resolves the provider value as `map[level] ?? level`, so a level the
       // catalog maps to null falls back to the level name rather than to off.
@@ -548,6 +563,15 @@ pub(all) struct RequestDrift {
   /// Bytes from `first_changed` to the end: the part that cannot be served from the previous
   /// request's cache.
   changed_bytes : Int
+  /// Whether the previous request was made by this same turn.
+  ///
+  /// Carried because the two kinds of previous request answer different questions. Within a turn
+  /// the sequence is append-only by construction, so a rewrite there is this code's doing — a trim
+  /// boundary that moved. Across turns it is the seam between two turns, and a rewrite there is the
+  /// conversation being projected differently than it was a moment ago (a boundary released by the
+  /// messages the turn just appended, or a compaction). Both are worth knowing, and a report that
+  /// could not tell them apart would send a reader looking in the wrong place.
+  within_turn : Bool
   /// False for the first request of a turn, where there is nothing to compare against — not the
   /// same as a request that changed nothing, which is why it is carried rather than inferred from
   /// a zero.
@@ -560,6 +584,11 @@ pub(all) struct RequestDrift {
 /// The property worth having: an append-only request is read from cache in full and only its tail
 /// is billed, which is why the boundary that releases messages to trimming is quantized and why
 /// this is measured at all.
+///
+/// True across a turn boundary as well as within one, and that is the reading worth having there:
+/// the previous turn's request is served from cache up to the point the new conversation diverges,
+/// so a first request that is not append-only is a rewrite the provider will charge for from
+/// `first_changed` to the end.
 pub fn RequestDrift::appended_only(self : RequestDrift) -> Bool {
   self.comparable && self.first_changed == self.previous_messages
 }
@@ -567,11 +596,16 @@ pub fn RequestDrift::appended_only(self : RequestDrift) -> Bool {
 ///|
 /// Measure one request against the previous one.
 ///
-/// `previous` is `None` for the first request of a turn: nothing was sent yet, so everything is
-/// fresh and there is no drift to report.
+/// `previous` is `None` for a request with nothing before it to compare against: the first request
+/// of a process's first turn. A caller that keeps the last request of the previous turn and passes
+/// it here gets a comparable reading at the start of every turn after the first, which is where a
+/// trim boundary most often moves and therefore where the expensive rewrites live.
+///
+/// `within_turn` says which kind of previous request this is; see `RequestDrift::within_turn`.
 pub fn request_drift(
   previous : Array[Json]?,
   current : Array[Json],
+  within_turn? : Bool = true,
 ) -> RequestDrift {
   let sizes : Array[Int] = []
   for message in current {
@@ -589,6 +623,7 @@ pub fn request_drift(
         first_changed: 0,
         previous_messages: 0,
         changed_bytes: bytes,
+        within_turn,
         comparable: false,
       }
     Some(before) => {
@@ -608,6 +643,7 @@ pub fn request_drift(
         first_changed: first,
         previous_messages: before.length(),
         changed_bytes: changed,
+        within_turn,
         // The one case where the two requests are identical: comparable, nothing changed.
         comparable: true,
       }

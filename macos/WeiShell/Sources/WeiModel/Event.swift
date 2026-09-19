@@ -62,6 +62,17 @@ public enum ShellEvent: Decodable, Equatable {
     /// its own event because it is a fact about the session, and it arrives again after every turn:
     /// continuing the turn is what makes it false.
     case session(cwd: String, model: String, interrupted: Bool, interruptedPrompt: String)
+    /// A turn ended in a conversation that is **not** on screen.
+    ///
+    /// Its own kind rather than a flag on `session`, because `session` means "this one is now on screen"
+    /// and this side answers it by swapping transcripts. A turn finishing where the reader is not looking
+    /// is the opposite kind of fact — something to be told about, not something to be taken to — and
+    /// sending it as `session` was a window that jumped away from what the reader was reading.
+    ///
+    /// `path` is the session it happened in: the string the routing field also carries, and the one the
+    /// "show me" click hands to `/open`. `outcome` is `finished`, `failed` or `stopped`, and it is a token
+    /// rather than a sentence — the words are this side's, because it is this side that draws them.
+    case elsewhere(path: String, outcome: String)
     /// Everything in a session the host did not watch happen, as rows it can draw. Switching sessions
     /// is the only way this is sent: there are no deltas in a conversation that is already over.
     /// The newest rows of a session, and what the host needs to ask for the ones before them.
@@ -113,7 +124,7 @@ public enum ShellEvent: Decodable, Equatable {
     /// their own event because they are part of it: the shell takes them off the composer in the same
     /// breath, so an event of their own would be a second thing to keep in step with a question that
     /// may already be drawn.
-    case user(text: String, continued: Bool, images: [RowImage])
+    case user(text: String, continued: Bool, images: [RowImage], skill: SkillFrame?)
     /// Streaming answer text, under the id of the block it belongs to.
     case reply(id: String, delta: String)
     /// Streaming reasoning, same shape and a different block kind.
@@ -130,6 +141,12 @@ public enum ShellEvent: Decodable, Equatable {
     /// shell, which is the side that refuses an id it does not know, so the picker is drawn from
     /// what the shell said rather than from a list kept here.
     case models(ModelCatalog)
+    /// The thinking levels this session's model offers, and the one in force.
+    ///
+    /// A separate event from `models`, and sent alongside it, because the two lists are different
+    /// lengths: the levels belong to the model, so a menu drawn from one shared table would offer a
+    /// level the model rejects. The shell holds both facts, so the host asks rather than derives.
+    case think(ThinkLevels)
     /// The background jobs that are still running, whole. Sent on every change rather than as adds
     /// and removes, for the same reason the session list is: the shell holds the store, and a host
     /// that patched its own copy would be a second opinion about what is running.
@@ -151,13 +168,14 @@ public enum ShellEvent: Decodable, Equatable {
         case kind, session, model, cwd, key, text, id, delta
         case name, detail, done, output, calls, tools, cost
         case path, rows, workspaces, env, saved, mode, blocks, from, items, images
-        case label, restorable
+        case label, restorable, outcome
         case oldest
         case has_more
         case isError = "error"
         case canSend = "can_send"
         case interrupted, continued
         case interruptedPrompt = "interrupted_prompt"
+        case skill
     }
 
     public init(from decoder: Decoder) throws {
@@ -177,7 +195,10 @@ public enum ShellEvent: Decodable, Equatable {
                 // Absent from a shell that predates the field, and from a prompt that carried no
                 // pictures — both of which mean the same thing to the transcript: a question with
                 // no images above it.
-                images: (try fields.decodeIfPresent([RowImage].self, forKey: .images)) ?? []
+                images: (try fields.decodeIfPresent([RowImage].self, forKey: .images)) ?? [],
+                // Absent unless the prompt was a `/skill:<name>` command, which is the same fact as
+                // `nil`: a question the reader typed themselves.
+                skill: try fields.decodeIfPresent(SkillFrame.self, forKey: .skill)
             )
         case "session":
             self = .session(
@@ -190,6 +211,14 @@ public enum ShellEvent: Decodable, Equatable {
                 interruptedPrompt: (try fields.decodeIfPresent(
                     String.self, forKey: .interruptedPrompt
                 )) ?? ""
+            )
+        case "elsewhere":
+            // `outcome` is read leniently for the reason the other later fields are: a shell that grows a
+            // fourth outcome should have it shown as an unknown one, not turn the whole notice into a
+            // line this side refuses and drops.
+            self = .elsewhere(
+                path: try fields.decode(String.self, forKey: .path),
+                outcome: (try fields.decodeIfPresent(String.self, forKey: .outcome)) ?? ""
             )
         case "history":
             // Hoisted into locals rather than written inline: three `try`s inside one initializer is
@@ -221,6 +250,8 @@ public enum ShellEvent: Decodable, Equatable {
             self = .settings(try ShellSettings(from: decoder))
         case "models":
             self = .models(try ModelCatalog(from: decoder))
+        case "think":
+            self = .think(try ThinkLevels(from: decoder))
         case "jobs":
             self = .jobs(items: try fields.decode([Job].self, forKey: .items))
         case "images":

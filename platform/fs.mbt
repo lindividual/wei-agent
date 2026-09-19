@@ -186,8 +186,24 @@ fn utf8_cut(bytes : Bytes, limit : Int) -> Int {
 }
 
 ///|
+/// Whether there is something at this path.
+///
+/// **Answered for every path, including the ones that cannot be asked about.** `@fs.exists` raises an
+/// `OSError` rather than answering `false` when a component of the path is not a directory, or when the
+/// volume it is on has gone — and every one of this program's sixty-odd callers uses this as a
+/// predicate, not as a question that can fail. A raise out of `label_of` decides what to call a session;
+/// a raise out of `fork` happens *before* the write it was supposed to guard, which is how a failure path
+/// that was written down and reviewed (`docs/adr/0010-session-forking.md`, criterion 11) turned out to be
+/// unreachable: the crash came first.
+///
+/// "Cannot tell" is answered `no`, which is the right answer for all of them. `label_of` falls back from
+/// a file's first question to the session's id; `fork` refuses; `save_key` says the store is not there.
+/// Each of those is a better outcome than a task that dies, and none of them is made worse by the
+/// possibility that a file existed and could not be stat'd.
 pub async fn path_exists(path : String) -> Bool {
-  @fs.exists(path)
+  @fs.exists(path) catch {
+    _ => false
+  }
 }
 
 ///|

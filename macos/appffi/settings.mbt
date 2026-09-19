@@ -82,27 +82,57 @@ async fn Shell::say_settings(self : Shell) -> Unit {
       ),
     )
   }
-  emit(
-    event("settings", [
-      ("key", Json::string(key_source_name(resolve_key(self.settings)))),
-      // Both flags, because with both set the panel has something to explain: a key the reader
-      // saved is being overruled by the environment, and "I saved it and it still uses the old one"
-      // reads as a bug otherwise.
-      ("env", Json::boolean(env_key() != "")),
-      ("saved", Json::boolean(self.settings.saved_api_key != "")),
-      ("mode", Json::string(self.settings.tool_mode.to_string())),
-      // Shown so that a reader who would rather edit the file knows which one to edit — the honest
-      // fallback for everything the panel does not offer yet.
-      ("path", Json::string(@platform.settings_path(self.home))),
-      ("skills", Json::array(skills)),
-      ("instructions", Json::string(instructions.text)),
-      (
-        "instructions_source",
-        Json::string(instruction_source_name(instructions.source)),
-      ),
-      ("limits", limits_json(limits)),
-    ]),
+  self.emit(
+    settings_event(
+      key_source_name(resolve_key(self.settings)),
+      env_key() != "",
+      self.settings.saved_api_key != "",
+      self.settings.tool_mode,
+      @platform.settings_path(self.home),
+      skills,
+      instructions,
+      limits,
+    ),
   )
+}
+
+///|
+/// The settings event, from the facts rather than from the shell.
+///
+/// Split out for the reason the other emitters are: the field names are the contract with the host,
+/// and this one is the widest contract in the program — nine fields, none of which a test could
+/// assert while they were built inline inside an `async fn Shell::` the test cannot construct. The
+/// key's *source* crosses and its value never does, which is the rule this function is the last
+/// place to enforce.
+fn settings_event(
+  key_source : String,
+  env : Bool,
+  saved : Bool,
+  mode : @core.ToolMode,
+  path : String,
+  skills : Array[Json],
+  instructions : @core.Instructions,
+  limits : @core.Limits,
+) -> Json {
+  event("settings", [
+    ("key", Json::string(key_source)),
+    // Both flags, because with both set the panel has something to explain: a key the reader
+    // saved is being overruled by the environment, and "I saved it and it still uses the old one"
+    // reads as a bug otherwise.
+    ("env", Json::boolean(env)),
+    ("saved", Json::boolean(saved)),
+    ("mode", Json::string(mode.to_string())),
+    // Shown so that a reader who would rather edit the file knows which one to edit — the honest
+    // fallback for everything the panel does not offer yet.
+    ("path", Json::string(path)),
+    ("skills", Json::array(skills)),
+    ("instructions", Json::string(instructions.text)),
+    (
+      "instructions_source",
+      Json::string(instruction_source_name(instructions.source)),
+    ),
+    ("limits", limits_json(limits)),
+  ])
 }
 
 ///|
@@ -180,7 +210,7 @@ async fn Shell::save_key(self : Shell, key : String) -> Unit {
   let updated = @core.AppSettings::with_saved_api_key(self.settings, key)
   @platform.save_settings(self.home, updated)
   self.settings = updated
-  say_status(
+  self.say_status(
     self.current,
     if updated.saved_api_key == "" {
       "saved key cleared"
@@ -191,7 +221,7 @@ async fn Shell::save_key(self : Shell, key : String) -> Unit {
   // `ready` again, because one of the four facts it carries has just changed: this is what turns the
   // window from "no API key" back into a shell that can send. It is the same event, re-sent, rather
   // than a second event the host would have to learn to combine with it.
-  say_ready(self.shown(), key_source_name(resolve_key(self.settings)))
+  self.say_ready(self.shown(), key_source_name(resolve_key(self.settings)))
   self.say_settings()
 }
 
@@ -209,11 +239,67 @@ async fn Shell::set_mode(self : Shell, name : String) -> Unit {
   )
   @platform.save_settings(self.home, updated)
   self.settings = updated
-  say_status(
+  self.say_status(
     self.current,
     "tools: \{updated.tool_mode.to_string()} — the next turn uses them",
   )
   self.say_settings()
+}
+
+///|
+/// Put a session on another model, keeping its thinking level one the new model can run at.
+///
+/// **The whole reason this is a function rather than an assignment.** The level is per model
+/// (`ModelSpec::thinking_levels`) and it belongs to the session rather than to the model — a log
+/// records it, a fork copies it, and a new session inherits the reader's last choice — so the two can
+/// disagree, and the disagreement has a wrong answer that is easy to write: keep the level and send
+/// `reasoning_effort: low` to a model that does not have it. Settling it here means the level a
+/// session is on is always one its model has, which is what makes "keep to the levels this model
+/// offers" a rule `say_think` can rely on.
+///
+/// Nothing is written to the log: the session's model and level are recorded by the driver at the top
+/// of the next turn (`agent/driver.mbt`), which is the one place that knows a turn is being run at
+/// all. A reader who changes their mind twice before asking anything leaves no trace of either
+/// decision, which is what they should.
+fn retarget(open : Open, model_id : String) -> Unit {
+  open.model_id = model_id
+  let levels = @core.model_spec_for(model_id).0.thinking_levels
+  open.think_level = levels.in_force(Some(open.think_level))
+}
+
+///|
+/// Ask for more or less thinking on the next turn.
+///
+/// Clamped to this session's model rather than saved and disbelieved later: a level the model does
+/// not have is answered with the level that will really be used
+/// (`ThinkingLevels::in_force`), and the menu is re-said so the tick cannot be left somewhere else.
+/// The tool mode's neighbour above is the same shape of decision — a setting read when the next
+/// request is built, so changing it mid-turn is a decision about the turn after this one, which is
+/// exactly when a reader wants it.
+///
+/// Not gated on being idle, for that reason, and not persisted anywhere either: it is the session's,
+/// and the driver writes it into the session's own log at the top of the next turn.
+fn Shell::set_think_level(self : Shell, open : Open, level : String) -> Unit {
+  let wanted = level.trim().to_owned()
+  let levels = @core.model_spec_for(open.model_id).0.thinking_levels
+  let resolved = levels.in_force(Some(wanted))
+  // A word the model has not got is said out loud rather than silently obeyed as a fallback: the
+  // reader asked for something that will not happen, and the sentence is the only place that says so.
+  if wanted != resolved {
+    self.say_status(
+      open.path,
+      "\{@core.model_spec_for(open.model_id).0.label()} has no \{wanted} level — thinking stays \{resolved}",
+    )
+  } else {
+    // The tools sentence's shape, word for word, because it is the same kind of fact: a choice read
+    // when the next request is built, said in the word the reader just used.
+    self.say_status(
+      open.path,
+      "thinking: \{resolved} — the next turn uses it",
+    )
+  }
+  open.think_level = resolved
+  self.say_think(open)
 }
 
 ///|
@@ -240,7 +326,7 @@ async fn Shell::toggle_skill(self : Shell, name : String) -> Unit {
   )
   @platform.save_settings(self.home, updated)
   self.settings = updated
-  say_status(
+  self.say_status(
     self.current,
     if updated.skill_enabled(trimmed) {
       "skill \{trimmed}: on — the next turn uses it"
@@ -263,7 +349,7 @@ async fn Shell::set_instructions(self : Shell, text : String) -> Unit {
   let updated = @core.AppSettings::with_agents_md(self.settings, text)
   @platform.save_settings(self.home, updated)
   self.settings = updated
-  say_status(
+  self.say_status(
     self.current,
     if updated.agents_md == "" {
       "instructions cleared"
@@ -295,6 +381,6 @@ async fn Shell::set_limits(
   )
   @platform.save_settings(self.home, updated)
   self.settings = updated
-  say_status(self.current, "limits saved — the next turn uses them")
+  self.say_status(self.current, "limits saved — the next turn uses them")
   self.say_settings()
 }

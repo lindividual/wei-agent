@@ -15,7 +15,7 @@
 fn report_model(shown : Runner) -> String {
   let (spec, known) = @core.model_spec_for(shown.model_id)
   let current = if known {
-    "model: \{spec.label()}"
+    "model: \{spec.label_with_id()}"
   } else {
     // The log names a model this build does not have. Said plainly, because the alternative is a
     // reader wondering why the cost figures look wrong for the model they thought they chose.
@@ -50,7 +50,7 @@ async fn set_session_model(shown : Runner, id : String) -> Unit {
   shown.session = shown.session.add_entries([entry])
   shown.model_id = id
   let spec = @core.model_spec_for(id).0
-  shown.status = "model: \{spec.label()}"
+  shown.status = "model: \{spec.label_with_id()}"
   // No refresh here: the picker that shows the model and the cost and context figures beside it
   // both change, and the caller is the one that knows what to re-render. It used to take the region
   // list as a parameter, which made this function's interface wider than the work it does.

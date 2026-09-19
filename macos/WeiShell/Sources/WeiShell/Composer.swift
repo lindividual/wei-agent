@@ -102,6 +102,16 @@ struct Composer: View {
     /// Whether a drag is hovering over the card. Drawn as a highlight rather than tracked as a fact:
     /// the drop is the only thing that changes anything.
     @State private var dropping = false
+    /// Which row of the skill menu Tab would take.
+    ///
+    /// Held here rather than in the menu because the key that moves it is pressed in the *field*: the
+    /// arrows and Tab are handled by the editor, and a highlight the editor cannot reach would be a
+    /// highlight that never moves.
+    ///
+    /// It is drawn, always. A row that Tab is about to insert has to be visible before the key is
+    /// pressed — otherwise Tab is a key that does something the reader cannot see coming, which is worse
+    /// than no shortcut at all.
+    @State private var picked = 0
 
     /// Whether there is a message to send.
     ///
@@ -121,10 +131,7 @@ struct Composer: View {
             // Above the card rather than below it: the list grows upward out of the field, and it
             // never covers the text being written or the send button.
             if !skillSuggestions.isEmpty {
-                SkillSuggestions(skills: skillSuggestions) { name in
-                    draft = "/skill:\(name) "
-                    editorFocused = true
-                }
+                SkillSuggestions(skills: skillSuggestions, picked: picked) { insert($0) }
             }
             card
             StatusLine(
@@ -132,6 +139,11 @@ struct Composer: View {
                 showingUsage: $showingUsage
             )
         }
+        // A new draft is a new question, so the highlight goes back to the first row. Without this it
+        // would be left where the arrows last put it and could point at a row that is no longer there —
+        // `/skill:de` offers one skill, and the reader who was on row four of the whole list is now on
+        // nothing at all.
+        .onChange(of: draft) { _, _ in picked = 0 }
         // One column for the card and the line under it, capped and centred. The cap is what makes
         // this read as a card floating over the conversation rather than a bar across the bottom of
         // the window: the same arrangement the web UI uses (its composer is `clamp(680, 64%, 920)`
@@ -392,6 +404,18 @@ struct Composer: View {
                 cancelDictation()
                 return .handled
             }
+            // ── choosing from the menu of skills ──────────────────────────────────────────────
+            // ↑/↓ move the highlight and Tab takes it. **Both let the key go when there is no menu**,
+            // and for the arrows that is the whole reason the guard is written out: this field grows to
+            // fourteen lines, where ↑/↓ move the caret between them. A menu that is not even open taking
+            // that away is a worse bug than the one this row of handlers fixes.
+            .onKeyPress(.upArrow) { step(-1) }
+            .onKeyPress(.downArrow) { step(1) }
+            // Tab, not Return. Return already means *send* in this field — and it goes through
+            // dictation's guard, the input method's mark, and everything else `submit()` decides — so a
+            // Return that sometimes finished a command instead would be two meanings for one key. Tab
+            // meant nothing here at all (the field has no focus ring to move to), so it is free.
+            .onKeyPress(.tab) { accept() }
             // The window's own submit gesture as well, because it is the one the menu bar and every
             // other command in this app use — and it goes through the same guard, since the platform
             // can read a keystroke as a submit that this handler deliberately did not take.
@@ -400,29 +424,47 @@ struct Composer: View {
             .padding(.top, 2)
     }
 
-    /// The skills a `/skill:` at the start of the draft is offering, filtered by what has been typed.
+    /// The skills the draft is offering to finish, once it looks like a slash command being typed.
+    ///
+    /// The rule is `WeiModel.SkillCompletion`'s, and the reason it is there and not here is the reason
+    /// this is one line: which drafts count as a command, and which skills a partial one matches, is a
+    /// decision a test can run without a window. What is left for the view is where the answer comes from.
     ///
     /// Read from the settings snapshot rather than asked for: the shell already sends every skill it
     /// can see, with whether each one is switched on, so the composer needs no new wire and cannot
     /// disagree with the panel about what exists.
-    ///
-    /// Only the enabled ones. A switched-off skill is not something the reader can invoke — the
-    /// expansion refuses it and the model is never told about it — so offering it would be offering a
-    /// command that does nothing.
     private var skillSuggestions: [SkillEntry] {
-        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("/skill:") else { return [] }
-        let typed = String(trimmed.dropFirst("/skill:".count))
-        // A space ends the name: `/skill:moonbit do X` is a finished command with an argument, not a
-        // prefix still being typed.
-        guard !typed.contains(" ") else { return [] }
-        let skills = (client.settings?.skills ?? []).filter(\.enabled)
-        let matches = typed.isEmpty
-            ? skills
-            : skills.filter { $0.name.lowercased().hasPrefix(typed.lowercased()) }
-        // A single exact match is not a suggestion, it is what has already been typed.
-        if matches.count == 1, matches[0].name.lowercased() == typed.lowercased() { return [] }
-        return matches
+        SkillCompletion.matches(draft: draft, skills: client.settings?.skills ?? [])
+    }
+
+    /// Put a skill in the field, the way both the click and Tab do it.
+    ///
+    /// One function for the two ways in, so the row a reader clicks and the row Tab takes cannot come out
+    /// as different text. The space is there because an argument usually follows, and the caret ends up
+    /// where it goes — the reader does not have to add it.
+    private func insert(_ skill: SkillEntry) {
+        draft = SkillCompletion.spelling(skill) + " "
+        editorFocused = true
+    }
+
+    /// Move the highlight with an arrow key, when there is a menu to move in.
+    private func step(_ delta: Int) -> KeyPress.Result {
+        let offers = skillSuggestions
+        guard !offers.isEmpty else { return .ignored }
+        picked = SkillCompletion.move(from: picked, by: delta, count: offers.count)
+        return .handled
+    }
+
+    /// Insert the highlighted skill, when there is a menu to take it from.
+    ///
+    /// The index is clamped rather than trusted: the menu can shrink between the draw that set the
+    /// highlight and this keystroke — a skill switched off in the settings panel while `/` sits in the
+    /// field is enough — and taking a row that is no longer there has to be a no-op, not a crash.
+    private func accept() -> KeyPress.Result {
+        let offers = skillSuggestions
+        guard !offers.isEmpty else { return .ignored }
+        insert(offers[min(picked, offers.count - 1)])
+        return .handled
     }
 
     /// Send what has been typed, if there is anything and no input method is partway through a word.
@@ -510,6 +552,10 @@ struct Composer: View {
             dictate
 
             ModelPicker(client: client, enabled: enabled)
+
+            // The model, then how hard it is told to try: one sentence about the next turn, in the
+            // order a reader would say it.
+            ThinkPicker(client: client, enabled: enabled)
 
             Spacer(minLength: 8)
 
@@ -869,26 +915,37 @@ extension NSImage {
     }
 }
 
-/// The skills a `/skill:` prefix can name, as a short menu above the composer.
+/// The skills a slash command being typed can name, as a short menu above the composer.
 ///
 /// A list rather than a popover with a selection model: the reader is mid-sentence, so the cheapest
 /// thing that works is a row per name they can click, and typing the name themselves is still there
 /// for anyone who knows it. Capped, because a machine with thirty skills would otherwise push the
 /// conversation off the screen while somebody types a slash.
+///
+/// **The highlighted row is where Tab goes, and it is drawn before the key is pressed** — a shortcut
+/// whose effect is invisible until it happens is a shortcut nobody will use. The highlight follows the
+/// arrows, not the mouse: hovering over a row is not a decision, and a list that rearranged itself under
+/// a pointer crossing the card would move the row the reader was about to click. Clicking still inserts
+/// the row that was clicked — the two ways in meet in `Composer.insert`.
 private struct SkillSuggestions: View {
     let skills: [SkillEntry]
-    let choose: (String) -> Void
+    /// Which row Tab would take, as an index into this list.
+    let picked: Int
+    let choose: (SkillEntry) -> Void
 
     private static let limit = 6
 
     var body: some View {
+        // `enumerated` because the highlight is about *position*: the row that is drawn tinted and the row
+        // that Tab takes are the same number, and `ForEach` over the skills alone would leave the view
+        // counting for itself — which is how the two come apart.
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(skills.prefix(Self.limit)) { skill in
+            ForEach(Array(skills.prefix(Self.limit).enumerated()), id: \.element.id) { index, skill in
                 Button {
-                    choose(skill.name)
+                    choose(skill)
                 } label: {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text("/skill:\(skill.name)")
+                        Text(SkillCompletion.spelling(skill))
                             .font(.system(size: 11.5, weight: .medium, design: .monospaced))
                         Text(skill.description)
                             .font(.system(size: 11))
@@ -898,6 +955,10 @@ private struct SkillSuggestions: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
+                    .background(
+                        index == picked ? Color.accentColor.opacity(0.16) : .clear,
+                        in: RoundedRectangle(cornerRadius: 6)
+                    )
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -990,21 +1051,38 @@ private struct AttachmentChip: View {
 /// seen at all, and both of those are decisions about the message being written. A reader who picked
 /// a screenshot and then has to leave the window to ask whether the model can see it would attach it,
 /// switch, and come back to find the reason it was needed.
+///
+/// **The price is in the rows, and the id is not.** Both were decided by measurement rather than taste
+/// (`docs/macos-pitfalls.md` §六, the whole menu read back through the accessibility tree): the id made
+/// every row ~110 points wider and told a reader nothing about the message they are writing, while the
+/// price is the entire reason this menu exists — the pro model is nine times flash's input rate. The
+/// closed state is the name alone, which is 142 points instead of 269.
 private struct ModelPicker: View {
     @ObservedObject var client: ShellClient
     let enabled: Bool
 
     var body: some View {
         Menu {
+            // The unit, once, as a plain row: a menu item that is not a button is how a line of
+            // explanation is drawn here. The three columns below are numbers without symbols, exactly
+            // because this line has already said what they are.
+            if !client.catalog.unit.isEmpty {
+                Text(client.catalog.unit)
+            }
             ForEach(client.catalog.items) { model in
                 Button {
                     client.setModel(model.id)
                 } label: {
-                    // The vision note is in the entry that would be wrong to pick, which is where it
-                    // is read: "cannot be shown images" next to one model is a sentence a reader acts
-                    // on, and a tooltip they have to go looking for is not.
-                    Text(model.vision ? model.label : "\(model.label) — no images")
+                    // **One `Text`, padded rather than laid out.** A menu item takes a single string —
+                    // the `HStack` tried first came out as just its first fragment — so the columns are
+                    // spaces, made to line up by the shell cutting every price to the same width for
+                    // its column (`Pricing::columns`) and by `monospacedDigit` giving every digit the
+                    // same width. Measured: the three rows' price blocks are 252.4 / 252.6 / 252.8
+                    // points wide, which is equal to the eye and to the layout.
+                    Text(ModelMenuRow.text(for: model))
+                        .monospacedDigit()
                 }
+                .accessibilityLabel(ModelMenuRow.spoken(for: model))
                 .disabled(!enabled || model.id == client.catalog.current)
             }
             if !client.conversation.attachments.isEmpty {
@@ -1030,7 +1108,123 @@ private struct ModelPicker: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(!enabled || client.catalog.items.isEmpty)
-        .help("Model for the next turn")
+        // The id lives here, where a reader looking for it is asking a question rather than choosing:
+        // "which string does this session call" is answered by `/model`, and this is the same answer.
+        .help(client.catalog.currentChoice.map { "Model for the next turn: \($0.id)" } ?? "Model for the next turn")
+    }
+}
+
+/// One row of the model menu: the prices, then the name.
+///
+/// Prices first because that is what makes them line up — the names are three different widths, so a
+/// name-first row would move the numbers it is being compared against. `in`/`out`/`cached` are not
+/// spelled out per row either: the line above the rows says what the three columns are.
+private enum ModelMenuRow {
+    static func text(for model: ModelChoice) -> String {
+        let p = model.prices
+        let images = model.vision ? "" : " · no images"
+        return "\(p.input)  \(p.output)  \(p.cached)   \(model.label)\(images)"
+    }
+
+    /// The same row for a reader who cannot see it.
+    ///
+    /// **A column of bare numbers is not readable aloud.** `0.14  0.28  0.0028` has no unit, nothing
+    /// saying which number is which, and no way to tell the columns from the name — so the spoken form
+    /// says all three in words and says the one thing the trailing note stands for. It is longer than the
+    /// visual row on purpose: what the header line and the alignment carry for a reader who can see them,
+    /// this carries for one who cannot.
+    ///
+    /// **Stated as built, not as heard.** The labels are set here and the closed buttons' labels were
+    /// read back through the accessibility tree (`DeepSeek V4 Flash`, `Thinking: High`); a *popup menu
+    /// item's* label could not be read back in the environment this was written in — the menu's own
+    /// window is not reachable from the app element there — so that half is unverified.
+    static func spoken(for model: ModelChoice) -> String {
+        let p = model.prices
+        let images = model.vision ? "" : ", cannot be shown images"
+        return
+            "\(model.label), \(model.id): $\(p.input) per million tokens in, $\(p.output) out, $\(p.cached) cached\(images)"
+    }
+}
+
+/// How much thinking the next question gets.
+///
+/// Beside the model, because the two are one decision read twice: the model is *who* answers and the
+/// level is *how hard they try*, and both are decided by the message being written rather than by a
+/// preference in a panel. The level's reason to exist is the reader's own: thinking costs first-word
+/// latency and money, and the cheap question does not need any.
+///
+/// **Drawn from what the shell said, never from a list here.** The levels are per model — `low` is
+/// flash's and not the pro model's — so the set of them is a fact the side that compiles the catalog
+/// has to keep, and a host with its own table would offer a level the API rejects.
+///
+/// A `Picker` rather than a row of buttons, because the question is "which one" and not "also do
+/// this": the platform's own menu idiom marks the level in force, which is the one thing a reader
+/// checks before asking something expensive.
+private struct ThinkPicker: View {
+    @ObservedObject var client: ShellClient
+    let enabled: Bool
+
+    var body: some View {
+        Menu {
+            Picker("Thinking", selection: choice) {
+                ForEach(client.thinking.items) { level in
+                    // The sentence per level, because the words on their own do not say what is bought:
+                    // "Low" and "High" are a scale, and what a reader is choosing between is a
+                    // quicker first word and a deeper answer. Written by the shell, next to the level
+                    // it describes, so it cannot drift from the level's name.
+                    Text(level.detail.isEmpty ? level.label : "\(level.label) — \(level.detail)")
+                        .tag(level.id)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            HStack(spacing: Wei.Space.tight) {
+                // The glyph names the axis so the word does not have to: "High" alone, next to a model
+                // name, is a word with nothing to attach it to.
+                Image(systemName: "brain")
+                    .font(.system(size: Wei.Icon.inline))
+                Text(client.thinking.currentLabel)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: Wei.Icon.mark, weight: .semibold))
+            }
+            .font(Wei.Font.micro())
+            .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(!enabled || !client.thinking.isOffered)
+        // **Named for what it is, not for what it says.** Measured with the AX probe: without this the
+        // control comes out of the tree as `AXMenuButton | High`, and "High" beside a model name is a
+        // word with nothing to attach it to — VoiceOver reads a quality grade. The label is the level
+        // and the axis, in that order.
+        .accessibilityLabel(
+            client.thinking.current.isEmpty
+                ? "Thinking"
+                : "Thinking: \(client.thinking.currentLabel)"
+        )
+        // The one sentence the closed menu can carry, and the level in force is exactly what it is
+        // about: a reader who has landed on `Off` without meaning to can find out what that costs
+        // from the control that would change it.
+        .help(
+            client.thinking.currentLevel.map { level in
+                level.detail.isEmpty ? level.label : "Thinking: \(level.detail)"
+            } ?? "How much thinking the next turn gets"
+        )
+    }
+
+    /// The level in force, read from the shell and written back as a request.
+    ///
+    /// Both halves matter. Reading is what draws the tick; writing is a *request* rather than a state
+    /// change, because whether this model has that level is the shell's answer — a level it has not
+    /// got comes back as the one in force, and the menu re-reads rather than showing a click that did
+    /// not take.
+    private var choice: Binding<String> {
+        Binding(
+            get: { client.thinking.current },
+            set: { client.setThinkLevel($0) }
+        )
     }
 }
 
@@ -1044,12 +1238,45 @@ private struct ModelPicker: View {
 private struct StatusLine: View {
     @ObservedObject var client: ShellClient
     @Binding var showingUsage: Bool
+    /// Settings, from here, and the reason it is *here*
+    ///
+    /// The one wall a reader meets on a first run is drawn on this line, and up to now it was a
+    /// sentence telling them to open a menu command they have no reason to know about — in a window
+    /// they had just opened, whose sidebar was empty and whose project list was empty. A reader at
+    /// that moment has exactly one thing to do, so it is drawn as the one control on the line.
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         HStack(spacing: 8) {
             Text(summary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            // The way out, next to what it is about.
+            //
+            // **A plain button that looks like a link, not `.buttonStyle(.link)`.** That style draws
+            // the same thing, and it also *is* a link as far as the accessibility tree goes: measured,
+            // the control came out as `AXLink` with description "Open Settings" — so VoiceOver
+            // announces a link, which promises a navigation (somewhere else, or a URL) for a control
+            // that opens a window. `.plain` plus an underlined accent label is the same pixels and the
+            // honest role (`AXButton`); the measurement is in `docs/macos-pitfalls.md`.
+            //
+            // On this line — 11pt, secondary, under the card — a borderless plain label would read as
+            // more of the sentence, and the sentence is the one thing that is not a control.
+            if client.missingKeyIsFixableHere {
+                Button {
+                    // Two calls, because the two facts live in two places: which pane to show is the
+                    // panel's, and opening the window is this view's (`openSettings` is the
+                    // environment's action, not a scene's). Read by `SettingsView` on appear.
+                    client.askForSettings(.key)
+                    openSettings()
+                } label: {
+                    Text("Open Settings").underline()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(Wei.Palette.accent)
+                .help("Add an API key (⌘,)")
+            }
             Spacer(minLength: 8)
             if let usage = client.conversation.usage {
                 // The figures in the order they are read: how full the window is, what the cache

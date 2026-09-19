@@ -37,6 +37,20 @@ pub fn session_label(prefix : String) -> String {
           User(user) => {
             let text = user_text(user)
             if text != "" {
+              // **A `/skill:<name>` message is not what the reader wrote.** It is the framing the
+              // shell wrapped their words in, with the skill's whole document in the middle of it, so
+              // a label taken from it names the session after the first piece of someone else's
+              // instructions — or, worse, after nothing anyone would recognise. What the reader asked
+              // is what they added after the command; when they added nothing, it is the command.
+              match skill_expansion_parts(text) {
+                Some((name, args, _)) =>
+                  return if args == "" {
+                    one_line("/skill:\{name}", 80)
+                  } else {
+                    one_line(args, 80)
+                  }
+                None => ()
+              }
               return one_line(text, 80)
             }
           }

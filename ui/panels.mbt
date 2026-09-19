@@ -37,7 +37,7 @@ async fn App::save_jobs(self : App) -> Unit {
     return
   }
   try @platform.save_jobs(self.home, self.jobs) catch {
-    err => log("could not record background jobs: \{err}")
+    err => log("could not record background jobs: \{@core.error_text(err)}")
   } noraise {
     _ => self.saved_jobs = text
   }

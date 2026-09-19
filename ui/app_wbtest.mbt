@@ -1192,6 +1192,7 @@ test "the status line says when the cost limit stopped a turn" {
     time_limit_hit: false,
     truncated: false,
     request_drift: [],
+    last_request: [],
   }
   let text = status_text(result, false)
   assert_true(text.contains("at the $1.2500 cost limit"), msg=text)
@@ -1233,6 +1234,7 @@ test "the status line says when the time limit stopped a turn" {
     time_limit_hit: true,
     truncated: false,
     request_drift: [],
+    last_request: [],
   }
   let text = status_text(result, false)
   assert_true(text.contains("at the time limit"), msg=text)
@@ -1275,6 +1277,7 @@ test "a finished turn says nothing on the status line; its figures are on the fo
     time_limit_hit: false,
     truncated: true,
     request_drift: [],
+    last_request: [],
   }
   let text = status_text(result, false)
   assert_eq(
@@ -1289,6 +1292,29 @@ test "a finished turn says nothing on the status line; its figures are on the fo
     @html.turn_stats_of(session.context().messages),
   ).render()
   assert_true(footer.contains("model call"), msg=footer)
+}
+
+///|
+/// A retry says so on the status line, and gives the line back when the call answers.
+///
+/// Checked as a pair because the two halves are one fact about one line: the reader who is told
+/// `no answer — retrying (2 of 4)` has to be told when it is no longer true, or the turn that
+/// recovers keeps saying the model has not answered while its answer streams in underneath.
+///
+/// The counts are in the sentence for the reason the plain `working…` line has none: a reader
+/// deciding whether to keep waiting is asking whether anything is still being tried.
+test "a retry is said on the status line and taken back" {
+  assert_eq(
+    retry_status(Some({ next: 2, total: 4, }), working_status),
+    "no answer — retrying (2 of 4)",
+  )
+  // And what it goes back to is the line the caller was showing — the counts when there are any,
+  // because a reader who was watching them is the reader deciding whether to keep waiting. Passed in
+  // rather than assumed: this function is the pair, not the memory.
+  assert_eq(
+    retry_status(None, "\{working_status} 3 model call(s), 2 tool call(s)"),
+    "\{working_status} 3 model call(s), 2 tool call(s)",
+  )
 }
 
 ///|

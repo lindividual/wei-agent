@@ -82,8 +82,9 @@ public struct SessionSection: Identifiable, Equatable {
 /// Two modes, and the mode is decided by the search field rather than by a control of its own:
 ///
 /// - **Nothing typed**: the sessions of the workspace being browsed, headed by *when* they were last
-///   used. The everyday view, and time is the right axis for it — a project's conversations are otherwise
-///   an undifferentiated wall of first lines.
+///   used — with the reader's pinned ones in a bar above those headings, which is described on
+///   `pinnedFirst`. The everyday view, and time is the right axis for it: a project's conversations are
+///   otherwise an undifferentiated wall of first lines.
 /// - **Something typed**: matches from *every* workspace, headed by the project they belong to. The header
 ///   changes because the question changed: a result has to say where it came from, or finding a session in
 ///   another project leaves you opening rows you cannot place.
@@ -102,7 +103,34 @@ public func sessionSections(
         return searchSections(groups: groups, query: trimmed)
     }
     guard let group = groups.first(where: { $0.cwd == browsing }) else { return [] }
-    return timeSections(rows: group.sessions, now: now, calendar: calendar)
+    return pinnedFirst(rows: group.sessions, now: now, calendar: calendar)
+}
+
+/// The id of the pinned section. Exported because "is this the bar above the headings" is a question
+/// the view asks, and a second spelling of the string is how the two answers come to differ.
+public let pinnedSectionID = "pinned"
+
+/// The everyday view with the pinned sessions lifted out of it: **Pinned first, then the day buckets**.
+///
+/// A pinned session is *only* in the bar — it is not also in its day bucket. Showing it in both is the
+/// obvious alternative and it is the worse one: the list would then have the same row twice, and the
+/// reader who pinned something to get it out of the way of a long list would have gained a second copy
+/// of it rather than a shorter one. What the bar is *for* is the reader's ten most recent
+/// conversations staying reachable no matter what today looks like.
+///
+/// **The bar keeps the order it was handed.** The rows arrive most-recently-used first, which is the
+/// order this column is already in, so pinned sessions come out newest first without a second rule —
+/// and `pins.json` is a set of paths precisely so that this stays the only ordering rule in play.
+///
+/// Deliberately only in the everyday view: a search is a question asked of *every* project, and the
+/// answer to it is grouped by where the rows came from, not by which of them the reader keeps at hand.
+/// A pinned result would either be listed twice or be lifted out of the project heading that is the
+/// whole point of the search.
+func pinnedFirst(rows: [SessionRow], now: Date, calendar: Calendar) -> [SessionSection] {
+    let pinned = rows.filter(\.pinned)
+    let rest = timeSections(rows: rows.filter { !$0.pinned }, now: now, calendar: calendar)
+    guard !pinned.isEmpty else { return rest }
+    return [SessionSection(id: pinnedSectionID, title: "Pinned", rows: pinned)] + rest
 }
 
 /// The everyday view: one project's sessions, bucketed by recency.

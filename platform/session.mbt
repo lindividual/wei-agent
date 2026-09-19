@@ -20,8 +20,41 @@ pub async fn create_session(
   path : String,
   header : @core.SessionHeader,
 ) -> Unit {
-  make_dirs(@core.parent_of(path))
-  write_text(path, header.to_line())
+  // The result is dropped, deliberately and with a reason: a session is created empty and its header is
+  // written again by the first entry that goes in, so a header write that failed is retried by the very
+  // next append. A fork has no such second chance — its file *is* the fork — which is why `fork` checks
+  // this and this does not.
+  ignore(write_session(path, header.to_line()))
+}
+
+///|
+/// Write a whole session file in one step, creating the directory.
+///
+/// **One write, and the caller must be able to say why it is allowed to be one.** Appending is how every
+/// other writer here works (see the note at the top of this file), and it is the right shape for a log
+/// that grows: a reader either sees a line or does not. This exists for the one operation that produces
+/// a file rather than extending one — a fork — where the whole file has to appear at once, because a
+/// half-written fork is a session that looks complete and is missing a conversation.
+///
+/// It is still one `write` and not a temp-file-and-rename: a fork's content comes from a session already
+/// in memory, and the failure this guards against (a partial file that a *list* would show) is answered
+/// by the caller telling the host after this returns, not by atomicity of the write.
+///
+/// **It reports whether it worked, and it has to.** This used to return `Unit`, which is the same as
+/// never failing — `write_text` raises, and a raise here travels out through the caller and into the
+/// command loop's task group. So the one outcome a reader needs a sentence about (a store that cannot be
+/// written: a full disk, a read-only volume, a directory that is not there) was the one outcome with no
+/// sentence, and ADR-0010's eleventh acceptance criterion — "写不进去 → `say_error` + 不切走 + 不留半截行"
+/// — had nothing under it. A `Bool` rather than a raise because the caller is the shell, which has a
+/// reader to tell and a row not to draw; raising would take the loop down instead of the fork.
+pub async fn write_session(path : String, text : String) -> Bool {
+  try {
+    make_dirs(@core.parent_of(path))
+    write_text(path, text)
+    true
+  } catch {
+    _ => false
+  }
 }
 
 ///|

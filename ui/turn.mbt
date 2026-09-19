@@ -12,6 +12,37 @@
 /// switches back mid-turn is given the same picture rather than an empty exchange.
 
 ///|
+/// What the session says on its status line while the model has not answered: between model calls,
+/// and while a call is waiting to be tried again.
+///
+/// A named constant rather than a literal in more than one place, because there are more than one:
+/// the turn starts on it, the counts line is written from it, and it is what `retry_status` restores
+/// before any counts have been reported. Three copies of `"working…"` is where they drift.
+let working_status : String = "working…"
+
+///|
+/// What the status line says while a model call is waiting to be tried again, and what it goes back
+/// to when that call answers.
+///
+/// A retry is the one stretch of a turn with nothing else to watch: the model has not answered, no
+/// tool has run, no block is growing, and the counts have not moved. That silence is what a reader
+/// reads as a page that has stopped working — and this is the sentence that fills it, on the one
+/// line the page already updates for a turn that is taking minutes.
+///
+/// `None` is what the driver sends when the call comes back, and `restore` is the line the caller was
+/// showing before: the pair is one fact about one line, which is why it is one function rather than
+/// two. The line to put back is the caller's to know — it is the counts, written from the progress
+/// reports — and it is passed rather than assumed, because restoring a thinner line than the reader
+/// was watching would take the numbers away at the moment they are deciding whether to keep waiting.
+fn retry_status(attempt : @agent.RetryAttempt?, restore : String) -> String {
+  match attempt {
+    Some(pending) =>
+      "no answer — retrying (\{pending.next} of \{pending.total})"
+    None => restore
+  }
+}
+
+///|
 /// What the session says on its status line once a turn is over.
 ///
 /// Deliberately *not* the turn's figures. Those belong on the footer under the reply — model calls,
@@ -203,7 +234,7 @@ async fn run_prompt(
   let refresh_stop = async fn() {
     app.hub.broadcast(stop_patch(app.shown()).to_sse())
   }
-  status("working…")
+  status(working_status)
   refresh_sidebar()
   refresh_tasks()
   refresh_figures()
@@ -379,8 +410,28 @@ async fn run_prompt(
 
   // The counts are the cheapest possible "still alive" signal, and the one a reader
   // watches when a turn is taking minutes.
+  //
+  // The last one is kept as well as said, because a retry has to put *something* back and the counts
+  // are the most informative thing to put back: a reader who was watching "3 model call(s)" is the
+  // reader deciding whether to keep waiting, and the plain line would take the numbers away from
+  // them for the rest of the turn.
+  let mut progress_line = working_status
   let on_progress = (calls : Int, tools : Int) => {
-    status("working… \{calls} model call(s), \{tools} tool call(s)")
+    progress_line = "\{working_status} \{calls} model call(s), \{tools} tool call(s)"
+    status(progress_line)
+  }
+
+  // While a call is being retried, and back to the counts when it answers. Nothing else in the
+  // turn is said on this line during a retry, because nothing else is happening.
+  //
+  // The tasks panel is told the same sentence, because it is the same fact: a turn with a retry in it
+  // has stopped running a tool and is not yet answering, and the panel would otherwise keep naming
+  // the last tool it ran for the whole of the wait.
+  let on_retry : async (@agent.RetryAttempt?) -> Unit = attempt => {
+    let line = retry_status(attempt, progress_line)
+    runner.phase = line
+    status(line)
+    refresh_tasks()
   }
 
   // Before the prompt is built, because the catalog is part of it. Cheap after the first turn:
@@ -452,15 +503,30 @@ async fn run_prompt(
         ctx,
         text,
         @env.now().reinterpret_as_int64(),
-        thinking_level="high",
+        // The session's own level, clamped to the model it is on, and the build's default for a
+        // session that has not run yet. Written as `"high"` here until the level became something a
+        // reader can choose: a literal would have quietly overruled a choice made in the other front
+        // end, and written `high` back into the log on the way — the driver records whatever it is
+        // handed, so the override would have been permanent.
+        thinking_level=spec.thinking_levels.in_force(
+          runner.session.recorded_settings().0,
+        ),
         max_rounds=app.limits.max_rounds.value.to_int(),
         max_cost=app.limits.max_cost.value,
         max_seconds=app.limits.max_seconds.value.to_int(),
         continuing~,
+        // The last request this session sent, so this turn's first one has something to be measured
+        // against rather than being the one request per turn nothing compares.
+        previous_request=if runner.previous_request.is_empty() {
+          None
+        } else {
+          Some(runner.previous_request)
+        },
         on_delta=report,
         should_stop=() => runner.aborting.value,
         on_tool~,
         on_progress~,
+        on_retry~,
         // Every commit, not just the end of the turn. This is what makes the tokens, the cache
         // reads and the context figure move while the turn runs: each model call's numbers are in
         // the log the moment the response ends.
@@ -566,6 +632,9 @@ async fn run_prompt(
     })
     runner.session = result.session
     runner.in_flight_session = None
+    // Kept for the next turn's first request to be measured against: the seam between turns is where
+    // the trim boundary most often moves, so leaving it unmeasured hides the rewrites that cost most.
+    runner.previous_request = result.last_request
     app.hub.broadcast(
       @html.replace_node(
         @html.exchange_id(index),
@@ -589,7 +658,7 @@ async fn run_prompt(
     status(status_text(result, runner.aborting.value))
   } catch {
     err => {
-      log("turn failed: \{err}")
+      log("turn failed: \{@core.error_text(err)}")
       // The live containers are temporary. A turn that failed still wrote what it managed to
       // produce to the log, so the exchange is rebuilt from there — the same rendering a reader
       // gets on reconnect, which is now the same function the successful path uses. Leaving the
@@ -613,7 +682,7 @@ async fn run_prompt(
           ),
         ).to_scoped_sse(session),
       )
-      status("failed: \{err}")
+      status("failed: \{@core.error_text(err)}")
     }
   } noraise {
     _ => ()

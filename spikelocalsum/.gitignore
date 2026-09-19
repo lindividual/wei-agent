@@ -1,2 +1,4 @@
 data/
 afm/.build/
+__pycache__/
+*.pyc

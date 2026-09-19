@@ -74,6 +74,41 @@ final class EventTests: XCTestCase {
         XCTAssertEqual(text, "no session at /nope.jsonl")
     }
 
+    /// A turn that ended in **another** conversation, as a kind of its own.
+    ///
+    /// The distinction this pins is the fix for a window that used to jump: `session` means "this one is
+    /// now on screen" and the host answers it by swapping transcripts, so a turn finishing in a session
+    /// nobody had open moved the reader. This event carries the same routing — which session it is about —
+    /// and none of the meaning "show it": the path is there to be opened *on request*, and the outcome is
+    /// a token this side turns into words.
+    func testATurnEndingElsewhereNamesTheSessionWithoutSwitchingToIt() throws {
+        let envelope = try XCTUnwrap(
+            Envelope.decode(
+                line: #"{"kind":"elsewhere","session":"/store/b.jsonl","path":"/store/b.jsonl","outcome":"finished"}"#
+            )
+        )
+        XCTAssertEqual(envelope.session, "/store/b.jsonl")
+        guard case let .elsewhere(path, outcome) = envelope.event else {
+            return XCTFail("expected elsewhere, got \(envelope.event)")
+        }
+        XCTAssertEqual(path, "/store/b.jsonl")
+        XCTAssertEqual(outcome, "finished")
+
+        // A shell of the same generation always sends both fields; a missing outcome is read as an
+        // unknown one rather than as an undecodable line, because the fact that a turn ended somewhere
+        // is worth saying even when the word for how is missing.
+        let bare = try XCTUnwrap(
+            Envelope.decode(
+                line: #"{"kind":"elsewhere","session":"/store/b.jsonl","path":"/store/b.jsonl"}"#
+            )
+        )
+        guard case let .elsewhere(_, noOutcome) = bare.event else {
+            return XCTFail("expected elsewhere, got \(bare.event)")
+        }
+        XCTAssertEqual(noOutcome, "")
+        XCTAssertEqual(SessionNotice.Outcome(wire: noOutcome).word, "ended")
+    }
+
     /// The conversation that was deleted: the path that puts it back, and whether there is one.
     ///
     /// This event is the one place a *click's outcome* travels: the shell refuses a delete with work
@@ -302,7 +337,7 @@ final class EventTests: XCTestCase {
     func testTheModelCatalogSaysWhatCanBeCalledAndWhatIsInForce() throws {
         let event = try XCTUnwrap(
             decode(
-                #"{"kind":"models","items":[{"id":"deepseek-v4-flash","label":"DeepSeek V4 Flash (deepseek-v4-flash)","vision":true},{"id":"deepseek-v3","label":"deepseek-v3","vision":false}],"current":"deepseek-v3"}"#
+                #"{"kind":"models","unit":"US dollars per million tokens — in · out · cached","items":[{"id":"deepseek-v4-flash","label":"DeepSeek V4 Flash","vision":true,"prices":{"input":"0.14","output":"0.28","cached":"0.0028"}},{"id":"deepseek-v3","label":"deepseek-v3","vision":false}],"current":"deepseek-v3"}"#
             )
         )
         guard case let .models(catalog) = event else {
@@ -312,6 +347,39 @@ final class EventTests: XCTestCase {
         XCTAssertEqual(catalog.current, "deepseek-v3")
         XCTAssertEqual(catalog.currentLabel, "deepseek-v3")
         XCTAssertFalse(try XCTUnwrap(catalog.currentChoice).vision)
+        // The unit is one line for the whole menu, which is what makes the rows three bare numbers
+        // instead of three numbers each carrying a symbol.
+        XCTAssertEqual(catalog.unit, "US dollars per million tokens — in · out · cached")
+        // And a model's prices arrive cut to their column, which is what lines the menu up.
+        XCTAssertEqual(try XCTUnwrap(catalog.items.first).prices, ModelPrices(input: "0.14", output: "0.28", cached: "0.0028"))
+        // **A model the shell sent no prices for is dashes, not zeroes.** An older shell, or a row
+        // whose numbers were left out: either way the menu must not price a model at nothing.
+        XCTAssertEqual(try XCTUnwrap(catalog.items.last).prices, .unknown)
+        XCTAssertEqual(ModelPrices.unknown.input, "—")
+    }
+
+    /// The exact literal `macos/appffi/app_wbtest.mbt` produces, field for field.
+    ///
+    /// The same event as above with the real catalog in it: three rows whose price columns are the
+    /// same width, which is the invariant the menu is built on and the one thing a JSON reader cannot
+    /// check for itself. `0.14` / `0.30` / `1.32` are all four characters, and the cached column is six
+    /// on every row.
+    func testTheModelMenuCarriesPricesCutToTheirColumn() throws {
+        let event = try XCTUnwrap(
+            decode(
+                #"{"kind":"models","session":"/tmp/s.jsonl","items":[{"id":"deepseek-v4-flash","label":"DeepSeek V4 Flash","vision":true,"prices":{"input":"0.14","output":"0.28","cached":"0.0028"}},{"id":"deepseek-flash","label":"DeepSeek V4.1 Flash","vision":true,"prices":{"input":"0.30","output":"1.20","cached":"0.0060"}},{"id":"deepseek-v4-pro","label":"DeepSeek V4 Pro","vision":false,"prices":{"input":"1.32","output":"3.96","cached":"0.0440"}}],"current":"deepseek-v4-flash","unit":"US dollars per million tokens — in · out · cached"}"#
+            )
+        )
+        guard case let .models(catalog) = event else {
+            return XCTFail("expected models, got \(event)")
+        }
+        let columns = catalog.items.map { ($0.prices.input, $0.prices.output, $0.prices.cached) }
+        XCTAssertEqual(columns.map(\.0).map(\.count), [4, 4, 4])
+        XCTAssertEqual(columns.map(\.1).map(\.count), [4, 4, 4])
+        XCTAssertEqual(columns.map(\.2).map(\.count), [6, 6, 6])
+        // The label is the name: no id, which is what keeps the row narrow enough for the prices.
+        XCTAssertEqual(catalog.items.map(\.label), ["DeepSeek V4 Flash", "DeepSeek V4.1 Flash", "DeepSeek V4 Pro"])
+        XCTAssertEqual(catalog.items.map(\.id), ["deepseek-v4-flash", "deepseek-flash", "deepseek-v4-pro"])
     }
 
     /// A session whose log names a model this build does not have is shown by its id rather than as
@@ -327,6 +395,51 @@ final class EventTests: XCTestCase {
         }
         XCTAssertEqual(catalog.currentLabel, "some-future-model")
         XCTAssertNil(catalog.currentChoice)
+    }
+
+    /// The thinking menu's wire, decoded from the same literal `app_wbtest.mbt` produces.
+    ///
+    /// The levels are the *model's*: `low` is here because flash has it, and the pro model's menu —
+    /// the same event with a shorter list — does not offer it, which is the fact that makes this a
+    /// separate event rather than a list on this side.
+    func testTheThinkingMenuOffersThisModelsLevels() throws {
+        let event = try XCTUnwrap(
+            decode(
+                #"{"kind":"think","session":"/tmp/s.jsonl","items":[{"id":"off","label":"Off","detail":"fastest and cheapest; answers may be shallower","default":false},{"id":"low","label":"Low","detail":"thinks briefly; a sooner first word","default":false},{"id":"high","label":"High","detail":"thinks before answering","default":true},{"id":"max","label":"Max","detail":"thinks longest; slowest and dearest","default":false}],"current":"high"}"#
+            )
+        )
+        guard case let .think(levels) = event else {
+            return XCTFail("expected think, got \(event)")
+        }
+        XCTAssertEqual(levels.items.map(\.id), ["off", "low", "high", "max"])
+        XCTAssertEqual(levels.current, "high")
+        XCTAssertEqual(levels.currentLabel, "High")
+        XCTAssertEqual(levels.currentLevel?.isDefault, true)
+        XCTAssertTrue(levels.isOffered)
+        // The sentence is the shell's, and it arrives whole: a host that wrote its own would be a
+        // second opinion about what a level means.
+        XCTAssertEqual(levels.items[1].detail, "thinks briefly; a sooner first word")
+    }
+
+    /// A level this build has never heard of is still shown, by the name the shell sent.
+    ///
+    /// This is not a hypothetical: a session's level is recorded in its log, so a build that quietly
+    /// stops recognising one would otherwise draw an unticked menu over a session that is really
+    /// running at it.
+    func testALevelThisBuildDoesNotKnowStillHasAName() throws {
+        let event = try XCTUnwrap(
+            decode(
+                #"{"kind":"think","items":[],"current":"paranoid"}"#
+            )
+        )
+        guard case let .think(levels) = event else {
+            return XCTFail("expected think, got \(event)")
+        }
+        XCTAssertEqual(levels.currentLabel, "paranoid")
+        XCTAssertNil(levels.currentLevel)
+        // And before the shell has said anything the menu is not offered at all, rather than offered
+        // empty: a control with nothing to pick is a control that looks broken.
+        XCTAssertFalse(levels.isOffered)
     }
     // MARK: - background jobs
 

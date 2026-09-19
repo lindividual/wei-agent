@@ -444,7 +444,7 @@ fn conversation_with_calls(names : Array[String]) -> SessionContext {
         error_message: (None : String?),
       }),
     ],
-    thinking_level: "high",
+    thinking_level: Some("high"),
     model: None,
   }
 }
@@ -583,10 +583,13 @@ test "the tool-change section is empty unless the tool set actually changed" {
 /// prompt to the request should find the two tool sets named last rather than buried.
 test "the change section is the last thing in the prompt" {
   let code = tools_for_mode(ToolMode::Code)
-  let prompt = build_system_prompt("/work", code, mode=ToolMode::Code, sections=[
-    "## Workspace\n\nSomething.",
-    tool_change_prompt(["bash"], code),
-  ])
+  let prompt = build_system_prompt(
+    "/work",
+    code,
+    mode=ToolMode::Code,
+    instructions="## Workspace\n\nSomething.",
+    stale_tools=["bash"],
+  )
   let at = prompt.find("## Tools changed").unwrap()
   assert_true(prompt.find("## Workspace").unwrap() < at)
   assert_true(prompt.find("- exec:").unwrap() < at)

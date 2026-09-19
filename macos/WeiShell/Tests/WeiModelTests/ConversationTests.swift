@@ -213,6 +213,40 @@ final class ConversationTests: XCTestCase {
         XCTAssertEqual(conversation.rows.map(\.images), [[], []])
     }
 
+    /// **A `/skill:<name>` question arrives as the command, not as the document it expanded to.**
+    ///
+    /// The prompt in the log is the shell's framing with the skill's whole body inside it — a page of
+    /// somebody else's instructions — and the reader's own words are at the bottom of it. The parts are
+    /// what the view draws: their words as the question, and the body behind a fold. An older shell
+    /// sends no `skill` field at all, which decodes to `nil` and draws the text as it always did.
+    func testASkillQuestionArrivesAsItsParts() {
+        // The wire line is built the way the shell builds it rather than pasted as a literal: the
+        // prompt is full of quotes and newlines, and escaping them by hand here would be testing the
+        // escaping rather than the decoding.
+        let prompt = "<skill name=\"demo\" location=\"/s/SKILL.md\">\n"
+            + "References are relative to /s.\n\nDo it.\n</skill>\n\nthis one"
+        let line = #"{"kind":"user","text":"\#(escaped(prompt))","continued":false,"images":[],"skill":{"name":"demo","args":"this one","body":"Do it."}}"#
+        let conversation = run([line, #"{"kind":"user","text":"plain"}"#])
+        let question = conversation.rows[0]
+        XCTAssertEqual(question.skill?.name, "demo")
+        XCTAssertEqual(question.skill?.args, "this one")
+        XCTAssertEqual(question.skill?.body, "Do it.")
+        // The label answers the fold's only question — how much is behind this — with the same figure
+        // the composer's own line uses, for the same reason.
+        XCTAssertEqual(question.skill?.foldLabel, "skill demo · 6 characters")
+        // The text still crosses whole, and a question with no framing has no parts at all.
+        XCTAssertTrue(question.text.hasPrefix("<skill name="))
+        XCTAssertNil(conversation.rows[1].skill)
+    }
+
+    /// A string as JSON would spell it: the quotes and newlines a skill framing is made of.
+    private func escaped(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+    }
+
     /// The pictures are named by their own bytes, not by the row.
     ///
     /// This is the cache key, and the reason it cannot be the row id: `user-1` is one picture in one

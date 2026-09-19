@@ -41,6 +41,22 @@ final class SessionSectionsTests: XCTestCase {
         )
     }
 
+    /// The same row, kept at the top of the list.
+    ///
+    /// Built from a row rather than from a date so that a test says which *day* it is about the same way
+    /// either way — `at(…)` for both, and only the pin is different.
+    private func pinned(_ row: SessionRow) -> SessionRow {
+        SessionRow(
+            path: row.path,
+            shortID: row.shortID,
+            label: row.label,
+            modified: row.modified,
+            current: row.current,
+            running: row.running,
+            pinned: true
+        )
+    }
+
     private func group(_ cwd: String, _ label: String, _ rows: [SessionRow]) -> SessionGroup {
         SessionGroup(cwd: cwd, label: label, current: false, sessions: rows)
     }
@@ -147,8 +163,7 @@ final class SessionSectionsTests: XCTestCase {
 
     /// A workspace that is not in the list — just deleted, or never sent — is no sections rather than a
     /// crash, which is what the reader sees as "no sessions" for a moment.
-    func testBrowsingAWorkspaceThatIsNotThereIsEmpty() {
-        let sections = sessionSections(
+    func testBrowsingAWorkspaceThatIsNotThereIsEmpty() {        let sections = sessionSections(
             groups: [group("/src/pi", "pi", [at(2026, 7, 3)])],
             browsing: "/src/gone",
             query: "",
@@ -156,6 +171,76 @@ final class SessionSectionsTests: XCTestCase {
             calendar: calendar
         )
         XCTAssertTrue(sections.isEmpty)
+    }
+
+    /// The pinned bar sits above the day headings, and it holds the pinned sessions and nothing else.
+    func testPinnedSessionsComeFirstInTheirOwnSection() {
+        let pinnedRow = pinned(at(2026, 6, 20))
+        let sections = sessionSections(
+            groups: [group("/src/pi", "pi", [at(2026, 7, 3), pinnedRow, at(2026, 7, 2)])],
+            browsing: "/src/pi",
+            query: "",
+            now: now,
+            calendar: calendar
+        )
+        XCTAssertEqual(sections.map(\.title), ["Pinned", "Today", "Yesterday"])
+        XCTAssertEqual(sections[0].id, pinnedSectionID)
+        XCTAssertEqual(sections[0].rows.map(\.label), ["session 2026-6-20"])
+        // **A pinned session is in the bar and nowhere else.** The row it would otherwise have been —
+        // which here is "Previous 30 Days", older than the two rows under Today and Yesterday — is not
+        // drawn a second time: pinning a conversation moves it, it does not copy it. A row with two
+        // homes is also two rows a reader can click on the same thing.
+        XCTAssertEqual(sections.flatMap(\.rows).filter { $0.path == pinnedRow.path }.count, 1)
+        XCTAssertEqual(sections[1].rows.map(\.label), ["session 2026-7-3"])
+    }
+
+    /// The bar is in the order the list is already in, which is the shell's "most recently used first".
+    ///
+    /// That order is what makes `pins.json` a set rather than a sequence: one ordering rule, and it is
+    /// the one the rest of the column is drawn by.
+    func testThePinnedBarKeepsTheListsOwnOrder() {
+        let sections = sessionSections(
+            groups: [
+                group(
+                    "/src/pi", "pi",
+                    [pinned(at(2026, 7, 3)), pinned(at(2026, 6, 1))]
+                )
+            ],
+            browsing: "/src/pi",
+            query: "",
+            now: now,
+            calendar: calendar
+        )
+        XCTAssertEqual(sections.map(\.title), ["Pinned"])
+        XCTAssertEqual(sections[0].rows.map(\.label), ["session 2026-7-3", "session 2026-6-1"])
+    }
+
+    /// No pins means no bar — not an empty heading over the list.
+    func testNoPinsMeansNoPinnedSection() {
+        let sections = sessionSections(
+            groups: [group("/src/pi", "pi", [at(2026, 7, 3)])],
+            browsing: "/src/pi",
+            query: "",
+            now: now,
+            calendar: calendar
+        )
+        XCTAssertEqual(sections.map(\.title), ["Today"])
+    }
+
+    /// A search is grouped by project and does not have a pinned bar.
+    ///
+    /// The two groupings answer different questions, and a pinned result would have to be either drawn
+    /// twice — once in the bar and once under its project — or lifted out of the project heading that is
+    /// the whole point of searching across projects.
+    func testAPinnedSessionIsNotLiftedOutOfASearch() {
+        let sections = sessionSections(
+            groups: [group("/src/pi", "pi", [pinned(at(2026, 7, 3))])],
+            browsing: "/src/pi",
+            query: "session",
+            now: now,
+            calendar: calendar
+        )
+        XCTAssertEqual(sections.map(\.title), ["pi"])
     }
 
     /// Searching reaches every workspace, and the heading becomes the project — because a result has to

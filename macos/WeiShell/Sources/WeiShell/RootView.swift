@@ -87,7 +87,12 @@ struct RootView: View {
         NavigationSplitView {
             WorkspaceList(
                 client: client,
-                browsing: $browsing,
+                // **The resolved project, not the raw state.** `browsing` is empty until the reader picks a
+                // project, and what the column *is* before that is the open session's project (`browsed`).
+                // Passing the raw state is how this column's highlight came to disagree with the list beside
+                // it: the middle column showed that project's sessions while the first column highlighted
+                // nothing. One value, resolved once, in the window; writes still land in `browsing`.
+                browsing: Binding(get: { browsed }, set: { browsing = $0 }),
                 search: $search,
                 actions: actions
             )
@@ -178,6 +183,7 @@ struct RootView: View {
         // answers both with the project on screen — which is what `browsed` computes to when there is
         // nothing chosen yet.
         .onChange(of: browsed) { _, project in actions.browsing = project }
+        // (That write is deliberately quiet — see `WindowActions.browsing` for what publishing it did.)
         // Choosing a directory to start a session in. `.folder` rather than an `NSOpenPanel`: this is the
         // same `fileImporter` the composer uses for images, it attaches to the window as a sheet, and the
         // host is the process that has a desktop session — the whole of `platform/picker.mbt`'s argument,
@@ -250,7 +256,8 @@ private struct WorkspaceList: View {
     ///
     /// Flat across workspaces on purpose: the question this section answers is "is anything running", and
     /// making the reader scan four projects to answer it is what the section is for. The row says which
-    /// project it belongs to instead.
+    /// project it belongs to instead — and it is drawn *under* the projects for the reason the list's own
+    /// comment gives: it is the part that changes.
     private var running: [SessionRow] {
         client.groups.flatMap(\.sessions).filter(\.running)
     }
@@ -260,6 +267,44 @@ private struct WorkspaceList: View {
             identity
             searchField
             List(selection: $browsing) {
+                // **The workspaces come first and the two live sections come after them, and that order is
+                // the whole of what keeps this column still.** A section that comes and goes moves
+                // everything under it: with the register on top, a turn starting and a `bash` call being
+                // registered put every folder row 74 and 78 points lower (measured on the running app — the
+                // first folder sat at `y=226` with nothing running and `y=378` with a turn and a job behind
+                // it, and climbed back when the command exited), and every mouse target moved with them.
+                // The workspaces are what the reader aims at; the register is what changes. So the thing
+                // that changes goes below the thing that does not.
+                //
+                // What that costs is the fold: a project list long enough to fill this column pushes the
+                // register out of sight, and "is anything running" then takes a scroll. Deliberate — what
+                // the reader clicks has to be where it was — and partly covered elsewhere: the session row
+                // in the middle column carries its own `Running` chip, and the composer's Stop button is
+                // about the turn that matters most, the one on screen. See `docs/design-system.md`.
+                // **The air above the first heading is this row's own top padding, not the list's
+                // `.contentMargins(.top:)`.** The two look the same at rest and do not behave the same on a
+                // click: a scroll-content margin belongs to the list's scroll view, and re-applying it is a
+                // separate pass from the content change that asked for it — so for the frames in between, the
+                // whole column was drawn without it. Measured at 60fps in the running app: every text row of
+                // this column at `144, 172, 204, …` for those frames and at `160, 188, 220, …` after — the same
+                // layout, 16 points up, which is exactly this number. Nothing about it is visible at rest and
+                // every click in this list produced it. See `docs/macos-pitfalls.md`.
+                SectionTitle("Workspaces")
+                    .padding(.top, Wei.Space.loose)
+                addWorkspace
+                ForEach(client.groups) { group in
+                    WorkspaceRow(
+                        group: group,
+                        // The same fill the session column draws on the row it has open, because it is the
+                        // same kind of fact: the row the reader picked. Without this the two columns
+                        // disagreed — the platform's grey (or, in a focused window, its blue) in this one and
+                        // the brand in the other.
+                        selected: group.cwd == browsing,
+                        onRemove: { remove(group) }
+                    )
+                    .tag(group.cwd)
+                    .listRowBackground(RowSelection(selected: group.cwd == browsing))
+                }
                 // **Two sections that are usually empty, and absent when they are.** Nothing running means
                 // no heading rather than an empty one: a section that says "Running sessions" over an empty
                 // space teaches the reader to skip the place where they will one day need to look. The web
@@ -284,22 +329,17 @@ private struct WorkspaceList: View {
                         JobRow(job: job, onKill: { client.killJob(job.id) })
                     }
                 }
-                SectionTitle("Workspaces")
-                addWorkspace
-                ForEach(client.groups) { group in
-                    WorkspaceRow(group: group, onRemove: { remove(group) })
-                        .tag(group.cwd)
-                }
             }
             .listStyle(.sidebar)
-            // Air between the search field and the first heading, so the heading reads as a heading rather
-            // than as another row of the field. It used to be load-bearing: while the platform placed the
-            // field in this column's accessory band the list's content was inset *under* it, so the first row
-            // laid out above the list's own top edge and was clipped — measured, the "Running tool calls" title
-            // came out at ay 154 with the list's frame starting at 169. (Found by dumping the accessibility
-            // tree, which is the only way this shows up — the row is in the tree, with a real size, and simply
-            // not drawn.) The field is a row above the list now, so this is only room.
-            .contentMargins(.top, Wei.Space.loose, for: .scrollContent)
+            // **No `.contentMargins` here, deliberately.** There was one, as the air between the search field
+            // and the first heading: while the platform placed the field in this column's accessory band the
+            // list's content was inset *under* it, so the first row laid out above the list's own top edge and
+            // was clipped (measured, the "Running tool calls" title at `ay 154` with the list's frame starting
+            // at 169 — found by dumping the accessibility tree, which is the only way this shows up: the row is
+            // in the tree, with a real size, and simply not drawn). The field became a row above the list, so
+            // the inset stopped being load-bearing and became room — and room expressed this way is not free:
+            // it is re-applied in its own pass, and the frames in between draw this column 16 points off. The
+            // first heading carries the air itself now; see the note on it.
         }
         // **Settings, one glyph at the leading end of this column's own band.**
         //
@@ -558,6 +598,9 @@ private struct RunningSessionRow: View {
 /// conversation — so without a mark, browsing away from a running session hides where it is.
 private struct WorkspaceRow: View {
     let group: SessionGroup
+    /// Whether this is the project the column is listing — the row the brand fills, and the one whose
+    /// supporting ink has to be read against that fill rather than against the window.
+    let selected: Bool
     /// Called when this row's menu asks for the project to go. The dialog belongs to the column, for the
     /// same reason a session row's does: it is one question about one row, and the row is the thing that
     /// cannot draw a sheet on the window.
@@ -573,7 +616,7 @@ private struct WorkspaceRow: View {
             Image(systemName: "folder")
                 .font(Wei.Font.control())
                 .frame(width: Self.glyphSlot, alignment: .center)
-                .foregroundStyle(Wei.Palette.secondary)
+                .foregroundStyle(ink(Wei.Palette.secondary))
             Text(group.label)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -585,8 +628,14 @@ private struct WorkspaceRow: View {
             }
             Text("\(group.sessions.count)")
                 .monospacedDigit()
-                .foregroundStyle(Wei.Palette.tertiary)
+                .foregroundStyle(ink(Wei.Palette.tertiary))
         }
+        // **The fill is the list's own `listRowBackground`, not this row's `background`.** Both were built and
+        // measured: drawing it here looks identical (the same `x=18.5…244.5` rectangle, with the platform's own
+        // ten-point cell inset hand-rolled as a negative padding) and it was tried as the fix for the flash this
+        // column had when a project was clicked — where it changed nothing at all. Kept as the list's own
+        // background because that asks the platform for the alignment instead of measuring it.
+        //
         // The path, because two projects can share a name and the name is all there is room for.
         .help(group.cwd)
         // **The only way out of this list, and it is one item.** A project can be removed and cannot be
@@ -599,6 +648,17 @@ private struct WorkspaceRow: View {
             // checkbox in the dialog this opens, so red would promise a deletion that may not happen.
             Button("Remove Project…", action: onRemove)
         }
+    }
+
+    /// The colour of the supporting ink on a *filled* row, given the grey it is on a plain one.
+    ///
+    /// The same move `SessionRowView` makes for its second line, and needed for the same reason: the greys are
+    /// what this ink steps *away* from — `secondary` is 3.84:1 on the brand's fill and `tertiary` 1.86:1, so a
+    /// grey count there is not quieter than the project's name, it is text that has to be hunted for. The
+    /// project's own name is `labelColor` and is left alone: it is the one thing in the row that has to be
+    /// read, and the palette's ink for this fill is checked against the fill in `DesignTests`.
+    private func ink(_ unfilled: Color) -> Color {
+        selected ? Wei.Palette.onHighlight : unfilled
     }
 }
 
@@ -709,10 +769,23 @@ private struct SessionList: View {
                             // fact one line above it — removed for that reason (it was added for the search
                             // case, which now asks for it rather than always paying for it).
                             workspace: searching ? workspaceLabel(of: row) : nil,
+                            selected: isOpen(row),
                             onRename: { onRename(row) },
+                            // Written straight to the client rather than up through the window, and the
+                            // difference from `onRename` is the whole reason: a rename opens a dialog,
+                            // which is a thing the *window* is in the middle of, while a pin is one value
+                            // going out on the wire. A closure for it would be the window remembering a
+                            // fact it has no use for.
+                            onPin: { client.setPinned(row.path, to: !row.pinned) },
                             onDelete: { delete(row) }
                         )
                         .tag(row.path)
+                        // **The fill is drawn here rather than by the platform.** A `List`'s own selection
+                        // is painted in the *system* accent on macOS, and `.tint` does not reach it — measured
+                        // on macOS 26 in every list style (the row came out `#0064E1`, the machine's blue, with
+                        // pine set on the window) — so the brand colour was nowhere in this list. `RowSelection`
+                        // is what puts it there, and it takes the platform's paint away with it.
+                        .listRowBackground(RowSelection(selected: isOpen(row)))
                     }
                 } header: {
                     // These are *time* headings — Today, Yesterday, Previous 7 Days — and they carry the same job
@@ -798,8 +871,19 @@ private struct SessionList: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // **No hairline under this row.** The list draws one between every pair of rows, and between a
+        // *button* and the first session it is a line under a control — which reads as the control's
+        // underline, and says two things are one thing. The heading above the sessions is what separates
+        // them; a rule there was never asked for and was never doing any work.
+        .listRowSeparator(.hidden, edges: .bottom)
         .padding(.horizontal, Wei.Space.cozy)
         .help("New session in this project (⌘N)")
+    }
+
+    /// The session the shell has open — the fact the list's selection binding is already made of
+    /// (`selection`), read here so the row can be drawn with it.
+    private func isOpen(_ row: SessionRow) -> Bool {
+        !client.currentPath.isEmpty && client.currentPath == row.path
     }
 
     private var emptyMessage: String {
@@ -922,7 +1006,13 @@ private struct SessionRowView: View {
     /// The project this session lives in, as the first column names it — `nil` unless the list is a result
     /// set, where which project a row came from is a fact the row has to carry itself.
     let workspace: String?
+    /// Whether this is the conversation the shell has open — the row the list's selection is on, and the
+    /// one the list fills with the brand. The fill itself is the row's background in `SessionList`; what it
+    /// changes *here* is the colour of the second line, which is the half of a selected row that a fill
+    /// cannot fix on its own.
+    let selected: Bool
     let onRename: () -> Void
+    let onPin: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -945,16 +1035,16 @@ private struct SessionRowView: View {
                 if let workspace {
                     Text(workspace)
                         .font(Wei.Font.caption())
-                        .foregroundStyle(Wei.Palette.secondary)
+                        .foregroundStyle(secondLine(Wei.Palette.secondary))
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text("·")
                         .font(Wei.Font.caption())
-                        .foregroundStyle(Wei.Palette.tertiary)
+                        .foregroundStyle(secondLine(Wei.Palette.tertiary))
                 }
                 Text(sessionAgeText(modified: row.modified, now: Date(), calendar: .current))
                     .font(Wei.Font.caption())
-                    .foregroundStyle(Wei.Palette.tertiary)
+                    .foregroundStyle(secondLine(Wei.Palette.tertiary))
                 if row.running {
                     // A turn in flight *in this session*. With more than one conversation able to run at once
                     // this is a per-row fact rather than a statement about the window, which is exactly what the
@@ -980,6 +1070,15 @@ private struct SessionRowView: View {
         .padding(.vertical, Wei.Space.tiny)
         .help(row.path)
         .contextMenu {
+            // **Pinning is offered on any row, including this one's own.** The item says which way it
+            // goes (`row.pinned`), because a menu that says "Pin Session" over a row already in the
+            // Pinned bar is a menu item whose label contradicts the list behind it.
+            //
+            // First, and alone above the divider: it is the one item here that does not touch the
+            // session's own file. Rename and Delete are acts on the conversation; this is where the
+            // reader keeps it.
+            Button(row.pinned ? "Unpin Session" : "Pin Session", action: onPin)
+            Divider()
             // Renaming is offered on every row and refused by the shell for a session that is not open:
             // the log of a session this process is not holding must not be rewritten from here, and a menu
             // item that vanishes with the selection is a menu item nobody finds.
@@ -988,6 +1087,100 @@ private struct SessionRowView: View {
             // The question — including the one about the file — is `DeleteConfirmation`'s: an `NSAlert`,
             // because it is the one dialog on this system that takes a checkbox beside its buttons.
             Button("Delete Session", role: .destructive, action: onDelete)
+        }
+    }
+
+    /// The colour of the second line on a *filled* row, given the grey it is on a plain one.
+    ///
+    /// One colour for the whole line — `onHighlight`, the ink that belongs on the brand's background —
+    /// because a line of asides is one thing: giving the project name and the time two weights of the same
+    /// green would invent a hierarchy between two facts that are equally secondary. The greys are what the
+    /// line steps *away* from: 3.90:1 for `secondary` and 1.87:1 for `tertiary` on the brand's own fill, so a
+    /// grey here is not a quieter version of the row's name, it is text that has to be hunted for (`Ink.selection`
+    /// is checked against this colour in `DesignTests`, both appearances).
+    private func secondLine(_ unfilled: Color) -> Color {
+        selected ? Wei.Palette.onHighlight : unfilled
+    }
+}
+
+/// The background of one row of a list: the brand on the row the reader has picked, and nothing on the rest.
+///
+/// **Drawn here rather than by the list, and that is the whole reason this exists.** A `List`'s selection is
+/// painted in the *system's* accent on macOS — measured: every list style comes out the machine's blue with
+/// the brand set on the window — so the one colour this app has was nowhere in its own list. Nothing in
+/// SwiftUI takes that paint away, so it is taken away in AppKit (`UnpaintedSelection`), and what is left to
+/// draw is this shape.
+///
+/// **The inset is the platform's own, so the row does not move.** A row's cell sits ten points inside its row
+/// (the `NSOutlineView`'s geometry, read off the running app: row `x=256`, cell `x=266`) and the rows here pad
+/// their content eight inside that — matching both is what makes this fill the size the platform's selection
+/// was, to the point where the text is in exactly the place it was before the colour changed.
+///
+/// **Clear rather than absent on the rows that are not selected.** `List` measures a row when it is built and
+/// reuses it otherwise, so a background that comes and goes is a background that can arrive a moment late on
+/// the row that is switching — and the shape has to be *drawn* to be worth anything here, because what it sits
+/// over is the platform's own fill: an opaque row is a colour of the window's, not a thing the machine
+/// answers for.
+private struct RowSelection: View {
+    /// Whether this is the row the reader has picked: the session the shell has open, or the project being
+    /// browsed. Both lists draw it the same way — a reader who asks why one column's selection is a different
+    /// colour from the other's has found a real fault (the platform's own colour was in one column and the
+    /// brand in the other).
+    let selected: Bool
+
+    /// The platform's cell inset, in points. See the note above; this is measured, not invented.
+    static let inset: CGFloat = 10
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: Wei.Radius.row, style: .continuous)
+            .fill(selected ? AnyShapeStyle(Wei.Palette.selection) : AnyShapeStyle(Color.clear))
+            .padding(.horizontal, Self.inset)
+            // Rides along on the row's background because it has to be *inside* the table: see
+            // `UnpaintedSelection`.
+            .background(UnpaintedSelection())
+    }
+}
+
+/// Take the platform's selection *paint* away from the list this is used inside of, and keep the selection.
+///
+/// The row is still selected: `List(selection:)` still moves, the arrow keys still move it, the binding still
+/// writes, and the row still says `AXSelected` to the accessibility tree. What stops is the drawing — no blue
+/// rectangle, and no substituting the row's text colour for white, which is what made a brand-coloured fill
+/// unreadable in the first place (white on a pale green row is precisely the pairing `Wei.Ink.selection`'s
+/// test exists to rule out).
+///
+/// `List` is an `NSOutlineView` on this platform — `AXOutline` in the running app's accessibility tree,
+/// `SwiftUIOutlineListView` in the view hierarchy — and `selectionHighlightStyle` is the one public knob that
+/// means "state yes, paint no". Its default is `.sourceList` for the sidebar style and `.regular` for the
+/// others; both are what we are turning off.
+///
+/// **It has to be applied from *inside* the table's content**, which is why it rides on a row's background:
+/// attached to the `List` itself, the view it would walk up from is behind the list rather than in it, and the
+/// walk finds no table at all.
+///
+/// **Re-applied on every update, cheaply.** What that guards against is a table view SwiftUI replaced
+/// underneath row views that it kept — and the failure of that is silent: the blue comes back on the one row
+/// the brand is supposed to own, in the appearance nobody is looking at.
+private struct UnpaintedSelection: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        // At construction this view has no superview yet, so the first attempt is a runloop later.
+        DispatchQueue.main.async { Self.unpaint(from: view) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        Self.unpaint(from: nsView)
+    }
+
+    private static func unpaint(from view: NSView) {
+        var candidate = view.superview
+        while let current = candidate {
+            if let table = current as? NSTableView {
+                if table.selectionHighlightStyle != .none { table.selectionHighlightStyle = .none }
+                return
+            }
+            candidate = current.superview
         }
     }
 }
@@ -1187,11 +1380,41 @@ private struct ConversationView: View {
     /// line and dropped the project 18 points below it, out over the transcript.
     private var titleLift: CGFloat { Wei.Control.toolbar / 2 + titleHeight / 2 }
 
-    /// Room at the trailing end for the toolbar's own controls — measured, one session button occupies 49
-    /// points of the window's trailing edge, and *both* of them are on this row once the bar is lifted (the
-    /// new-session plus and the rename pencil, which together measured 835…917 of 921). This is also where a
-    /// long name gets its ellipsis, so the two never touch.
-    private static let titleClearance: CGFloat = 104
+    /// Room at the trailing end for the toolbar's own controls, so a long name gets an ellipsis instead of
+    /// being drawn under the buttons.
+    ///
+    /// **Measured, not derived** — read off the toolbar items' own frames with the three controls in
+    /// place, on a 1470-wide window: `Fork Session x=1347…1388`, the pin menu `x=1388…1425`, `Rename
+    /// Session x=1425…1466`. So the three together need **123 points** of the trailing edge, and the
+    /// per-control figure is 41 (36 for the menu, whose glyph is inset inside its item).
+    ///
+    /// The constant is that plus a margin, which is the half that is a judgement rather than a reading:
+    /// the title's block is padded by `Wei.Space.section` on the way to this, so 131 puts the end of a
+    /// long name about 30 points clear of the fork button — the ellipsis needs somewhere to land, and a
+    /// number that only just cleared the buttons would have the three of them touching on the window the
+    /// title is longest on. **Re-measure when the set of session controls changes**: with two buttons this
+    /// was 104 (`x=835…917` of a 921-wide window, a smaller default size).
+    private static let titleClearance: CGFloat = 131
+
+    /// A reader who has asked the system for less movement gets a fade instead of a rise.
+    ///
+    /// Not a nicety: the line arrives on its own — nobody clicked for it — and an unrequested animation
+    /// is exactly the kind a reader asks the system to stop. What is *kept* is that it still appears and
+    /// still leaves; only the travel and the overshoot go.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// How the line about another session arrives and leaves: up from behind the card, and back down.
+    private var noticeTransition: AnyTransition {
+        reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity)
+    }
+
+    /// The spring, and why it is a spring rather than a duration: an arrival that overshoots slightly and
+    /// settles is the visual form of "this just happened", which is the whole of what the line says. The
+    /// damping is low enough to be seen and high enough not to look broken — and the *same* curve is used
+    /// for the exit, so the line leaves the way it came.
+    private var noticeAnimation: Animation {
+        reduceMotion ? .easeOut(duration: 0.18) : .spring(response: 0.42, dampingFraction: 0.62)
+    }
 
     var body: some View {
         TranscriptView(
@@ -1208,120 +1431,182 @@ private struct ConversationView: View {
             // The first row has to clear the toolbar *and* this column's own bar.
             topMargin: Wei.Control.toolbar + (sessionName == nil ? 0 : titleHeight)
         )
-            // And the same treatment at the other end, for the same reason: the composer is a card that
-            // **floats over** the conversation. It is an inset rather than the last child of a `VStack`
-            // because the stack is what shortens the transcript to make room and leaves a hard opaque edge
-            // above the card; as an inset the transcript keeps its height, the last row scrolls *under* the
-            // card, and the card's own gradient is what it fades into. That is the arrangement
-            // `macos/README.md` describes ("浮在对话上的卡片"), and the elevation is the whole of it.
-            .safeAreaInset(edge: .bottom, spacing: 0) {
+        // And the same treatment at the other end, for the same reason: the composer is a card that
+        // **floats over** the conversation. It is an inset rather than the last child of a `VStack`
+        // because the stack is what shortens the transcript to make room and leaves a hard opaque edge
+        // above the card; as an inset the transcript keeps its height, the last row scrolls *under* the
+        // card, and the card's own gradient is what it fades into. That is the arrangement
+        // `macos/README.md` describes ("浮在对话上的卡片"), and the elevation is the whole of it.
+        //
+        // **The line about another session lives in here with the composer**, and that is the
+        // decision this placement makes: a turn that ends elsewhere is answered by *typing*
+        // somewhere else, and the way to act on the line is the same gesture that answers it — look
+        // down at the box, see the line, decide. At the top of the column it was a second heading
+        // competing with the name of the conversation; here it is next to the one control it is
+        // about, and it rises out of the card rather than appearing over the transcript.
+        //
+        // What it must not do is push the composer around: the two sit in a `VStack` whose height is
+        // the safe-area inset, so the line *adds* to the inset and the card keeps its own footing.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                if let notice = client.notice {
+                    ElsewhereNotice(
+                        notice: notice,
+                        beat: client.noticeBeat,
+                        onOpen: { client.open(notice.path) },
+                        onDismiss: { client.dismissNotice() }
+                    )
+                    // The same cap and the same centring as the card below it, so the two line up:
+                    // a line about the composer that was wider than the composer would read as a
+                    // different kind of thing.
+                    .frame(maxWidth: 820)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, Wei.Space.tight)
+                    // **Up from behind the card**, because the card is what it comes out of: a line
+                    // that faded in above the composer would read as part of the transcript, and
+                    // this line is about somewhere else. The overshoot is the spring's, and it is
+                    // what makes the arrival read as an arrival rather than as a layout change.
+                    .transition(noticeTransition)
+                }
                 Composer(
                     client: client,
                     actions: actions,
                     enabled: client.state != .starting,
-                    // A prompt went out, so the reader is asking rather than reading back: the transcript
-                    // follows again from here, whatever it had been told before.
+                    // A prompt went out, so the reader is asking rather than reading back: the
+                    // transcript follows again from here, whatever it had been told before.
                     onSent: { scroll.promptSent() },
                     onStop: { client.stop() }
                 )
             }
-            // **What this conversation is called, and the pencil that renames it, on one line.**
-            ///
-            /// The name says something the window's title does not: that one names the *list* the middle
-            /// column is showing (which project, how many sessions), because a window has one title and the
-            /// list is what it is about. A reader who has scrolled into an answer is looking at one
-            /// conversation, and the name of it — with the way to change it — belongs at the head of it.
-            ///
-            /// The repetition is deliberate: one is the name of a thing in a list of things, this one is the
-            /// name of the thing on screen. (What *was* a mistake, written down at the top of this column's
-            /// history, is the version that made the window's title and this heading say the same words.)
-            ///
-            /// **A bar, not a toolbar item.** Both were tried and measured. A `ToolbarItem` holds one thing
-            /// cleanly — a title *or* a button — and a second item in this column's region makes the platform
-            /// re-flow the row: the title left the column and landed over the *list* (`x=230…397`), and the
-            /// window's own title was pushed from `x=230…864` to `x=397…557`. A bar is drawn by this view, so
-            /// the two controls are laid out by `HStack` and nothing else moves.
-            ///
-            /// **And it is lifted onto the toolbar's centre line** (`titleLift`), so the name and the pencil
-            /// share the row the window's own controls are on rather than sitting a line below them.
-            ///
-            /// What is kept either way: the blur. `safeAreaBar` insets the safe area, and
-            /// `scrollEdgeEffectStyle(.soft, for: .top)` fades what passes beneath — so the conversation goes
-            /// soft behind the name as it scrolls under it.
-            .safeAreaBar(edge: .top, alignment: .leading) {
-                if let name = sessionName {
-                    VStack(alignment: .leading, spacing: Wei.Space.tiny) {
-                        Text(name)
-                            .font(Wei.Font.title())
-                            // One line, and the end of it if it does not fit: a question can be long, and a
-                            // title that wraps to four lines is a title that has become the first paragraph.
-                            // The tail rather than the middle, so what the reader sees is how the question
-                            // *begins* — which is how they would recognize it in the list — and so the
-                            // ellipsis is where they expect one. The width has to be flexible for that:
-                            // truncation happens when there is a limit to truncate against.
+            // Keyed on *which* session the line is about, so that both the rise and the fall are
+            // animated: a value that changes on the way in and on the way out is the one thing a
+            // transition needs. A second turn ending in the same conversation is the same id and
+            // no transition — the line stays where it is and says something newer, which is what
+            // makes one conversation one line.
+            .animation(noticeAnimation, value: client.notice?.id)
+        }
+        // **The one sound in the app, and it rings only when nobody is looking.**
+        //
+        // An answer finishing in a conversation the reader has open but cannot see (the window is
+        // behind, or on another Space) is exactly the case a line cannot reach: they are not reading
+        // this window. `noticeBeat` is the signal — a counter rather than the notice itself, so a
+        // *new* event is what rings and a rename of the label is not.
+        //
+        // `NSApp.isActive` rather than a check of whether the session is on screen: when the window
+        // is in front the line above is enough, and a chime for something already visible is noise.
+        //
+        // `NSBeep` and not a sound file of our own: it is the alert the reader has already chosen in
+        // System Settings, at the volume they chose, and it is silent when they have asked for no
+        // alerts — so it is the one sound that cannot be wrong in a way they did not ask for. A
+        // bundled audio file would be a second volume to find.
+        .onChange(of: client.noticeBeat) { _, _ in
+            if !NSApp.isActive { NSSound.beep() }
+        }
+        // **What this conversation is called, and the pencil that renames it, on one line.**
+        ///
+        /// The name says something the window's title does not: that one names the *list* the middle
+        /// column is showing (which project, how many sessions), because a window has one title and the
+        /// list is what it is about. A reader who has scrolled into an answer is looking at one
+        /// conversation, and the name of it — with the way to change it — belongs at the head of it.
+        ///
+        /// The repetition is deliberate: one is the name of a thing in a list of things, this one is the
+        /// name of the thing on screen. (What *was* a mistake, written down at the top of this column's
+        /// history, is the version that made the window's title and this heading say the same words.)
+        ///
+        /// **A bar, not a toolbar item.** Both were tried and measured. A `ToolbarItem` holds one thing
+        /// cleanly — a title *or* a button — and a second item in this column's region makes the platform
+        /// re-flow the row: the title left the column and landed over the *list* (`x=230…397`), and the
+        /// window's own title was pushed from `x=230…864` to `x=397…557`. A bar is drawn by this view, so
+        /// the two controls are laid out by `HStack` and nothing else moves.
+        ///
+        /// **And it is lifted onto the toolbar's centre line** (`titleLift`), so the name and the pencil
+        /// share the row the window's own controls are on rather than sitting a line below them.
+        ///
+        /// What is kept either way: the blur. `safeAreaBar` insets the safe area, and
+        /// `scrollEdgeEffectStyle(.soft, for: .top)` fades what passes beneath — so the conversation goes
+        /// soft behind the name as it scrolls under it.
+        .safeAreaBar(edge: .top, alignment: .leading) {
+            if let name = sessionName {
+                VStack(alignment: .leading, spacing: Wei.Space.tiny) {
+                    Text(name)
+                        .font(Wei.Font.title())
+                        // One line, and the end of it if it does not fit: a question can be long, and a
+                        // title that wraps to four lines is a title that has become the first paragraph.
+                        // The tail rather than the middle, so what the reader sees is how the question
+                        // *begins* — which is how they would recognize it in the list — and so the
+                        // ellipsis is where they expect one. The width has to be flexible for that:
+                        // truncation happens when there is a limit to truncate against.
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        // The whole question on hover, since the row may be showing a third of it.
+                        .help(name)
+                    // **Which project this conversation is in, in small type under its name.**
+                    //
+                    // The middle column says it too, and the window's title says it for the *list*; the
+                    // reason to say it a third time is the reader this column is for. The middle column is
+                    // a list of what to read next, and it scrolls away — a reader who has been reading one
+                    // answer for minutes has the name of the thing they are reading in front of them and
+                    // nothing else. Same shape as the settings panes: the window's title names the list,
+                    // the second line names the thing.
+                    //
+                    // Empty for a session the store has not listed yet (one created a moment ago), in
+                    // which case the name simply stands alone as it did before.
+                    if let workspace = sessionWorkspace {
+                        Text(workspace)
+                            .font(Wei.Font.caption())
+                            .foregroundStyle(Wei.Palette.secondary)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                            // The whole question on hover, since the row may be showing a third of it.
-                            .help(name)
-                        // **Which project this conversation is in, in small type under its name.**
-                        //
-                        // The middle column says it too, and the window's title says it for the *list*; the
-                        // reason to say it a third time is the reader this column is for. The middle column is
-                        // a list of what to read next, and it scrolls away — a reader who has been reading one
-                        // answer for minutes has the name of the thing they are reading in front of them and
-                        // nothing else. Same shape as the settings panes: the window's title names the list,
-                        // the second line names the thing.
-                        //
-                        // Empty for a session the store has not listed yet (one created a moment ago), in
-                        // which case the name simply stands alone as it did before.
-                        if let workspace = sessionWorkspace {
-                            Text(workspace)
-                                .font(Wei.Font.caption())
-                                .foregroundStyle(Wei.Palette.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                                .help(workspacePath)
-                        }
+                            .help(workspacePath)
                     }
-                        // **Air above the name — and the number here is twice what it moves.**
-                        //
-                        // The block is centred on the toolbar's centre line (`titleLift`), so padding inside
-                        // it is paid for twice over: half of it pushes the type down, and the other half makes
-                        // the block taller, which pulls it back up by as much as it pushed down. Eight points
-                        // therefore reads as four. Measured: the name's line box moves from `y=5` — level with
-                        // the top of the traffic lights, which is what "touching the window's top edge" was —
-                        // to `y=9`, and the project line below it stays inside the band, at `y=35…50`.
-                        .padding(.top, Wei.Space.cozy)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.leading, Wei.Space.section)
-                        // Room at the trailing end for the toolbar's own buttons, which are on this row once the
-                        // bar is lifted: measured, one is 49 points of the window's trailing edge and there are
-                        // two of them.
-                        .padding(.trailing, Wei.Space.section + Self.titleClearance)
-                        .padding(.vertical, Wei.Space.tiny)
-                        // `offset` rather than padding: this moves what is *drawn* without changing the bar's
-                        // height, and that height is what the first row of the conversation has to clear.
-                        .offset(y: -titleLift)
-                        .background(
-                            GeometryReader { geometry in
-                                Color.clear.preference(
-                                    key: ConversationTitleHeightKey.self,
-                                    value: geometry.size.height
-                                )
-                            }
-                        )
                 }
+                // **Air above the name — and the number here is twice what it moves.**
+                //
+                // The block is centred on the toolbar's centre line (`titleLift`), so padding inside
+                // it is paid for twice over: half of it pushes the type down, and the other half makes
+                // the block taller, which pulls it back up by as much as it pushed down. Eight points
+                // therefore reads as four. Measured: the name's line box moves from `y=5` — level with
+                // the top of the traffic lights, which is what "touching the window's top edge" was —
+                // to `y=9`, and the project line below it stays inside the band, at `y=35…50`.
+                .padding(.top, Wei.Space.cozy)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, Wei.Space.section)
+                // Room at the trailing end for the toolbar's own buttons, which are on this row once the
+                // bar is lifted: measured, one is 49 points of the window's trailing edge and there are
+                // two of them.
+                .padding(.trailing, Wei.Space.section + Self.titleClearance)
+                .padding(.vertical, Wei.Space.tiny)
+                // `offset` rather than padding: this moves what is *drawn* without changing the bar's
+                // height, and that height is what the first row of the conversation has to clear.
+                .offset(y: -titleLift)
+                .background(
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: ConversationTitleHeightKey.self,
+                            value: geometry.size.height
+                        )
+                    }
+                )
             }
-            .onPreferenceChange(ConversationTitleHeightKey.self) { height in
-                titleHeight = height
-            }
-        // **Both session actions live here, as ordinary toolbar items**: rename the one on screen, and start a
-        // new one. `.primaryAction` is the window's trailing edge *whatever column declares it* — measured, a
-        // button declared over the session list still lands at `x=872…917` of 921 — so this is where they go;
-        // and declaring them together keeps one row's arrangement in one place. Hand-drawn buttons in the bar
-        // above were tried for the pencil and reverted: a toolbar item is the platform's own control, with its
-        // own style, spacing and behaviour, and a second one does not squeeze the title out of its column any
-        // more now that the title is a drawn bar rather than a toolbar item.
+        }
+        .onPreferenceChange(ConversationTitleHeightKey.self) { height in
+            titleHeight = height
+        }
+        // **Three session actions live here**: fork the one on screen into a copy of its own, pin it to the
+        // top of the list, and rename it. `.primaryAction` is the window's trailing edge *whatever column
+        // declares it* — measured, a button declared over the session list still lands at `x=872…917` of 921 —
+        // so this is where they go; and declaring them together keeps one row's arrangement in one place.
+        // Hand-drawn buttons in the bar above were tried for the pencil and reverted: a toolbar item is the
+        // platform's own control, with its own style, spacing and behaviour, and a second one does not squeeze
+        // the title out of its column any more now that the title is a drawn bar rather than a toolbar item.
+        //
+        // **Pin is a menu and the other two are buttons**, which is not a style choice: it is the middle
+        // one of three session actions and the only one that is a *state* rather than an act. A fourth
+        // bare button would make this row three glyphs of equal weight, and the reader who wants to know
+        // whether the session is already pinned would be reading a glyph for it. The item carries the
+        // answer in words — "Pin Session" or "Unpin Session" — and the glyph is filled while it is pinned,
+        // so the state is visible without opening anything.
         //
         // What used to be here instead — the running-jobs register and Settings — is in the workspace column,
         // which is where the web UI keeps both and where they describe something that spans the window rather
@@ -1329,15 +1614,57 @@ private struct ConversationView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    client.newSession(in: browsing)
+                    client.fork()
                 } label: {
-                    // A plus rather than `square.and.pencil`. The pencil-square is the *document* metaphor
-                    // (Notes' "new note"), and in this window it reads as "write", next to a pencil that
-                    // already means "rename". A plus is the one glyph that says one thing here: this adds a
-                    // session to the list. Renaming keeps the pencil, which is now unambiguous.
-                    Label("New Session", systemImage: "plus")
+                    // `arrow.triangle.branch` — one Y splitting into two, which is what this does and the
+                    // only glyph here that means it. Not `square.on.square` or `doc.on.doc`: those are the
+                    // *copy* metaphors of the Finder, and a copy in this app is a file that stays equal to
+                    // its original. There is no `.fill` or `.circle` variant of this symbol on macOS 26
+                    // (checked, not assumed), so the plain one is the whole choice.
+                    //
+                    // **This replaced a second plus**, which was the same New Session the middle column
+                    // already draws as its first row and the File menu already has on ⌘N — three ways in to
+                    // one command, in the one place where a reader looking at a conversation is thinking
+                    // about *that* conversation.
+                    Label("Fork Session", systemImage: "arrow.triangle.branch")
                 }
-                .help("New session in this project (⌘N)")
+                .help("Fork this session into a copy of its own")
+                // Nothing to fork before there is a session: the shell refuses an empty one too (it would
+                // produce an indistinguishable new row), and a button that looks ready and says "nothing to
+                // fork" is worse than one that says so itself.
+                .disabled(client.currentPath.isEmpty)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button(sessionPinned ? "Unpin Session" : "Pin Session") {
+                        client.setPinned(client.currentPath, to: !sessionPinned)
+                    }
+                } label: {
+                    // `pin` and `pin.fill` — the platform's own pushpin, and the one symbol here whose
+                    // *fill* state means something the reader already knows: filled is on, outlined is
+                    // off, the same as every other toggle on this system. `pin.circle` was the
+                    // alternative and it reads as a badge rather than as this control.
+                    //
+                    // **`.foregroundStyle(.primary)`, and it is not decoration.** Measured with the pin
+                    // menu in this toolbar: without it the glyph comes out in the window's *tint* — the
+                    // app's brand green, `rgb(119,230,164)` read off the pixels, sat=111 — while the two
+                    // buttons beside it come out in the label colour (sat≤19 for the same crop). A green
+                    // pin among two grey ones reads as a state, and the state it would read as is the wrong
+                    // one: it is green whether the session is pinned or not. An explicit style is what
+                    // takes the tint off; the filled glyph is then the whole of the signal.
+                    Label("Pin Session", systemImage: sessionPinned ? "pin.fill" : "pin")
+                        .foregroundStyle(.primary)
+                }
+                .menuIndicator(.hidden)
+                .help(sessionPinned ? "Stop keeping this session at the top" : "Keep this session at the top")
+                // **Named here rather than by the symbol.** With only the label's icon drawn, the
+                // accessibility tree takes its name from the *icon* — measured: the button reported
+                // `title="置顶"`, SF Symbols' own localised name for `pin` — and this app's own strings are
+                // English. So the control says what the menu item says, including which way it goes.
+                .accessibilityLabel(sessionPinned ? "Unpin Session" : "Pin Session")
+                // One item, and no address for a session that is not there: a menu opening on nothing is
+                // worse than a control that says it cannot act — the same rule the pencil follows.
+                .disabled(client.currentPath.isEmpty)
             }
             ToolbarItem(placement: .primaryAction) {
                 Button(action: onRename) {
@@ -1351,6 +1678,21 @@ private struct ConversationView: View {
         }
     }
 
+    /// Whether the session on screen is pinned, read from the list the shell sent.
+    ///
+    /// From the row rather than from a value kept here, so the toolbar and the middle column cannot
+    /// disagree: the row is what the Pinned bar is drawn from, and a second copy of the flag in the window
+    /// would be the one that went stale on a pin made in the other column.
+    private var sessionPinned: Bool {
+        sessionRow?.pinned ?? false
+    }
+
+    /// The row for the session on screen, from the list the shell sent. `nil` for a session created a
+    /// moment ago, which the store has not listed yet.
+    private var sessionRow: SessionRow? {
+        client.sessions.first(where: { $0.path == client.currentPath })
+    }
+
     /// What the session on screen is called: the reader's own name for it, else its first question, else
     /// the id — the three-source rule the list's rows are already labelled by (`SessionRow.label`).
     ///
@@ -1358,9 +1700,7 @@ private struct ConversationView: View {
     /// column cannot drift apart. `nil` while the store has not listed the session, which is a session
     /// created a moment ago: the bar is simply not drawn rather than drawn empty.
     private var sessionName: String? {
-        guard let label = client.sessions.first(where: { $0.path == client.currentPath })?.label,
-            !label.isEmpty
-        else { return nil }
+        guard let label = sessionRow?.label, !label.isEmpty else { return nil }
         return label
     }
 
@@ -1403,7 +1743,18 @@ final class WindowActions: ObservableObject {
     /// Empty is a real value, not a missing one: it is a window with nothing to name yet, and the shell
     /// answers it with the project on screen — which is the right answer when the reader has not chosen
     /// one either.
-    @Published var browsing = ""
+    ///
+    /// **Not `@Published`, and the reason is that nothing draws it.** Every other field here is published
+    /// because some view's body reads it. This one has exactly one reader: the `command` closure of the menu
+    /// item that spends it (`WeiApp`, read when ⌘N is *pressed*). `RootView` observes this object for
+    /// `choosingFolder` and `picture`, so publishing this as well meant that picking a different project
+    /// invalidated **the whole window** — the split view, all three columns — to deliver a value nobody was
+    /// waiting for.
+    ///
+    /// **It was tried as the cause of the flash in the first column, and it is not it**: with this unpublished
+    /// the same 16-point offset still shows up on the frames around a click. What the flash is, and what fixed
+    /// it, is on `SectionTitle("Workspaces")` in `WorkspaceList` — this stays unpublished on its own merits.
+    var browsing = ""
 
     /// The picture sheet, if one is open: blank paper, or a screenshot to mark up.
     ///
@@ -2107,6 +2458,150 @@ private struct ThinkingRow: View {
     }
 }
 
+/// The line saying that a turn ended in **another** conversation.
+///
+/// This is what a reader gets instead of being switched away, and it has one job: let them know the
+/// thing they were waiting for arrived, and give them the one action that follows — without moving
+/// anything. Four decisions in it, all of them about not being a modal:
+///
+/// - **A row above the composer, not an alert.** Nothing here needs a decision *now*. The turn is over,
+///   the transcript it happened in has already recorded it, and a reader who ignores this line loses
+///   nothing — so it belongs next to the box they are about to type into, not in front of the window.
+/// - **Gone in five seconds, with the bar saying so.** The line is the *last* word on something rather
+///   than a question, so it should not need answering; but a line that stands forever is furniture. The
+///   clock and the bar are one signal, not two: the bar *is* the countdown, drawn rather than written,
+///   because a number changing under the reader's eye is something else to read.
+/// - **Two buttons and no third.** “Open” is what the line is for; the ✕ is the reader saying they have
+///   read it, and it is not the same gesture as the clock — one is a decision, the other is time passing.
+/// - **The name in the reader's own words.** The label is the session's, so the line names the
+///   conversation the way the sidebar would.
+///
+/// A failed turn is the one case given a warning's colour rather than the brand's, and only in the
+/// glyph: the failure is worth noticing — the session has a turn to continue — but it is not this
+/// window's emergency, and the buttons to deal with it are in the session the line names.
+private struct ElsewhereNotice: View {
+    let notice: SessionNotice
+    /// Bumped by every *new* fact about another session. Two turns can end in one conversation, and the
+    /// second line has to get its own five seconds rather than inheriting the rest of the first's. It is
+    /// the same counter the chime reads, and for the same reason: `notice` itself also changes when the
+    /// sidebar renames a session, and a clock keyed on the value would restart for a rename.
+    let beat: Int
+    let onOpen: () -> Void
+    let onDismiss: () -> Void
+
+    /// How long the line stands before it takes itself down.
+    ///
+    /// Five seconds is the point where a reader who looked up has read a five-word sentence and clicked
+    /// the one button on it, and a reader who did not look up was going to miss it anyway. It is
+    /// deliberately shorter than the undo offer's twelve (`SessionList.undoWindow`): an undo is a
+    /// decision that expires, and this is news that has already been filed in the conversation it is
+    /// about, so nothing is lost when it goes.
+    private static let window: Duration = .seconds(5)
+    /// The same window as a number, for the bar. Two spellings of one fact, kept adjacent so they cannot
+    /// drift: one is what the clock sleeps for and the other is what the bar is drawn against.
+    private static let windowSeconds: Double = 5
+
+    /// When this line appeared — the clock the bar is measured against.
+    @State private var shownAt = Date()
+
+    var body: some View {
+        HStack(spacing: Wei.Space.tight) {
+            Image(systemName: symbol)
+                .foregroundStyle(tint)
+                .font(Wei.Font.control())
+            Text(notice.title)
+                .font(Wei.Font.control())
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(notice.path)
+            Spacer(minLength: Wei.Space.tight)
+            Button("Open", action: onOpen)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Show that conversation")
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(Wei.Font.caption())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Wei.Palette.secondary)
+            .help("Dismiss")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        // **The same surface the card uses, and not a wash.** The line floats over the transcript: a
+        // translucent fill would put its own words on top of the conversation's, and a line that cannot
+        // be read is worse than no line. The material is the one this app already floats on, which is
+        // also what makes the two read as one stack rather than as a banner and a card.
+        .composerSurface(cornerRadius: Wei.Radius.panel)
+        // The bar goes *in* the shape rather than beside it, so it is clipped by the same corners the
+        // line is: a countdown that ran past the rounded edge would look like a second element.
+        .overlay(alignment: .bottom) { countdownBar }
+        .clipShape(RoundedRectangle(cornerRadius: Wei.Radius.panel, style: .continuous))
+        // **The clock is the `.task`, and the id is what restarts it.** `Task.sleep` is cancelled for
+        // free when the view goes away or when the id changes, which is the two things that must stop a
+        // countdown: the reader dismissing it, and a newer fact arriving. A `Timer` would need both
+        // `invalidate` calls written by hand, and the one that gets forgotten is the leak nobody sees.
+        .task(id: beat) {
+            shownAt = Date()
+            try? await Task.sleep(for: Self.window)
+            guard !Task.isCancelled else { return }
+            onDismiss()
+        }
+    }
+
+    /// The bar, draining from the trailing end: how much of the five seconds is left.
+    ///
+    /// **A function of the clock rather than an animated state**, and that is not fastidiousness: a
+    /// state that counts down has to be *started*, and a start that lands in the same run-loop turn as
+    /// the line's own insertion is a start with no frames in between — the bar would appear already
+    /// empty. Reading `Date()` is right by construction, including when the line arrives while the
+    /// window is busy, which is exactly when a turn ends.
+    ///
+    /// `TimelineView(.animation)` rather than a repeating timer: the platform already ticks once a
+    /// frame while anything is animating, and a second ticker at a second rate is how a bar comes to
+    /// disagree with the clock that will take the line away. Only this bar is redrawn, and only for
+    /// five seconds.
+    private var countdownBar: some View {
+        GeometryReader { geometry in
+            TimelineView(.animation) { context in
+                Capsule()
+                    .fill(tint.opacity(0.65))
+                    .frame(width: geometry.size.width * remaining(at: context.date), height: 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(height: 2)
+    }
+
+    /// How much of the window is left, as 0…1. Clamped at both ends: the bar must not be drawn upside
+    /// down if the clock and this reading ever disagree by a hair.
+    private func remaining(at now: Date) -> Double {
+        let left = 1 - now.timeIntervalSince(shownAt) / Self.windowSeconds
+        return min(1, max(0, left))
+    }
+
+    /// The glyph, by what happened. A mark rather than a word, because the word is the sentence it
+    /// sits next to — and the three marks are the platform's own vocabulary for exactly these three
+    /// outcomes, which is why none of them needs explaining.
+    private var symbol: String {
+        switch notice.outcome {
+        case .finished: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .stopped: return "stop.circle.fill"
+        case .other: return "ellipsis.circle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch notice.outcome {
+        case .finished: return Wei.Palette.accent
+        case .failed: return .orange
+        case .stopped, .other: return Wei.Palette.secondary
+        }
+    }
+}
+
 /// The notice above a session whose last turn was interrupted.
 ///
 /// The same two ways out the web UI offers, because they are the only two there are: carry on with
@@ -2170,21 +2665,21 @@ private struct RowView: View {
             // opened — and a `ForEach` in this view would be that question asked in the wrong place.
             VStack(alignment: .trailing, spacing: SentPictures.gap) {
                 SentPictures(images: row.images)
-                if !row.text.isEmpty {
-                    Text(row.text)
-                        .font(Wei.Font.body())
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(
-                            Wei.Palette.highlightWash,
-                            in: RoundedRectangle(cornerRadius: Wei.Radius.control)
-                        )
-                        // **Selectable, like every other row of the transcript.** It was not — alone
-                        // among the rows — which is the one place a reader is most likely to want to
-                        // copy from: the message is their own words, and it is what they re-send, edit
-                        // or quote. An image-only question has no text to select, and that is why the
-                        // empty case is skipped rather than drawn as an empty bubble.
-                        .textSelection(.enabled)
+                // **A `/skill:<name>` question is drawn as the command, not as what it expanded to.**
+                // The prompt in the log is the skill's whole document — a page of somebody else's
+                // instructions — so the bubble shows what the reader typed (the command, and their own
+                // words after it) and the document goes behind a fold underneath (see `SkillBody`).
+                // Editing the text itself is not the answer: the log one file on disk would disagree
+                // with, and the model really was sent the expansion.
+                if let skill = row.skill {
+                    if !skill.args.isEmpty {
+                        bubble(skill.args)
+                    } else {
+                        bubble("/skill:\(skill.name)", monospaced: true)
+                    }
+                    SkillBody(skill: skill)
+                } else if !row.text.isEmpty {
+                    bubble(row.text)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
@@ -2244,6 +2739,65 @@ private struct RowView: View {
                 .padding(.vertical, 2)
             }
         }
+    }
+
+    /// The bubble a question is drawn in.
+    ///
+    /// One function because there are two kinds of question now — what the reader typed, and the
+    /// command a skill question was — and two copies of this block would be one shape written twice,
+    /// with the padding and the wash free to drift apart.
+    ///
+    /// **Selectable, like every other row of the transcript.** It was not — alone among the rows —
+    /// which is the one place a reader is most likely to want to copy from: the message is their own
+    /// words, and it is what they re-send, edit or quote.
+    ///
+    /// The monospaced case is a command with no words of the reader's own. A name and a colon set in
+    /// body type read as a sentence, and this bubble is not a sentence — it is the command, and the fold
+    /// under it is what the command did.
+    @ViewBuilder
+    private func bubble(_ text: String, monospaced: Bool = false) -> some View {
+        Text(text)
+            .font(monospaced ? Wei.Font.code(Wei.Size.body) : Wei.Font.body())
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Wei.Palette.highlightWash,
+                in: RoundedRectangle(cornerRadius: Wei.Radius.control)
+            )
+            .textSelection(.enabled)
+    }
+}
+
+/// The skill a `/skill:<name>` question ran, folded away.
+///
+/// It is under the question rather than in place of it, because it *is* the question — what the model
+/// was asked — and somebody checking why an answer went the way it did wants to see it before the
+/// answer. Folded because it is the one piece of text in the transcript that is almost never read and
+/// always long: a skill's document is thousands of characters, and drawn open it pushes the answer
+/// off the screen for every reader who did not come here to audit the skill.
+///
+/// Its label carries the count, because "how much is behind this" is the question a fold raises and a
+/// word like "details" does not answer it.
+private struct SkillBody: View {
+    let skill: SkillFrame
+
+    var body: some View {
+        DisclosureGroup {
+            Text(skill.body)
+                .font(Wei.Font.code(Wei.Size.control))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 4)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "text.book.closed")
+                    .font(.system(size: Wei.Icon.inline - 2, weight: .semibold))
+                Text(skill.foldLabel)
+                    .font(Wei.Font.caption(.medium))
+            }
+            .foregroundStyle(Wei.Palette.secondary)
+        }
+        .padding(.vertical, 2)
     }
 }
 
@@ -2596,6 +3150,14 @@ private struct TableView: View {
                 Text(Styled.spans(spans))
                     .font(.system(size: Self.cellSize, weight: isHeader ? .semibold : .regular))
                     .multilineTextAlignment(alignment(laid.align[index]))
+                    // **A clamped column's text wraps; it does not become an ellipsis.** `maximum` bounds
+                    // a column, so a cell wider than that has to go somewhere — and the somewhere is a
+                    // second line. Without this the cell is laid out against the height the row offers
+                    // it, and a `Text` that does not fit is drawn as one line and an ellipsis: measured
+                    // in the running app, the long cells of a table arrived as a single truncated line,
+                    // while the same cell drawn outside the transcript wrapped. `horizontal: false`
+                    // leaves the column's width authoritative — only the height is free to grow.
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, Self.padding)
                     .padding(.vertical, 6)
                     // The whole point: a fixed width, the same number for every row, so the rules form
@@ -2640,17 +3202,53 @@ private struct TableView: View {
     /// cell and the header is measured alongside the data, so measuring prose with the lighter face would
     /// under-measure prose that sits in a column whose header is long. The difference is a couple of
     /// percent of a column's width, and the direction of it is the safe one.
+    ///
+    /// **Which face that is, is a question per run, and both halves of it have been got wrong once.**
+    /// The semibold rule above is for the runs that have no font of their own. A code span is drawn in
+    /// the code face at the same *size*, which is a different font rather than a weight of this one —
+    /// and the face a span is drawn in is not recoverable from `Styled.spans(spans)`, which is what
+    /// `runs` is for.
     private static func width(_ spans: [Block.Span]) -> CGFloat {
-        let attributed = NSMutableAttributedString(
-            attributedString: NSAttributedString(Styled.spans(spans))
-        )
+        let attributed = NSMutableAttributedString()
+        for (text, monospaced) in runs(spans) where !text.isEmpty {
+            attributed.append(
+                NSAttributedString(
+                    string: text,
+                    attributes: [
+                        .font: monospaced
+                            ? NSFont.monospacedSystemFont(ofSize: cellSize, weight: .regular)
+                            : NSFont.systemFont(ofSize: cellSize, weight: .semibold)
+                    ]
+                )
+            )
+        }
         guard attributed.length > 0 else { return 0 }
-        attributed.addAttribute(
-            NSAttributedString.Key.font,
-            value: NSFont.systemFont(ofSize: cellSize, weight: .semibold),
-            range: NSRange(location: 0, length: attributed.length)
-        )
         return ceil(attributed.size().width)
+    }
+
+    /// A cell's spans as runs, each tagged with whether it is drawn monospaced.
+    ///
+    /// The same walk as `Styled`, keeping only the question "which face" — because that question
+    /// cannot be asked of `Styled`'s output. A SwiftUI `Font` on an `AttributedString` does **not**
+    /// survive the bridge to AppKit: measured, a code span's font arrives as `nil` and the run is
+    /// measured in the default face. That is one class of the bug this file already had once — a
+    /// column sized for text that is not the text in it — and it is the worse half of it: the code
+    /// face at the same size is about 20% wider than the system face (measured: `get_url(id)` is 68
+    /// points in system semibold and 89 in monospaced), which is the width a cell overflows by.
+    private static func runs(_ spans: [Block.Span], monospaced: Bool = false) -> [(String, Bool)] {
+        var out: [(String, Bool)] = []
+        for span in spans {
+            switch span {
+            case let .text(text): out.append((text, monospaced))
+            case let .code(code): out.append((code, true))
+            case let .emph(inner), .strong(let inner), .strike(let inner):
+                out += runs(inner, monospaced: monospaced)
+            case let .link(_, inner): out += runs(inner, monospaced: monospaced)
+            // A picture in a cell is drawn as its alt text (see `Styled`), so that is what is measured.
+            case let .image(_, alt): out.append((alt, monospaced))
+            }
+        }
+        return out
     }
 }
 

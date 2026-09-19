@@ -22,6 +22,17 @@ public enum ShellState: Equatable {
     }
 }
 
+/// A pane of the settings window, by the name on its tab.
+///
+/// A second vocabulary for the same five panes, and deliberately so: this one exists so that a request
+/// made from the *window* ("the reader pressed a button about the key") can be answered by the
+/// settings *scene*, which is a different part of the view tree and shares nothing else with it. The
+/// two lists are joined in exactly one place — `SettingsView`'s mapping to its own `Pane` — so a pane
+/// renamed there has one switch to update rather than a string somewhere that quietly stops matching.
+public enum SettingsPane: String, Equatable, Sendable {
+    case key, tools, skills, instructions, limits
+}
+
 /// A conversation that just left the store.
 ///
 /// `restorable` is the checkbox in the delete dialog, and it is the shell's answer rather than the
@@ -77,10 +88,39 @@ public final class ShellClient: ObservableObject {
     @Published public private(set) var interrupted = false
     /// The question that interrupted turn was asked, so the notice can show what it would resume.
     @Published public private(set) var interruptedPrompt = ""
+    /// A turn that ended in another conversation, to be said without leaving this one. `nil` when there
+    /// is nothing to say.
+    ///
+    /// **This is what replaced a switch.** A turn ending in a background session used to arrive as a
+    /// `session` event, and the line that handled it moved the window — so an answer finishing in
+    /// session 2 pulled a reader out of session 1. The event has a kind of its own now (`elsewhere`),
+    /// and this is where it lands.
+    ///
+    /// It lives on the client rather than on a transcript because it is about a conversation that is
+    /// not the one being drawn: the transcript of the session that ended already has its own record of
+    /// the turn (`Conversation`'s `end` note), and this is the part the reader has not been told.
+    @Published public private(set) var notice: SessionNotice?
+    /// Bumped each time a *new* notice arrives — the chime's trigger, and deliberately not `notice`.
+    ///
+    /// A sound has to ring once per event, and `notice` is a value that can change for reasons that are
+    /// not events: its label is refreshed when the sidebar renames a session, and a chime keyed on the
+    /// value would ring again for a rename. This counts notifications; `notice` says what the last one
+    /// was.
+    @Published public private(set) var noticeBeat = 0
     /// The models this build can call, and which one the session is on. Sent by the shell rather than
     /// kept here: the catalog is compiled into the side that will refuse an unknown id, and a list
     /// the host maintained of its own would be a second place for the two to disagree.
     @Published public private(set) var catalog = ModelCatalog.empty
+    /// The thinking levels this session's model offers, and the one in force. Sent by the shell for
+    /// the catalog's reason: the levels are per model, and the side that would refuse a level it does
+    /// not know is the side that has to say which ones it has.
+    ///
+    /// Per session in principle — a level is a fact about a model, and two sessions may be on two
+    /// models — and one value here because the menu is drawn under one composer: the shell says this
+    /// for the session that is on screen, and switching says it again. A background session's own
+    /// level is not lost, because the shell holds it; it is only not on screen, which is the same
+    /// thing `catalog` does.
+    @Published public private(set) var thinking = ThinkLevels.empty
     /// The background jobs that are still running, as the shell last saw the process table. A
     /// snapshot, not a running total: a job whose process has exited stops being listed within a
     /// couple of seconds, from the shell's own tick.
@@ -169,9 +209,41 @@ public final class ShellClient: ObservableObject {
             if case let .ready(_, _, _, key) = state {
                 state = .ready(session: envelope.session, model: model, cwd: cwd, key: key)
             }
+            // **And a notice about the session that is now on screen has been answered.** The reader
+            // is looking at the conversation it was about, which is the only thing the line offered;
+            // leaving it up would be a banner saying "you have not seen this" over the thing itself.
+            // Clearing it here rather than in `open(_:)` is what makes it true for every way in: the
+            // click, the sidebar row, `⌃⇥`, and the banner's own Open.
+            if notice?.path == envelope.session { notice = nil }
 
         case let .sessions(workspaces):
-            groups = workspaces
+            // **Not the wire's order, the reader's.** The shell sends "most recently written first", and
+            // a turn writes continuously — see `stableSidebarOrder` for what that cost when it was drawn
+            // as it arrived (the rows swapped every couple of seconds while two turns ran).
+            groups = stableSidebarOrder(incoming: workspaces, previous: groups)
+            // The list is where a session's name lives, so a notice that is up is renamed with it — a
+            // turn that just gave its session its first question would otherwise be announced by the
+            // eight hex characters that were all the list had when the turn ended.
+            if let up = notice {
+                notice = SessionNotice(
+                    path: up.path, outcome: up.outcome, label: sessionName(of: up.path, in: groups)
+                )
+            }
+
+        case let .elsewhere(path, outcome):
+            // A turn ended where the reader is not looking. Said, not shown: the window does not move.
+            notice = SessionNotice(
+                path: path,
+                outcome: SessionNotice.Outcome(wire: outcome),
+                label: sessionName(of: path, in: groups)
+            )
+            noticeBeat += 1
+            // **Not routed to a transcript, and returning rather than falling through.** Every other
+            // line below files the event under the session it names, and this one names a session the
+            // reader is not looking at — so falling through would leave an empty `Conversation` behind
+            // for it, and a later switch to that session would draw the empty one instead of waiting
+            // for the `history` that is already on its way.
+            return
 
         case let .deleted(path, label, restorable):
             // The outcome of a delete, said once. It replaces whatever offer was up: two lines would be
@@ -182,7 +254,20 @@ public final class ShellClient: ObservableObject {
             self.settings = settings
 
         case let .models(catalog):
-            self.catalog = catalog
+            // Only when it is about the session on screen. The shell says this for whichever session it
+            // just showed, and a switch sends it *after* the `session` event that moved `currentPath` —
+            // so this is the shown session's list, and a line about a background one is one the window
+            // must not adopt: the picker would be offering another conversation's model.
+            if envelope.session.isEmpty || envelope.session == currentPath {
+                self.catalog = catalog
+            }
+
+        case let .think(levels):
+            // The same rule as the catalog's, for the same reason, and the cost of getting it wrong is
+            // the same shape: a menu whose tick is another session's level.
+            if envelope.session.isEmpty || envelope.session == currentPath {
+                thinking = levels
+            }
 
         case let .jobs(items):
             jobs = items
@@ -231,12 +316,18 @@ public final class ShellClient: ObservableObject {
     /// One sentence, and it names the fix rather than the symptom: "no API key" is a diagnosis a reader
     /// can act on, and "unavailable" is not. Two states, because they are the two the shell reports — a
     /// shell that failed to start at all, and one that is up with no credential to send.
+    ///
+    /// **The key half is a fact and not an instruction**, because the view draws the instruction as a
+    /// button (`StatusLine` in `Composer.swift`): "no API key — open Settings" beside a button reading
+    /// "Open Settings" is the same sentence twice, and the arm of it that a reader can act on is the
+    /// one that should look like a control. Everywhere else the sentence has to stand alone, which is
+    /// why the shell's own wording (for a terminal) still says what to do.
     public var blocked: String? {
         switch state {
         case .starting:
             return "starting…"
         case .unkeyed:
-            return "no API key — open Settings"
+            return "No API key"
         case let .failed(text):
             // The shell's own sentence, not a prefix added here: it already says "could not start: …" and
             // wrapping it produced "could not start: could not start: Failure(no HOME)" the first time.
@@ -244,6 +335,16 @@ public final class ShellClient: ObservableObject {
         case .ready:
             return nil
         }
+    }
+
+    /// Whether the thing blocking a send is a key the reader can add, and the door is Settings.
+    ///
+    /// Read by the view to decide whether the wall gets a button. A shell that failed to start has no
+    /// such door — nothing in Settings would fix a missing `HOME` — and offering one would be a control
+    /// that leads nowhere.
+    public var missingKeyIsFixableHere: Bool {
+        if case .unkeyed = state { return true }
+        return false
     }
 
     /// The project the open session belongs to, or empty when the store has not listed it yet.
@@ -362,6 +463,17 @@ public final class ShellClient: ObservableObject {
         tell("/model \(id)")
     }
 
+    /// Ask for a different amount of thinking on the next turn.
+    ///
+    /// A request rather than a state change, for the reason `setModel` is one: whether the level is
+    /// one this model has is the shell's answer, and it says so by sending `think` back with whatever
+    /// it settled on. A level the model does not have is answered with the level in force, which is
+    /// why the menu re-reads rather than assuming the click took.
+    public func setThinkLevel(_ id: String) {
+        guard !id.isEmpty, id != thinking.current else { return }
+        tell("/think \(id)")
+    }
+
     /// Put a picture on the next prompt.
     ///
     /// The path crosses as a path rather than as bytes, because the shell is the side that reads it:
@@ -405,6 +517,21 @@ public final class ShellClient: ObservableObject {
     /// never be forked.
     public func rename(_ path: String, to name: String) {
         tell("/rename \(path) \(name)")
+    }
+
+    /// Keep a session at the top of the list, or stop keeping it there.
+    ///
+    /// **`to:` rather than a toggle**, and that is the same rule the rename above follows by being
+    /// absolute: the menu item and the toolbar button both know which state they are offering, and a
+    /// command that flipped the bit would let a stale window unpin what a second window just pinned.
+    /// The word is `on`/`off` rather than a bare flag so the wire log reads as a sentence.
+    ///
+    /// Any session, not just the one on screen — unlike a rename, which appends to a log. A pin is a
+    /// line in a list of its own (`core/pins.mbt`), so it cannot fork anything, and the reader can
+    /// pin a conversation they are not reading.
+    public func setPinned(_ path: String, to pinned: Bool) {
+        guard !path.isEmpty else { return }
+        tell("/pin \(path) \(pinned ? "on" : "off")")
     }
 
     // ── background jobs ───────────────────────────────────────────────────
@@ -465,6 +592,19 @@ public final class ShellClient: ObservableObject {
     /// holds the open session yet — and the shell's answer to that is "the project on screen".
     public func newSession(in project: String) {
         tell(project.isEmpty ? "/new" : "/new \(project)")
+    }
+
+    /// Fork the session on screen: a copy, in a file of its own.
+    ///
+    /// **A snapshot, not a mirror.** Nothing connects the two files afterwards — a later turn in either
+    /// one will never appear in the other — which is why the word is "fork" and not "duplicate" (a
+    /// duplicate promises a copy that keeps up), and why the shell answers with a line saying so.
+    ///
+    /// No arguments, unlike every command around it: what it acts on is the session that is already
+    /// open, and a fork of a session this process is not holding would mean reading a file, copying it and
+    /// writing it back — the same hazard `rename(_:to:)` refuses.
+    public func fork() {
+        tell("/fork")
     }
 
     /// Add a project: open a session in a folder the reader picked, **and record the folder as a
@@ -552,7 +692,36 @@ public final class ShellClient: ObservableObject {
         deleted = nil
     }
 
+    /// Take the "a turn ended elsewhere" line down, because the reader said so.
+    ///
+    /// No command goes to the shell, and that is the point: the notice is not a fact about any
+    /// conversation — the turn is over in its own transcript whatever this window draws — so there is
+    /// nothing on the other side to correct. What the reader is doing is declining to be told again.
+    public func dismissNotice() {
+        notice = nil
+    }
+
     // ── settings ──────────────────────────────────────────────────────────
+
+    /// A request for the settings window, and which pane to open on.
+    ///
+    /// **A request rather than a call, because the window it is about is a scene.** The settings panel
+    /// is not a view in this window's tree: `SettingsView` lives in `WeiApp`'s `Settings` scene, which
+    /// shares nothing with `RootView` but this object. So the control under the composer (which *can*
+    /// open the window, via `@Environment(\.openSettings)`) leaves the pane here, and the panel reads
+    /// it.
+    ///
+    /// A counter rather than a flag: two requests are two events, and a flag that was already true
+    /// would swallow the second — a second press while the panel is open on the wrong pane has to
+    /// still move it.
+    @Published public private(set) var settingsAsk = 0
+    @Published public private(set) var settingsPane = SettingsPane.key
+
+    /// Ask for settings, on the pane where the reader can act on whatever they were just told.
+    public func askForSettings(_ pane: SettingsPane) {
+        settingsPane = pane
+        settingsAsk += 1
+    }
 
     /// Ask what is in force. Sent when the panel opens as well as at startup, because the settings
     /// file can be edited by hand while this app is running.

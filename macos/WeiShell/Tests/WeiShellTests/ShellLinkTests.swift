@@ -61,20 +61,29 @@ final class ShellLinkTests: XCTestCase {
 
         // The three events the shell sends before it does anything else. Waiting for all of them is
         // waiting for the pipe in both directions a snapshot needs: `settings` is asked for at startup
-        // and pushed, and `sessions` is what the sidebar draws.
+        // and pushed, and `session` is what says a conversation is open.
+        //
+        // **Deliberately not "the sidebar filled in".** That was the old condition, and it only ever
+        // became true because of a bug: with a store that has nothing in it, this shell opened a session
+        // that has not been written, and `say_sessions` *invented a workspace* to hold it — so the
+        // process that had never been told where to work drew a sidebar with one row in it. That row is
+        // gone (`carry_current` in `macos/appffi/sessions.mbt`; the rule has a test of its own in
+        // `macos/appffi/app_wbtest.mbt`), and a store with nothing in it now lists nothing, which is what
+        // a first run should see.
         XCTAssertTrue(
-            wait(for: { client.settings != nil && !client.groups.isEmpty }),
+            wait(for: { client.settings != nil && !client.currentPath.isEmpty }),
             "the shell was started but never heard from: state=\(client.state)"
         )
         XCTAssertNotEqual(client.state, .starting)
-        XCTAssertFalse(client.currentPath.isEmpty, "no session was opened")
 
-        // And the other direction: a command the host sends is one the shell reads. `/sessions` asks
-        // for the list again, so a change that arrives proves the round trip.
-        let before = client.groups
+        // And the other direction: a command the host sends is one the shell reads. `/new` opens a
+        // session in the project that is open, so a *different* session path coming back proves the
+        // round trip. The path rather than the list, for the reason above: this store has no workspaces
+        // in it yet, so what changed is the session and not the sidebar.
+        let before = client.currentPath
         client.newSession()
         XCTAssertTrue(
-            wait(for: { client.currentPath != "" && client.groups != before || !client.groups.isEmpty }),
+            wait(for: { client.currentPath != before }),
             "the shell did not answer a command"
         )
 
@@ -107,9 +116,14 @@ final class ShellLinkTests: XCTestCase {
             "the shell did not open a session in the folder it was given: \(client.currentWorkspace)"
         )
 
-        // Phase two: the bug. Name B — a project the store has never been told about — and the session
-        // has to open *there*. Before the fix this assertion read `\(canonical(projA))`, because the
-        // command carried no project and the shell fell back to the session on screen.
+        // Phase two: the bug. Name B — a project that is not in the sidebar — and the session has to open
+        // *there*. Before the fix this assertion read `\(canonical(projA))`, because the command carried no
+        // project and the shell fell back to the session on screen.
+        //
+        // B is also the case that keeps `carry_current` honest from the other side: a session in a folder
+        // the store does not list would have no group to be listed under, so naming a folder for a new
+        // session is what records it as a workspace (`note_workspace`, `macos/appffi/sessions.mbt`). That
+        // is why this assertion still has something to read.
         client.newSession(in: projB)
         XCTAssertTrue(
             wait(for: { client.currentWorkspace == self.canonical(projB) }),
@@ -119,6 +133,74 @@ final class ShellLinkTests: XCTestCase {
             client.currentWorkspace,
             canonical(projA),
             "the new session opened in the project that was already open"
+        )
+
+        // ── pinning, which is a command, a file and a flag on a row ──────────────────────────────
+        //
+        // The whole path in one place, because the three halves live in three languages: `pinned`
+        // crosses on the `sessions` line, the flag is `pins.json` under this test's own HOME, and the
+        // command is the one the context menu and the toolbar send. A pin that only the writer believed
+        // in would be a menu item that appears to do nothing.
+        let kept = client.currentPath
+        client.setPinned(kept, to: true)
+        XCTAssertTrue(
+            wait(for: { client.sessions.first(where: { $0.path == kept })?.pinned == true }),
+            "the shell did not report the pin on the row"
+        )
+        // And it is on disk, beside the settings, as a plain list of paths — what a reader finds if they
+        // go looking, and what makes the pin outlive the process.
+        let pinsFile = root + "-home" + "/.wei/pins.json"
+        XCTAssertEqual(try? String(contentsOfFile: pinsFile, encoding: .utf8), "[\"\(kept)\"]\n")
+
+        client.setPinned(kept, to: false)
+        XCTAssertTrue(
+            wait(for: { client.sessions.first(where: { $0.path == kept })?.pinned == false }),
+            "the shell did not report the pin coming off"
+        )
+        XCTAssertEqual(try? String(contentsOfFile: pinsFile, encoding: .utf8), "[]\n")
+
+        // ── the thinking level, which is a per-model fact travelling as a session setting ────────
+        //
+        // Three things in one place, and they are the reason this is not a menu drawn by the host: the
+        // list of levels comes from the shell, the choice goes back as a *request*, and the answer to
+        // that request is clamped by the model the session is on. The last of those is the one worth a
+        // real round trip — `low` is flash's level and not the pro model's, so switching models is what
+        // makes the difference between "a level that is offered" and "a level that will be sent".
+        XCTAssertTrue(
+            wait(for: { client.thinking.items.contains(where: { $0.id == "low" }) }),
+            "the shell never said which levels this model has: \(client.thinking)"
+        )
+        // `high` is what this repository has always asked for, so it is where a session starts — the
+        // reader's last choice is inherited by a *new session*, and this one is new, which is the same
+        // rule the model picker follows.
+        XCTAssertEqual(client.thinking.current, "high")
+        XCTAssertTrue(client.thinking.currentLevel?.isDefault == true)
+
+        client.setThinkLevel("low")
+        XCTAssertTrue(
+            wait(for: { client.thinking.current == "low" }),
+            "the shell did not take the level: \(client.thinking.current)"
+        )
+
+        // And now a model that has no `low`. The command is accepted (it is a level this build knows)
+        // and the level that will really be asked for is the new model's default — not `low`, which
+        // would be a request the API refuses. Nothing here writes to the log: the driver records the
+        // level at the top of the next turn, which is the only moment it is true.
+        client.setModel("deepseek-v4-pro")
+        XCTAssertTrue(
+            wait(for: { client.thinking.current == "high" && client.catalog.current == "deepseek-v4-pro" }),
+            "the level survived a model that does not have it: \(client.thinking)"
+        )
+        XCTAssertFalse(
+            client.thinking.items.contains(where: { $0.id == "low" }),
+            "the pro model was offered a level it does not have"
+        )
+        // Turning it off is offered by every model, and is a level rather than the absence of one —
+        // which is what makes it recordable, and what the driver test for the disabled form covers.
+        client.setThinkLevel("off")
+        XCTAssertTrue(
+            wait(for: { client.thinking.current == "off" }),
+            "off is a level like any other: \(client.thinking.current)"
         )
 
         // Stops the agent thread rather than leaving it to the process exit: the runtime has an event

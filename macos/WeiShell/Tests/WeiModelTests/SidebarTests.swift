@@ -10,7 +10,13 @@ import XCTest
 final class SidebarTests: XCTestCase {
     /// A session list, exactly as `sessions_event` writes it.
     private let sessionsLine = #"""
-    {"kind":"sessions","workspaces":[{"cwd":"/home/me/project","label":"project","current":true,"sessions":[{"path":"/store/--home-me-project--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl","id":"01a02d4c","label":"set up the project","modified":1787466378656,"current":true,"running":false,"pending":false}]}]}
+    {"kind":"sessions","workspaces":[{"cwd":"/home/me/project","label":"project","current":true,"sessions":[{"path":"/store/--home-me-project--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl","id":"01a02d4c","label":"set up the project","modified":1787466378656,"current":true,"running":false,"pending":false,"pinned":true}]}]}
+    """#
+
+    /// A session list from a shell built before sessions could be pinned: the same line without the
+    /// field.
+    private let olderSessionsLine = #"""
+    {"kind":"sessions","workspaces":[{"cwd":"/home/me/project","label":"project","current":true,"sessions":[{"path":"/store/--home-me-project--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl","id":"01a02d4c","label":"set up the project","modified":1787466378656,"current":true,"running":false}]}]}
     """#
 
     func testSessionsCarryTheirWorkspacesAndTheirRows() throws {
@@ -35,6 +41,21 @@ final class SidebarTests: XCTestCase {
         XCTAssertEqual(row.modified, 1_787_466_378_656)
         XCTAssertTrue(row.current)
         XCTAssertFalse(row.running)
+        // Pinned travels on the row, and it is true here — the literal is the same one
+        // `app_wbtest.mbt` asserts from the writing side.
+        XCTAssertTrue(row.pinned)
+    }
+
+    /// **A row from a shell that never heard of pinning still decodes.** The field is optional on the
+    /// reading side, and the failure it guards against is not hypothetical: `pinned` is required by a
+    /// synthesized decoder, and one missing key would take the whole list down — every project, every
+    /// row — rather than drawing a list with no pins in it.
+    func testARowWithoutThePinnedFieldIsSimplyNotPinned() throws {
+        let event = try XCTUnwrap(ShellEvent.decode(line: olderSessionsLine))
+        guard case let .sessions(workspaces) = event else {
+            return XCTFail("expected sessions, got \(event)")
+        }
+        XCTAssertFalse(try XCTUnwrap(workspaces.first?.sessions.first).pinned)
     }
 
     /// Moving between sessions without the pointer: the row below, the row above, and the ends of the
@@ -62,6 +83,73 @@ final class SidebarTests: XCTestCase {
         XCTAssertNil(neighbourSession(rows: [row("a"), row("b")], from: "z", step: 1))
     }
 
+    /// **The list stays where the reader left it, even though the shell keeps sending a new order.**
+    ///
+    /// The order on the wire is "the most recently written first", and a turn writes to its session's file
+    /// continuously — so between two events the top two projects swap, and every row under them moves down
+    /// a row height and back. This is the rule that stops the column moving under the pointer; the
+    /// measurement (two turns running, 0s and 2s apart, alternating as "newest") is in
+    /// `stableSidebarOrder`'s own note.
+    func testARecentWriteDoesNotReorderTheList() {
+        let before = [group("/p/a", rows: ["s1", "s2"]), group("/p/b", rows: ["s3"])]
+        // What the store says a moment later: `/p/b` has just been written to, so it leads, and inside
+        // `/p/a` the row that was written lists first.
+        let after = [group("/p/b", rows: ["s3"]), group("/p/a", rows: ["s2", "s1"])]
+
+        let kept = stableSidebarOrder(incoming: after, previous: before)
+
+        XCTAssertEqual(kept.map(\.cwd), ["/p/a", "/p/b"], "the projects moved")
+        XCTAssertEqual(
+            kept.first?.sessions.map(\.path), ["s1", "s2"],
+            "the rows inside a project moved"
+        )
+    }
+
+    /// What the reader has just started is the exception, and it is not a reorder: a session the list has
+    /// never seen goes to the top of its project, which is where the shell puts it and where the reader is
+    /// looking. A project it has never seen leads the column for the same reason.
+    func testWhatTheListHasNeverSeenGoesToTheTop() {
+        let before = [group("/p/a", rows: ["s1", "s2"]), group("/p/b", rows: ["s3"])]
+        let after = [
+            group("/p/a", rows: ["s0", "s1", "s2"]),
+            group("/p/b", rows: ["s3"]),
+            group("/p/c", rows: ["s4"]),
+        ]
+
+        let kept = stableSidebarOrder(incoming: after, previous: before)
+
+        XCTAssertEqual(
+            kept.map(\.cwd), ["/p/c", "/p/a", "/p/b"],
+            "a project the list has not seen joins at the top"
+        )
+        XCTAssertEqual(kept[1].sessions.map(\.path), ["s0", "s1", "s2"], "a new session joins at the top")
+    }
+
+    /// The two ways a row leaves: a project that left the store goes, and a session that was deleted is
+    /// not kept alive by having once been on screen.
+    func testWhatIsGoneIsGone() {
+        let before = [group("/p/a", rows: ["s1", "s2"]), group("/p/b", rows: ["s3"])]
+        let after = [group("/p/a", rows: ["s1"])]
+
+        let kept = stableSidebarOrder(incoming: after, previous: before)
+
+        XCTAssertEqual(kept.map(\.cwd), ["/p/a"])
+        XCTAssertEqual(kept.first?.sessions.map(\.path), ["s1"])
+    }
+
+    /// The first list of a run has nothing to keep, so it *is* the store's order — the seed the whole rule
+    /// starts from, and the reason "most recently used" is still what a reader sees when they open the app.
+    func testTheFirstListOfARunIsTheStoresOwnOrder() {
+        let seeded = stableSidebarOrder(incoming: [group("/p/b", rows: ["s3", "s4"])], previous: [])
+        XCTAssertEqual(seeded.map(\.cwd), ["/p/b"])
+        XCTAssertEqual(seeded.first?.sessions.map(\.path), ["s3", "s4"])
+    }
+
+    /// A group with the fields this test is not about filled in the way the shell fills them.
+    private func group(_ cwd: String, rows: [String]) -> SessionGroup {
+        SessionGroup(cwd: cwd, label: cwd, current: false, sessions: rows.map(row))
+    }
+
     /// A row with nothing but a path: the fields these tests are not about are the ones the shell
     /// fills in, and a default here keeps each test about the thing it names.
     private func row(_ path: String) -> SessionRow {
@@ -69,6 +157,34 @@ final class SidebarTests: XCTestCase {
             path: path, shortID: path, label: path, modified: 0,
             current: false, running: false
         )
+    }
+
+    /// What the list calls a session, asked by path rather than by row.
+    ///
+    /// The notice above the transcript names a conversation the reader is not looking at, so it has no row
+    /// in hand — only a path off the wire. This is the lookup that turns one into the other, and the two
+    /// fallbacks are the whole of it: a row the shell has labelled, the id of one it has not, and nothing
+    /// at all for a session the store has not listed.
+    func testASessionIsNamedByPathForTheNoticeAboutIt() {
+        let named = SessionRow(
+            path: "b", shortID: "bbbbbbbb", label: "what B asked", modified: 0,
+            current: false, running: false
+        )
+        let unnamed = SessionRow(
+            path: "c", shortID: "cccccccc", label: "", modified: 0,
+            current: false, running: false
+        )
+        let groups = [
+            SessionGroup(cwd: "/home/me", label: "me", current: true, sessions: [named, unnamed])
+        ]
+        XCTAssertEqual(sessionName(of: "b", in: groups), "what B asked")
+        // No label yet — a session whose first turn has not been written — is named by the id rather
+        // than left empty: a notice with no subject is a notice about nothing.
+        XCTAssertEqual(sessionName(of: "c", in: groups), "cccccccc")
+        // A path in no group at all is the one case that has no name to give, and empty is the answer
+        // the caller draws its own fallback sentence for.
+        XCTAssertEqual(sessionName(of: "z", in: groups), "")
+        XCTAssertEqual(sessionName(of: "b", in: []), "")
     }
 
     /// Where a session lives, as the list says it.
@@ -146,7 +262,7 @@ final class SidebarTests: XCTestCase {
         XCTAssertEqual(prompt, "")
 
         var conversation = Conversation()
-        conversation.apply(.user(text: "the old session's question", continued: false, images: []))
+        conversation.apply(.user(text: "the old session's question", continued: false, images: [], skill: nil))
         conversation.apply(envelope.event)
         XCTAssertEqual(conversation.rows.count, 1)
     }
@@ -218,7 +334,7 @@ final class SettingsTests: XCTestCase {
     func testSettingsDoNotTouchTheTranscript() throws {
         let event = try XCTUnwrap(ShellEvent.decode(line: settingsLine))
         var conversation = Conversation()
-        conversation.apply(.user(text: "hi", continued: false, images: []))
+        conversation.apply(.user(text: "hi", continued: false, images: [], skill: nil))
         conversation.apply(event)
         XCTAssertEqual(conversation.rows.count, 1)
     }

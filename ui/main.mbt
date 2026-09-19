@@ -201,8 +201,8 @@ async fn main {
           log(job.label())
           try requests.apply_display(job) catch {
             err => {
-              log("job failed: \{err}")
-              requests.say("failed: \{err}")
+              log("job failed: \{@core.error_text(err)}")
+              requests.say("failed: \{@core.error_text(err)}")
             }
           } noraise {
             _ => ()
@@ -216,7 +216,7 @@ async fn main {
     try @server.serve(args.port, app.hub, requests.routes()) catch {
       err =>
         raise Failure::Failure(
-          "cannot listen on 127.0.0.1:\{args.port} (\{err}). Another instance may be running; pass --port to choose another.",
+          "cannot listen on 127.0.0.1:\{args.port} (\{@core.error_text(err)}). Another instance may be running; pass --port to choose another.",
         )
     } noraise {
       _ => ()

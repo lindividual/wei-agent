@@ -403,3 +403,85 @@ test "a shorter request reports nothing changed" {
   assert_eq(drift.first_changed, 1)
   assert_eq(drift.changed_bytes, 0)
 }
+
+///|
+/// A cross-turn reading is marked as such, and is a reading either way.
+///
+/// The first request of a turn used to be the one request per turn nothing measured, because the
+/// report compared each request only with the one before it *inside the same turn*. That is also
+/// the request where the trim boundary most often moves -- the previous turn appended the messages
+/// that released it, so the middle of the conversation gets rewritten just as the new turn starts.
+/// The flag keeps the two kinds of previous request distinguishable, so a rewrite found across the
+/// seam is not reported as a rewrite within the turn that did not happen.
+test "an across-turn comparison says so, and a within-turn one says that" {
+  let first = convert_messages(
+    [User({ content: [Text("one")], timestamp: 0L, })],
+    None,
+    vision=false,
+  )
+  let second = convert_messages(
+    [
+      User({ content: [Text("one")], timestamp: 0L, }),
+      User({ content: [Text("two")], timestamp: 0L, }),
+    ],
+    None,
+    vision=false,
+  )
+  let own_time = request_drift(Some(first), second)
+  assert_true(own_time.within_turn)
+  assert_true(own_time.appended_only())
+  let across = request_drift(Some(first), second, within_turn=false)
+  assert_false(across.within_turn)
+  // Everything the report says about the bytes is the same; only the provenance differs.
+  assert_true(across.appended_only())
+  assert_eq(across.changed_bytes, own_time.changed_bytes)
+  assert_eq(across.first_changed, own_time.first_changed)
+}
+
+// ── Thinking levels ────────────────────────────────────────────────────────
+
+///|
+/// The level a log records for a session that ran with thinking off is a *name*, and it has to
+/// resolve the same way an absent level does.
+///
+/// This is what makes the two states distinguishable when the log is read back: a session with no
+/// `thinking_level_change` at all is one nobody has decided for (`SessionContext::thinking_level` is
+/// `None`), while `off` is a decision that was made and written down — and it has to arrive at the
+/// same request either way, or a resumed session would think after being told not to.
+test "the level off resolves to thinking disabled" {
+  let levels = deepseek_v4_thinking_levels()
+  assert_eq(levels.resolve(None), Disabled)
+  assert_eq(levels.resolve(Some("off")), Disabled)
+  // Both are sent the way DeepSeek distinguishes them from a default: an explicit `disabled`.
+  let spec : RequestSpec = {
+    model: "deepseek-v4-flash",
+    messages: [User({ content: [Text("q")], timestamp: 0L, })],
+    system_prompt: None,
+    tools: [],
+    thinking: levels.resolve(Some("off")),
+    max_tokens: None,
+    temperature: None,
+    vision: false,
+  }
+  let built = build_deepseek_request(spec)
+  assert_eq(
+    opt_field(built, "thinking").unwrap().stringify(),
+    "{\"type\":\"disabled\"}",
+  )
+  // And no effort is named, which would be a second, contradictory answer.
+  assert_eq(opt_field(built, "reasoning_effort"), None)
+}
+
+///|
+/// A name this table maps to none is forwarded as itself, which is upstream's resolution and is
+/// pinned by the recorded literal `thinking_minimal`.
+///
+/// Stated here as well because the doc comment on `ThinkingLevels::resolve` used to claim the
+/// opposite, and a reader who believed it would think a picker could be less careful than it has to
+/// be. `offered` is the question such a caller asks instead.
+test "an unavailable level is sent as its own name, not turned into off" {
+  let levels = deepseek_v4_thinking_levels()
+  assert_eq(levels.resolve(Some("minimal")), Enabled(effort=Some("minimal")))
+  // Documented as unavailable, and therefore not offered — the two facts are about the same row.
+  assert_false(levels.offered().contains("minimal"))
+}

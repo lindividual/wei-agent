@@ -54,6 +54,21 @@ pub(all) struct ModelSpec {
 } derive(Eq, Debug)
 
 ///|
+/// The level a turn runs at when nobody has said.
+///
+/// Asked of the default model rather than written down as `"high"` in each front end: this is one
+/// fact, and before this existed it was spelled out in three places (`cli/main.mbt`, `wei/main.mbt`,
+/// `ui/turn.mbt`) — which is the state an invariant like "the default every front end uses is the
+/// one the catalog names" cannot be checked in.
+///
+/// A front end with a session in hand should not use this: it should ask what the session recorded,
+/// through `ThinkingLevels::in_force`, and fall back here only when the log has nothing. That is what
+/// makes a reader's choice outlive the window they made it in.
+pub fn default_thinking_level() -> String {
+  default_model().thinking_levels.default_level()
+}
+
+///|
 /// Every model this build can call, in picker order.
 pub fn model_catalog() -> Array[ModelSpec] {
   [deepseek_v4_flash_spec(), deepseek_flash_spec(), deepseek_v4_pro_spec()]
@@ -104,6 +119,86 @@ pub fn is_known_model(id : String) -> Bool {
 }
 
 ///|
+/// The thinking levels this model offers a reader, least thinking first, `off` included.
+///
+/// A view of `map` rather than a second table: a level is offered exactly when `map` recognises it,
+/// and the mapping itself is the request builder's business. `off` is in every model's list — it is
+/// not an effort, it is the state a request expresses by disabling thinking, and a log may record a
+/// session that ran in it (`agent/driver.mbt`). A level `map` holds as `None` is *not* offered: for
+/// `minimal` on flash and `low` on pro, `None` means the model has no such setting, and this is the
+/// question a picker has to ask before it can draw one — see `ThinkingLevels::resolve` for what
+/// happens to a name that is sent anyway.
+pub fn ThinkingLevels::offered(self : ThinkingLevels) -> Array[String] {
+  let offered : Array[String] = ["off"]
+  for name in self.map.keys() {
+    match self.map.get(name) {
+      Some(Some(_)) => offered.push(name)
+      _ => ()
+    }
+  }
+  // Ordered rather than left in the map's order, which is whatever the hash table does: a picker
+  // draws these in the order they arrive, and "the levels from least thinking to most" is a fact
+  // about the levels, not about the table they are stored in.
+  let order = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+  let sorted : Array[String] = []
+  for name in order {
+    if offered.contains(name) {
+      sorted.push(name)
+    }
+  }
+  sorted
+}
+
+///|
+/// The level this model uses when nobody has said.
+///
+/// `high`, which is what every front end in this repository has always asked for — so adding a
+/// choice does not change what happens when nobody makes one. A model that does not have `high`
+/// gets the most thinking it does have, and a model with no levels at all gets `off`. Both are
+/// unreachable while the catalog holds only DeepSeek entries, and they are written as real answers
+/// rather than as a panic for the reason `default_model` gives.
+pub fn ThinkingLevels::default_level(self : ThinkingLevels) -> String {
+  let offered = self.offered()
+  if offered.contains("high") {
+    return "high"
+  }
+  let mut highest = "off"
+  for name in offered {
+    if name != "off" {
+      highest = name
+    }
+  }
+  highest
+}
+
+///|
+/// The level the next request should run at: `wanted` when this model has it, the default otherwise.
+///
+/// The one place that turns "what was asked for" into "what will be sent", and it exists because
+/// the two differ in a case that is easy to get wrong: the levels are per model, and a session
+/// carries its level in its log, so switching models can leave a session asking for a level the new
+/// model does not have (`low` on flash, then pro). Answering with the model's default says what the
+/// session will actually do, and lets the caller write that down — see `Shell::think_level` in
+/// `macos/appffi/app.mbt`, which persists exactly this answer.
+///
+/// `None` and an unavailable name are answered the same way, deliberately: neither is a level this
+/// model can run at, and the reader is owed the level that is in force rather than a refusal.
+pub fn ThinkingLevels::in_force(
+  self : ThinkingLevels,
+  wanted : String?,
+) -> String {
+  match wanted {
+    Some(name) =>
+      if self.offered().contains(name) {
+        name
+      } else {
+        self.default_level()
+      }
+    None => self.default_level()
+  }
+}
+
+///|
 
 ///|
 /// Whether the model a session runs on can be shown an image.
@@ -132,15 +227,144 @@ pub fn model_spec_for(id : String) -> (ModelSpec, Bool) {
 }
 
 ///|
-/// What a picker shows for a model.
+/// What a picker shows for a model: its name.
 ///
-/// The name, and the id when the two differ — a reader who has to type the id later (in a `curl`,
-/// in a log) should be able to see which one it is without hovering.
+/// **The name alone, and the id is deliberately not appended.** It used to be `Name (id)`, with the
+/// id there for the reader who has to type it later — in a `curl`, in a log. That reader exists, and
+/// this is not where they are: the menu beside the composer is a message about to be sent, and what
+/// belongs next to a model there is what it costs, not the string the API is called with. Measured on
+/// this build's own menu: appending the id made every row ~110 points wider while adding no fact a
+/// reader of that menu can act on (the ids here differ from the names only in case and hyphens).
+///
+/// The id is still shown where it is an answer rather than noise: `/model` and `model_report` name it
+/// on purpose, `ModelCatalog.currentLabel` falls back to the raw id for a log-session this build does
+/// not know, and the picker carries it as the value it sends. That is `label_with_id`, one call site.
 pub fn ModelSpec::label(self : ModelSpec) -> String {
+  self.name
+}
+
+///|
+/// The name and the id, for the one place a reader is being told which string to type.
+///
+/// A model whose name *is* its id does not repeat itself.
+pub fn ModelSpec::label_with_id(self : ModelSpec) -> String {
   if self.name == self.id {
     self.id
   } else {
     "\{self.name} (\{self.id})"
+  }
+}
+
+///|
+/// The price columns a picker draws, as three strings that line up down the menu.
+///
+/// USD per million tokens, input / output / cache read — and the reason this returns **strings** rather
+/// than the three numbers is the whole of it: three prices in a menu are compared *down* the list, one
+/// row against the next, and a column that moves cannot be compared by eye. The widths are taken from
+/// every model in the catalog rather than from this one, so `0.14` and `1.32` and `0.0028` all land in
+/// the same columns on every row.
+///
+/// Two decimals is the floor and more are added where the numbers need them: cache reads are a
+/// fiftieth of input on these models, and `$0.00` for one is not a smaller number, it is a wrong one.
+/// The digits after the point are padded rather than trimmed, which is what makes the strings equal in
+/// length — measured as text, this build's three rows are `0.14  0.28  0.0028`, `0.30  1.20  0.0060`
+/// and `1.32  3.96  0.0440`.
+pub fn Pricing::columns(self : Pricing) -> (String, String, String) {
+  let specs = model_catalog()
+  let (in_digits, in_decimals) = price_shape(
+    specs.map(spec => spec.pricing.input),
+  )
+  let (out_digits, out_decimals) = price_shape(
+    specs.map(spec => spec.pricing.output),
+  )
+  let (cache_digits, cache_decimals) = price_shape(
+    specs.map(spec => spec.pricing.cache_read),
+  )
+  (
+    price_text(self.input, in_digits, in_decimals),
+    price_text(self.output, out_digits, out_decimals),
+    price_text(self.cache_read, cache_digits, cache_decimals),
+  )
+}
+
+///|
+/// How wide one column of prices has to be: digits before the point, digits after.
+///
+/// One column at a time, because the three do not need the same width — input is `0.14` and a cache
+/// read is `0.0028`, and padding the first to four decimals to match the second would be four
+/// characters of noise on every row.
+fn price_shape(values : Array[Double]) -> (Int, Int) {
+  let mut integer_digits = 1
+  let mut decimals = 2
+  for value in values {
+    let whole = value.to_int()
+    let digits = if whole == 0 { 1 } else { whole.to_string().length() }
+    if digits > integer_digits {
+      integer_digits = digits
+    }
+    // The floor is two; a price that is not a whole number of cents sets the width for the column,
+    // because printing it rounded to cents would be printing a different price.
+    while decimals < PRICE_DECIMALS_MAX && !price_fits(value, decimals) {
+      decimals = decimals + 1
+    }
+  }
+  (integer_digits, decimals)
+}
+
+///|
+/// The most decimals a price is ever printed with.
+///
+/// Bounded because this is a menu row and not an accounting system: a price that needs more than six
+/// digits to say what it costs is a catalog mistake, and a column that grew to whatever it took would
+/// take the window with it.
+const PRICE_DECIMALS_MAX : Int = 6
+
+///|
+/// Whether a price is exactly representable at a given number of decimals.
+///
+/// Compared with a tolerance, because these are `Double`s: `0.006 * 1000` is not exactly `6` in binary
+/// floating point, and a strict equality would push every cache-read column to six decimals.
+fn price_fits(value : Double, decimals : Int) -> Bool {
+  let scaled = value * price_scale(decimals)
+  (scaled - scaled.round()).abs() < 0.0001
+}
+
+///|
+/// `10 ^ decimals`, for the values `price_shape` can settle on.
+fn price_scale(decimals : Int) -> Double {
+  match decimals {
+    0 => 1.0
+    1 => 10.0
+    2 => 100.0
+    3 => 1000.0
+    4 => 10000.0
+    5 => 100000.0
+    _ => 1000000.0
+  }
+}
+
+///|
+/// One price, padded to a fixed width: `0.14`, `1.32`, `0.0028`.
+///
+/// Built from an integer rather than by formatting a `Double`, for the reason the three columns exist:
+/// `Double::to_string` decides its own decimals per value (`0.006` next to `0.044`), so a column of
+/// them comes out ragged. This is `format_cost`'s arithmetic with a width it is given instead of one
+/// it chooses.
+fn price_text(value : Double, integer_digits : Int, decimals : Int) -> String {
+  // The digits as one integer, so the width is the two digit counts and nothing else — the point is
+  // put in afterwards, which is why it is not counted here.
+  let width = integer_digits + decimals
+  let digits = (value * price_scale(decimals)).round().to_int().to_string()
+  let padded = if digits.length() >= width {
+    digits
+  } else {
+    zeroes(width - digits.length()) + digits
+  }
+  let cut = padded.length() - decimals
+  if decimals == 0 {
+    padded
+  } else {
+    padded[:cut].to_owned() + "." + padded[cut:].to_owned()
   }
 }
 

@@ -122,6 +122,24 @@ public enum Wei {
             light: Brand.mint.opacityBlended(over: Backdrop.light, alpha: 0.15),
             dark: Brand.mint.opacityBlended(over: Backdrop.dark, alpha: 0.22)
         ) as (light: RGB, dark: RGB)
+
+        /// The brand as the background of a **selected row** — the wash's step up, and it is a separate
+        /// value because of the size of the thing it fills.
+        ///
+        /// A chip and a bubble are small and glanced at; a selected row is one row among forty that the
+        /// reader scans, and at the wash's 15% the row it marks is a tint they have to hunt for. This is the
+        /// one place where *how much* of the brand is the thing that makes it work, and 30% is where the row
+        /// reads as chosen without becoming the loudest thing in the window.
+        ///
+        /// It replaces the platform's own selection fill, which is a solid saturated colour (the system's
+        /// accent, not this app's — see `Palette.selection` in `WeiShell/Design.swift` for what was measured).
+        /// The second line of such a row is drawn in `onHighlight`, and `DesignTests` checks that pairing
+        /// against *this* colour: `onHighlight` on `highlightWash` is the Running chip's, but a row of type is
+        /// not a chip and has to hold up on its own numbers.
+        public static let selection = (
+            light: Brand.mint.opacityBlended(over: Backdrop.light, alpha: 0.30),
+            dark: Brand.mint.opacityBlended(over: Backdrop.dark, alpha: 0.30)
+        ) as (light: RGB, dark: RGB)
     }
 
     // ── size ───────────────────────────────────────────────────────────────

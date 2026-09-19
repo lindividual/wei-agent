@@ -50,7 +50,14 @@ pub fn ContextMessage::from_message(message : Message) -> ContextMessage {
 /// What gets sent to the model, plus the settings in force at the leaf.
 pub(all) struct SessionContext {
   messages : Array[ContextMessage]
-  thinking_level : String
+  /// The thinking level the log records, or `None` when it records none.
+  ///
+  /// `None` is **not** `off`. A log with no `thinking_level_change` is one nobody has asked
+  /// anything of yet, and it has not chosen; `off` is a session that ran with thinking disabled,
+  /// which the driver writes down (`agent/driver.mbt`). Collapsing the two would make "nobody has
+  /// said" indistinguishable from "the reader said no", and the first of those has to stay open
+  /// for a default to be applied to it.
+  thinking_level : String?
   model : ModelRef?
 } derive(Eq, Debug)
 
@@ -236,12 +243,26 @@ fn context_messages_of(entry : Entry) -> Array[ContextMessage] {
 }
 
 ///|
-fn context_settings(path : Array[Entry]) -> (String, ModelRef?) {
-  let mut thinking_level = "off"
+/// The settings the log records, without projecting the conversation.
+///
+/// Split out of `Session::context` because the two are asked for separately: a front end that wants
+/// to know what level and model the next turn inherits from a log has no use for every message in
+/// it, and building them is the expensive half.
+///
+/// A missing `thinking_level_change` stays `None` rather than becoming `off`. "Nobody has said"
+/// and "off" are different states, and only the second is a decision: the first is what a default
+/// gets applied to, and the driver writes `off` down when a turn is asked to run without a level.
+pub fn Session::recorded_settings(self : Session) -> (String?, ModelRef?) {
+  context_settings(self.path())
+}
+
+///|
+fn context_settings(path : Array[Entry]) -> (String?, ModelRef?) {
+  let mut thinking_level : String? = None
   let mut model : ModelRef? = None
   for entry in path {
     match entry.kind {
-      ThinkingLevelChange(level~) => thinking_level = level
+      ThinkingLevelChange(level~) => thinking_level = Some(level)
       ModelChange(provider~, model_id~) => model = Some({ provider, model_id, })
       Message(message~) =>
         match message {
@@ -259,7 +280,7 @@ fn context_settings(path : Array[Entry]) -> (String, ModelRef?) {
 ///|
 pub fn Session::context(self : Session) -> SessionContext {
   let entries = self.context_entries()
-  let (thinking_level, model) = context_settings(self.path())
+  let (thinking_level, model) = self.recorded_settings()
   let messages : Array[ContextMessage] = []
   for entry in entries {
     for message in context_messages_of(entry) {

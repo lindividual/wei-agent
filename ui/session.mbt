@@ -117,6 +117,15 @@ struct Runner {
   mut prompt : String
   /// The line this session shows on the status bar while it is displayed.
   mut status : String
+  /// The messages of this session's last request, so the next turn's first one can be measured
+  /// against them.
+  ///
+  /// The seam between two turns is where the trim boundary most often moves — the turn just
+  /// appended the messages that released it — so without this the one request per turn that is
+  /// most likely to have rewritten the conversation is the one nothing compares. Per session: two
+  /// conversations open at once have two last requests, and comparing across them would be a figure
+  /// about two conversations.
+  mut previous_request : Array[Json]
 }
 
 ///|
@@ -207,6 +216,7 @@ fn Runner::new(
     live: [],
     prompt: "",
     status,
+    previous_request: [],
   }
 }
 
@@ -320,17 +330,16 @@ async fn App::system_prompt(
   mode? : @core.ToolMode = self.settings.tool_mode,
 ) -> String {
   let tools = @core.tools_for_mode(mode)
-  @core.build_system_prompt(runner.cwd, tools, mode~, sections=[
-    self.instructions(runner.cwd).text,
-    @core.skill_catalog_prompt(self.skills_for(runner.cwd)),
+  @core.build_system_prompt(
+    runner.cwd,
+    tools,
+    mode~,
+    instructions=self.instructions(runner.cwd).text,
+    skills=self.skills_for(runner.cwd),
     // Empty unless the conversation has already used a tool this turn does not have, which is the
-    // case a mode change creates: the history is the other mode's tool calls. Last of the sections
-    // because it is the one thing that has just become true.
-    @core.tool_change_prompt(
-      @core.stale_tool_names(runner.session.context(), tools),
-      tools,
-    ),
-  ])
+    // case a mode change creates: the history is the other mode's tool calls.
+    stale_tools=@core.stale_tool_names(runner.session.context(), tools),
+  )
 }
 
 ///|

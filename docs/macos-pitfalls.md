@@ -35,7 +35,7 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | 症状 | 原因 | 修法 |
 |---|---|---|
 | MoonBit 侧改了，线上没变 | SwiftPM **不知道** `vendor/libwei.a` 变了（那个归档不在依赖图里），于是「构建成功」+ 旧二进制 | 改完 `macos/appffi/` 一定要 `macos/build-moonbit.sh` |
-| 重建了 `libwei.a`，症状还是旧的 | SwiftPM 也不会因为归档变了而重链**别的产品**：`touch` Swift 源码多不做用，`wei-cli` 和 `WeiShellPackageTests.xctest` 都照样跑旧二进制。最坏的表现不是报错，而是**旧 shell 用旧线格式回答**：新加的字段在日志里根本不存在，于是一个正确的消费侧看起来像写错了 | `rm -f` 掉那个产品再 build（`.xctest` 要 `rm -rf` 整个目录）。`swift test` 里那条真启 runtime 的测试就是抓这一类的 |
+| 重建了 `libwei.a`，症状还是旧的 | SwiftPM 也不会因为归档变了而重链**别的产品**：`touch` Swift 源码多不做用，`wei-cli` 和 `WeiShellPackageTests.xctest` 都照样跑旧二进制。最坏的表现不是报错，而是**旧 shell 用旧线格式回答**：新加的字段在日志里根本不存在，于是一个正确的消费侧看起来像写错了 | `rm -f` 掉那个产品再 build（`.xctest` 要 `rm -rf` 整个目录）。`swift test` 里那条真启 runtime 的测试就是抓这一类的。**实测（这一轮加了 `think` 事件）**：不删 `.xctest` 时 `ShellLinkTests` 报的正是这种看不出因果的失败 —— 「the shell did not report the pin on the row」+ 两个 `(nil) is not equal to …`，因为跑的是旧宿主在跟新线格式对话；`rm -rf .build/arm64-apple-macosx/debug/WeiShellPackageTests.xctest` 重跑就全绿。**判据**：失败的断言和你的改动无关，而且它读的是一个**新加的字段** —— 那就是没重链，不是逻辑错 |
 | 改了 MoonBit 侧、`swift test` / `wei-cli` 还是旧行为 | 归档重建了，但**那两个产品没有重链**（见上一条）。这次是 `NewSession` 的 gate 明明删了、CLI 仍然回「a turn is running here — stop it first」 | `rm -f .build/arm64-apple-macosx/debug/wei-cli` 再 build。**验证一个 shell 侧的改动，永远要先把跑它的那个产品删掉重建** |
 | 同上，而且你已经 build 过了 | 同上，但更隐蔽：跑的是 `swift build`（debug 可执行文件），**根本没重新打包** —— 用户打开的还是几天前那个 `.app` | 给人用的东西一律 `macos/make-app.sh`；`make-app.sh` 会先 `rm` 掉旧的宿主可执行文件再重建，这是它对这条的补偿 |
 | 跑完 `make-app.sh`，怀疑把用户正开着的 app 弄没了 | 我当时的推断是「`make-app.sh` 把运行中的 bundle 删了重建」，**这个推断后来被证伪了**：下一次同样在用户实例（pid 51294，已跑 5 分钟）运行时跑 `make-app.sh`，那个实例**活着**（改完 bundle 后仍然在跑，`ps` 可见，未崩溃）。所以运行中的 app 不会因为 bundle 被替换而死 —— 更可能是用户自己退掉了那个窗口 | 结论只能是：**旧的那次消失原因不明**，别再拿它当「make-app 的副作用」传授。但纪律不变：打包前先看有没有别人的实例在跑，并且**别用 `head -1` 拿 pgrep 的结果去截图** —— 用户的实例和你的 demo 同一条命令行（都在 `MacOS/wei`），`head -1` 拿到的可能是**用户那扇窗**（我这一轮就这么拍了用户窗口一张图，已删）。要认自己的：按 `WEI_STORE` 环境变量区分（`ps eww`），或者让自己的实例用不同的 store 路径 |
@@ -56,8 +56,17 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | ⇧Return 的行为和代码不符 | `NSEvent.modifierFlags` 读的是**此刻硬件**的状态，不是被处理那个事件的状态；合成/重放的事件更是完全无关 | 用事件自己的 `press.modifiers` |
 | `NSImage` 上没有 `pngData` | 它确实没有 | 过 `NSBitmapImageRep`（扩展在 `macos/WeiShell/Sources/WeiShell/Composer.swift`） |
 | 粘贴图片的回调从来不触发 | `onPasteCommand(of:)` 只在剪贴板**能提供**所列类型时才提供该命令（**这条是 API 语义，我没有逐个场景验证**） | 它意味着这条路径无法保证可达 —— 所以另给了一个菜单项（⌘⇧V），不赌谁能拿到 ⌘V |
+| **`Group { if let x { … } }` 上的 `.task` 从不执行**：图从字节里加载不出来、视图一直空着，日志里一个 `print` 都没有 | `.task` 挂在**它修饰的那个视图**上，而 `if` 为假时那个分支**没有视图** —— 没有东西可挂，闭包永远不跑 | 给空分支一个真视图（`Color.clear.frame(width: 0, height: 0)`）。同类：任何 `if`/`switch` 包着的 `Group` 都是不稳定的挂载点；对照 `Picture`（读取期间画 spinner，分支永不为空）就没事 |
+| **多张图挤成一张看不见的图** | `HStack` **不换行**，超宽时它压子女而不是回行 —— 压到 0 宽的缩略图就是一张凭空消失的图，没有报错、没有东西可点 | 自己写 `Layout`，而「一行几个」那条规则抽成一个**纯函数**放进有测试的地方（`WeiModel/PictureFlow`）：`sizeThatFits` 和 `placeSubviews` 问的是同一个问题，各算各的就会高度和实际画出来的对不上 |
+| 想用合成点击点自己 app 里的按钮，**点了没反应** | 点（`CGEvent`）按**坐标**投递，落在最前面那扇窗口上 —— 而那时前面是 Chrome 的窗口，我那个在它下面。AX 的 `AXPress` 是按**元素**的，和谁在前面无关 | 状态用 AX 读、按压用 `AXUIElementPerformAction(el, kAXPressAction)`；只有真需要鼠标手势（选文本、拖拽）时才发合成事件，那时先确认 `NSWorkspace.shared.frontmostApplication` 是自己 |
+| **`List(selection:)` 的选中底色永远是系统蓝，`.tint` 改了没用** | 平台行为：macOS 的列表选中底色走**系统 accent**，不是控件的 tint（`.tint` 管控件、焦点环、默认按钮，不管这个）。实测 macOS 26：`.inset` / `.plain` / `.sidebar` 三种 style、聚焦和不聚焦两种状态，**聚焦时一律 `#0064E1`**（机器调的蓝），不聚焦时是灰 —— 窗口上明明设了品牌色 pine | 自己画：把底色做成行的 `.listRowBackground`（一个 `RoundedRectangle`，内缩 10 点是**平台的 cell 内缩**，量出来的：行 `x=256`、cell `x=266`），再把平台的**画**关掉 —— 见下一条 |
+| **选中行的标题在浅色外观下变成了白色**（白字画在浅绿底上，根本读不出来），而且**只有列表拿到焦点时**才这样 | 两件事叠在一起：① 平台把选中**行**的底画在我们那层 `.listRowBackground` **下面**，聚焦时是系统蓝、不聚焦时是灰（不聚焦时看不出来，因为灰色和浅绿差不多亮）；② 平台把这一行里**没自己声明颜色**的文字换成「选中内容的颜色」—— 浅色外观就是白 | 关掉平台的画：找到列表自己的 `NSTableView`（`List` 在这平台上是 `NSOutlineView` / `SwiftUIOutlineListView`，AX 树里是 `AXOutline`），把 `selectionHighlightStyle` 设成 `.none` —— **状态留着（箭头键、`AXSelected`、binding 都照旧），只停「画」**。挂载点很关键：这个修改必须从**表内部**往上找（挂在 `List` 上找不着，从 `List` 上去是它外面的视图）；而且 `makeNSView` 那一刻还没有 superview，得等一个 runloop。另外 `.foregroundStyle(Palette.label)` 也能救回标题色，但救不了底下那层蓝 —— **两条都要**才能拿到自己的颜色，我们只用「关掉画」这条，因为它一次解决两件事 |
+| 自己写的 `.listRowBackground` 和平台的高亮相差 2pt、和行的内容也差 2pt，怎么调都对不齐 | 背景层的坐标系：`listRowBackground` 的 frame 是行的 frame **每边内缩 2 点**（`inset` style；量出来行 `x=256`、背景 `x=258`）。而行内部的 **cell** 又自己内缩 10 点（`x=266`） | 形状上再加 `padding(.horizontal, 10)` 是**多算 2 点**；正确的是让形状去填背景层、然后整体内缩 **10**（即 cell 的内缩），行内容的内缩（八点）叠在它上面 —— 这样文字和填充的边距和平台画的时候一模一样 |
+| 写个几十行的 AppKit 探针渲自己的视图，**view 的底色没画出来 / 整张图是反的** | 两个都发生过：① `NSHostingView` 的 `layer` 在窗口上屏前是 nil（`if let` 静默跳过，PNG 是空的）；② Core Graphics 的坐标是左下原点，AppKit 层是左上原点，`layer.render(in:)` 出来是上下翻转的 | 等一拍再渲（`asyncAfter 0.8`），并 `translateBy(y: 高度) + scaleBy(y: -1)` 翻回来。这也让「离屏渲染和真实窗口不一致」这个老问题有了便宜的答案：**真的把窗口开出来、点一组行、再读自己那扇窗的 layer**（不用屏幕录制权限） |
 | 把快捷键写进 `Menu` 项的标题里（想让 `+` 菜单里两项看起来不一样） | **自定义 `label` 会被菜单丢掉**：`Button { … } label: { HStack { Text("Take Screenshot"); Spacer(); Text("⇧⌘S") } }` 渲染出来只有 `"Take Screenshot"`，和另一项一模一样（AX 里两项的 title 就是这么报的） | 用平台的 key-equivalent 列：给这一项挂 `.keyboardShortcut(…)`，AppKit 会在右边画灰字。同一个快捷键写在两处（菜单栏 + 弹出菜单）是安全的：**菜单打开期间，菜单栏先被搜索，所以按键跑的是菜单栏那一条** |
 | 一个 sheet 在某种输入下**窄得不能看**：截屏框选出一个词（90 点），`VStack` 跟着缩到 90 点宽，五个工具的标签各挤成几个点，Cancel / Insert 叠在一起 | 宽度是 `paper.size.width + padding`，而截图带来了自己的尺寸 —— 空白草图固定 640 点所以从来没露过这个面 | 给**整张 sheet** 一个下限（`max(纸宽, 420)`），而不是只给控件行 `minWidth` —— 后者会让下面的行比纸宽，按钮跑到纸外面去 |
+| **从主窗的按钮打开设置面板的某一页（"没有 key → Open Settings"），面板却停在别的 tab 上** | 三个事实叠在一起：`openSettings()`（`@Environment`）只能**打开窗**，管不了里面选哪一页；设置窗是**另一个 scene**（`WeiApp` 的 `Settings`），和主窗的 view tree 只共用一个 `ShellClient`；而 macOS 不销毁关掉的设置窗（关一次再开，`@State pane` 还是上次那个值） | 「想开哪一页」这种**跨 scene 的请求**只能走两边都看得见的那个对象：放在 `ShellClient` 上（`askForSettings`），设置窗在 `.onChange` 里读。**用计数器而不是 Bool**：第二次按必须也是一次事件（Bool 已经是 true 就被吃掉）。验证必须走**完整回环**（第六节最后那条）- 只按一下看到窗开了不算验证：先把面板切到别的 tab、只关设置窗、再按一次，看它回不回 key 那页 |
+| 一个“看起来像链接”的按钮，**VoiceOver 读出来是“链接”** | `.buttonStyle(.link)` 不只是画法：实测那枚轴元素是 `AXLink`（`desc="Open Settings"`、动作 `AXPress`），而它做的是**开窗**——辅助技术把 link 当成导航（去别处 / 去某个 URL） | 要那个样子、要正确的角色：`.buttonStyle(.plain)` + `Text(…).underline()` + `.foregroundStyle(accen…)`。改完同样的位置量到的是 `AXButton`（宽 75pt 未变）。**注意 `.link` 这种行为在截图上完全看不出来**——只有 AX 树里能看到 |
 
 ## 三、文本输入 / 输入法（**中文用户必踩**）
 
@@ -91,6 +100,10 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | 想知道一个语音模型装没装 | **没有报错**：`SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith:)` 直接返回 `nil`，而且这个语言在 `supportedLocales` 里是有的。看文件也会一样：`AVAudioFile` 跑同样的音频会报 `SFSpeechErrorDomain Code=5 "No common audio format among modules"`（这个错误名和真实原因没关系） | 用 `AssetInventory.status(forModules:)`（`.installed` / `.supported`…）+ 有没有 `assetInstallationRequest`。**支持 ≠ 装了**：实测本机 `zh_CN` 是 `.installed` 而 `en_US` 在 `DictationTranscriber` 下报 `.supported` + `fmt=16000Hz`（能用，也没报要下载），同一个 `en_US` 在 `SpeechTranscriber` 下 `bestFormat=NIL` —— 两个模型不是一回事，**用 `DictationTranscriber`**（系统听写用的就是它，有 `.shortForm` 提示和 `.punctuation`/`.emoji`） |
 | 用 `ad-hoc` 签名重新打包后，麦克风权限又要重问一遍 | TCC 认的是代码签名，而 `codesign --sign -` 每次重建都产生不同的 cdhash —— 实测：重打包后跑，日志里 `authorizationStatus` 是 0、按钮等 5.5 秒才拿到 3（就是那个弹框）；另一轮重打包后又没问（系统似乎也认了 bundle path/identifier） | **给本机一张固定的自签身份**：`macos/make-identity.sh`（已接进 `make-app.sh`）。权限绑的是 App 的 designated requirement，而 `codesign -d -r- <app>` 能把它打出来：ad-hoc 的里面是 **cdhash**（每次构建都变），自签的里面是 **证书**（不变）。实测两个不同的二进制、同一张身份签：cdhash 不同（`cbb5…` vs `de6f…`），requirement **逐字节相同** —— 所以「重打包 = 换了个 App」被消掉了。换身份那一次权限会重问一次，之后不再问。**别指望私有 SPI 绕过这一步**：实测 `SLPreflightPostEventAccess`（私有）和 `CGPreflightPostEventAccess`（公开）同为 `false`，绕开的是“目标应用拒不接受事件”，不是 TCC |
 
+| 想给输入框（`TextField`）加「Tab 选中补全」，但不知道 Tab 会不会先被平台吃掉（移焦点 / 插入制表符），也不知道 `.onKeyPress` 在这个字段里还收不收得到方向键 | —— | 实测（macOS 26，一个只含 `TextField` + `.onKeyPress` 的壳子，从进程内部用 `CGEvent` 发真按键）：`.onKeyPress(.tab)` 和 `.onKeyPress(.upArrow)` / `.downArrow` 在字段里**都收得到**，返回 `.handled` 会让**焦点不移动**（文字框里也不会多出制表符）；而 `.tab` 这个 key equivalent **不吃 ⇧Tab**（发带 `maskShift` 的 Tab，处理函数根本没被调用，平台自己留着）。所以「↑/↓ 移动、Tab 选中」只用这三个键就够了，不必碰 Return —— Return 在这个字段里是「发送」（见第三节） |
+
+| 想验证「一个折叠真的把那一大段藏起来了」，靠看截图估 | 截图的缩略图看不出「五万字在不在页面上」，而且它量不出「收起来时占了多高」 | AX：那一条是 `AXDisclosureTriangle`，**它自己的 title 是空的**（标签在它的子 `AXStaticText` 里），所以按 role + **子树里含哪段文字**来找，再 `AXPress`。实测一个 56.8k 字符的技能文档：收起时整条只占 `y=707..722`（一行），展开后多出一个 `AXStaticText y=730..26170`，正文首行就是文档的第一行 —— 「藏起来了」和「展开了」都是数字 |
+
 ## 五、验证与自动化（这次最费时间的一块）
 
 手动验证 macOS UI 很贵，而**便宜的验证方式是存在的**，只是要走对路。
@@ -111,6 +124,7 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | 想把窗口改小，好看清滚动边缘效果 | `kAXSizeAttribute` 写入返回 **-25200**（不可设） | 改小不行就换成**内容长的那一项**（Skills 会列一长串技能）再滚；或者去 `/tmp` 写一个只含布局的壳子（第六节） |
 | 把 `safeAreaBar` 的 bar 摆在 `ScrollView` 上面，第一行文字**和标题重叠** | `safeAreaBar` insets safe area，但挡住第一行的不是它 —— 是转录自己的 content margin，而那个数是从**窗口顶边**量的（`Wei.Control.toolbar`）。两个机制各懂一半 | bar 的实际高度量出来加进 content margin（`ConversationTitleHeightKey`），别写常数 |
 | **列表行变高了，但被裁掉**：某个 `@State` 一变，一行的内容多出一行字，结果最后一行被行的下边缘切掉一半 | **`List` 的行高是「建行时」量的，之后不再量。** 同一个身份（`.tag(path)` / `.id`）的行内容变了，SwiftUI 就地更新视图，不重新测量行高。实测两次，症状一样：行仍是 `300x52`（`123..175`），而内容要 60 点，最后一行落在 `y=168…183` —— 被切掉。两次的触发不同：一次是 `running` 从 false 变 true（同一份 rows 里一行自己长高），一次是搜索（行的身份没变，只是内容里多了一行项目名） | 让**行高与内容无关**：把第二行固定成一行，什么都往里排（项目 · 时间 · 状态胶囊）。另一种做法是给行一个够高的固定高度，代价是每一行都付那次高度。**不要**靠「内容变了会重新布局」——它不会。（`List` 的行和普通 `VStack` 不一样：`VStack` 会重新布局，`List` 的行缓存高度） |
+| **点一下左栏的工作区，整个列表闪一下**（先往上/下走一行再复位，鼠标目标跟着跑）—— **两个原因，都不是「点击改了什么」** | ① **项目行的顺序是 store 给的，而 store 的顺序一直在变**：`list_workspaces` 按「该组最新一条会话的 mtime」排，而 turn 一直在写文件 —— 实测两个项目的最新会话相差 **0s / 2s**，于是每次 `sessions` 事件它们换一次位，下面的行整体上下走 32pt；项目下面那两个**条件小节**（`Running sessions` / `Running tool calls`）进出时也把行推动（33+41+33+45 = 152pt），它们**内部**同样按 mtime 变（实测：两帧之间前两条互换）。② **那 16pt「空气」写成了列表的 `.contentMargins(.top, 16, for: .scrollContent)`**：边距属于**滚动视图**，重新套用是**另一趟**，于是点击引起的更新中间那几帧里，这一栏被画成**没有它**的样子 —— 实测整栏文字在那些帧落在 `144, 172, 204, …`，稳定后是 `160, 188, 220, …`（同一套布局，整体高 16pt；上下各一块的偏移都只在点击的那 2 帧里出现） | ① 顺序归窗口：`stableSidebarOrder`（`WeiModel/Sidebar.swift`）—— 第一次列表用 store 的顺序当**种子**，之后保持读者已经看到的位置，只有**没见过**的行/组才动（走到最前，那是读者刚做的那件事）；两个运行小节挪到项目**下面**，寄存器在自己那边变。② 空气改成**第一个标题那一行自己的 `padding(.top:)`**（`WorkspaceList` 的 `SectionTitle("Workspaces")`），列表上再没有 `contentMargins`。**两个都量过**：修之前每次点击都能抓到那 16pt；修之后录 5 次点击（换项目、点已选中的行、点中栏会话、点空白）**一帧都没有**。**判据**：`WEI_DEBUG` 的 wire log 里 `/open` 前后两条 `sessions` 的 workspace 顺序是否不同（那是①）；把一栏的文字带位置逐帧打出来（那是②）。量法见第六节 |
 | **`ScrollViewReader.scrollTo(id)` 什么都不做**，而且不报错、不警告、不滚动 —— 看起来像布局问题或时序问题 | `scrollTo` 对一个**没有任何视图注册的 id** 就是空操作。本窗口注册的是**轮**的 id（`ForEach(turns, id: \.element.id)`），而轮的 id 是它那条提问的行 id；顺手写的「最后一行」`rows.last.id` 几乎永远不存在 —— 一条回答之后，最后一行是那段回答的一个**块**（id 是 `"<轮>/<块>"`） | 滚到 `endOf(rows)`（`WeiModel/Turns.swift`，取 `turns(of:).last?.id`），并且**把这条规则放进有测试的地方**：`TranscriptEndTests` 里专门有一条断言 `rows.last.id != endOf(rows)`。另外 `LazyVStack` 会让时序也掺进来（刚到的行还没建），所以滚动还要 `DispatchQueue.main.async` 推迟一拍 |
 | **按 Stop 不停正在跑的命令**：状态变成「stopping…」，但 `bash: sleep 60` 一直跑到自己结束 | `aborting` 是个**标志**，由回合在**两步之间**读；而正在进行的那一步**就是**工具 —— 所以标志只在工具跑完那一刻才起作用。`@agent.ToolHandle` 早就带着 `stop` 字段（drviver 用它 `task.cancel()`，再由取消路径按 pid 杀），但宿主只把它用来**画那一行**，没有存下来 | 把 handle 存进 `Open`（`running_tool`），`Abort` 时**取出并调用**（取出而不是读取：第二次 Stop、或工具已报完之后的 Stop，不能去取消别的东西），回合结束时 `defer` 清掉。验法：起一个假模型（几十行 python SSE 返回一个 `bash: sleep 60` 的 tool call，`DEEPSEEK_BASE_URL` 指过去），发一句、等 `sleep 60` 出现、发 `abort`、看 `pgrep -f '^sleep 60$'` —— 实测从「还在跑」变成「已经没了」 |
 | 想在同一个 `ToolbarItem` 区域里放**第二个** item（比如标题 + 改名的铅笔） | 平台会**重排整行**，而且不是「往右挪一点」：会话栏那个标题从自己的栏（`x=467…921`）跑到**列表栏上面**（`x=230…397`），同时**窗口标题被挤走**（`x=230…864` → `x=397…557`，压到两栏交界）。把两个控件塞进同一个 item 的 `HStack` 也一样 | 这一栏要两样东西就**自己画 bar**（`safeAreaBar` + `HStack`），别指望工具条排两个 item。量法：`axframe`，四个 x 一比就知道 |
@@ -127,6 +141,7 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | 想让 `Text` 末尾出现省略号，写了 `lineLimit(1)` + `truncationMode(.tail)`，结果没有省略号 | 省略只发生在**宽度被约束**的时候：一个自然宽度的 `Text` 会要多少给多少，超出部分被邻居裁掉而不是变成 `…` | 加 `.frame(maxWidth: .infinity, alignment: .leading)`（或别的上限），让平台知道可用宽度是多少 —— 再用**尾部内边距**给它让开右边的按钮 |
 | 想量「标题在不在工具条那一行」，靠看截图估 | 截图能量，但估不准 | **读 AX 的 frame**：`axframe`（第六节）把整棵树连 `y=.. x=..` 打出来。工具条是 `AXToolbar y=0..52`，按钮 `x=872..917`，标题 `y=14..38` —— 两行是不是同一行，一眼就有数字 |
 | 想看「内容从 bar 下面穿过去被模糊」的效果，滚了半天没反应 | 那一栏的内容不够长，压根没有可滚的东西（设置面板的 API Key 那页就装得下） | 换内容长的一页（Skills）或长会话；也可以只写布局的壳子（第六节）。注意合成滚轮事件 `wheel1` 是 `Int32`：传负数给 `Int()` 再装回 `Int32` 会 crash（`Range requires lowerBound <= upperBound`） |
+| 用 `WEI_STORE` 起了个探针实例测侧栏，结果**自己发的探针命令出现在用户那个 app 的侧栏里**（还会被当成「有东西在跑」，就是你正在查的那个位移） | `WEI_STORE` 只管**会话 store**：`jobs_path` 是写死的 `home/.wei/jobs.json`（`platform/jobs.mbt`），而 `home` 来自 `HOME`。于是探针实例把它的后台任务记录写进了**用户的** `~/.wei/jobs.json`，而用户那个 app 每 2 秒读一次这个文件并把 live 的登记出来 | 起探针时**两个都换**：`HOME=/tmp/wei-probe-1 WEI_STORE=/tmp/wei-store-1`（目录里放好 `.wei/settings.json`）。要造一条「有 job 在跑」的状态也不用真跑命令：往 `$HOME/.wei/jobs.json` 里写一条 `status:"running"` + 一个真活着的 pid 的 `pids` 即可（`reconcile` 只看 pid 活不活着） |
 | 改了「换会话」相关的代码，测完用户说他打了一半的字跟着跑 | 我**拿用户正在用的会话做了测试**，进程真的把新 turn 写进了他的日志 | **纪律**：测试先 `cp` 一份会话到临时目录，用 `WEI_SESSION` 指过去。永远不碰 `~/.wei/sessions/` |
 | 手写一条 `.jsonl` 造演示会话，app 只回一句 `could not start: missing field: timestamp` —— 没有别的线索，看起来像 store 没发现、像路径不对、像编码不对 | `Entry::from_json` 要的**每一层都有 `timestamp`**：entry 一层，`message` 一层也是（真实日志里 assistant 的 message 自带 `timestamp`/`usage`/`model`/…）。只写 `role`+`content` 的 message 不是一条能读的记录 | 别手写：`cp` 一条真会话，**只替换 assistant 那条的 `content[].text`**，其余字段照搬（一轮就通）。再配 `WEI_SESSION=<那条文件的路径>` 直接打开它 —— 会话标题会变成它的 id，不必让 store 发现工作区 |
 | 想造一段「要长到能滚」的转录，结果只有几行 | 上面那条修法把小会话变干净了，也把它变短了 —— 而模糊/滚动这类效果需要**有东西滚** | 复制一条**大的**真会话（按文件大小倒序取第一条，几十兆也行）到临时 store、改 header 的 `cwd`，`WEI_SESSION` 指过去。一次就得到上千条消息，且一个 token 不花 |
@@ -146,7 +161,15 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | 一个「让首帧落在末尾」的 SwiftUI 旋钮看起来像是解药 | `.defaultScrollAnchor(.bottom, for: .initialOffset)` 在实测里 **168.6 vs 174.7ms**，落在噪声里 —— 因为那 240ms 不在锚点上，而在「懒布局文档有三万点高」这件事本身 | 量了没效果就**回退**，别留下一个量不出效果的改动；换杠杆（降低文档高度 = 窗口化） |
 
 | A/B 两组的数字**一模一样**，于是结论是「这个改动没用」 | 只改了 MoonBit 侧、只跑了 `build-moonbit.sh` + `swift build` —— **SwiftPM 不知道 `vendor/libwei.a` 变了**，跑的还是旧二进制。症状不是报错，而是「两次测量完全相同」（实测：`doc=15480/15492` 一模一样地出现在「关掉分页」那一组里，而那本该是 32562） | 只要改了 `macos/appffi/`，**`rm -f` 掉那个产品再 build**（`.build/release/<产品>`）。判据很硬：A/B 若在**不涉及噪声的量**上完全相等，先怀疑自己没换成二进制。这条是 `macos/README.md` 那节的复现，我照着懂还是踩了 |
-| 一个「接近顶部就加载更多」的自动加载，在**切换会话**时连发了好几页 | 触发条件只看了「偏移接近顶部」，而**切换的那一瞬间偏移还是上一个会话的**（新会话的 rows 到达时它接近 0），于是触发；每加载一页又把偏移留在顶部，再触发。它同时和「跟随」规则抢同一个 revision：一个要把读者放到底部，另一个在他上方加行 | 触发条件里加「读者**自己**滚上去了」（这个仓库已经有的 `ScrollFollow`：`!following` 就是「他正在读上面的东西」）。用真探针看 `rows` 从 212 涨到 628 才发现，只看「白屏消失了没有」是看不出来的 |
+| `swift test` **编译不过**，而报错的文件你这一轮根本没碰 | 工作树里有别处留下的半成品改动（这一轮：`Tests/WeiModelTests/SessionSectionsTests.swift` 里一个 87 行的差量把 `func …() {` 和 `let sections = …` 挤成了一行，于是后面每一处 `at(…)` 都被当成 `Date` 传给了 `SessionRow`） | 看见「**不认识的**文件和你的改动一起失败」先去 `git status` / `git diff <那个文件>`，别从报错本身推理：报错的形状（类型不符、key path 推不出来）和你做的事毫无关系就是判据。要么把那半成品补完，要么**临时挪开**（`mv` 到 `/tmp`）跑一遍，确认那一堆错都不是自己的 || 一个「接近顶部就加载更多」的自动加载，在**切换会话**时连发了好几页 | 触发条件只看了「偏移接近顶部」，而**切换的那一瞬间偏移还是上一个会话的**（新会话的 rows 到达时它接近 0），于是触发；每加载一页又把偏移留在顶部，再触发。它同时和「跟随」规则抢同一个 revision：一个要把读者放到底部，另一个在他上方加行 | 触发条件里加「读者**自己**滚上去了」（这个仓库已经有的 `ScrollFollow`：`!following` 就是「他正在读上面的东西」）。用真探针看 `rows` 从 212 涨到 628 才发现，只看「白屏消失了没有」是看不出来的 |
+| 一个菜单里的说明文案，写全了才发现**菜单宽到半个窗口** | 菜单的宽度**等于最长的那一项**，它不折行 —— 所以文案在这里是按**宽度**付费的。这一轮给「思考档位」菜单写的说明（「Low — thinks a little: a sooner first word, a smaller bill」），实测最长项文本 **470pt**、整个菜单 **511pt**（`AXMenuItem … [953,706 511x24]`，AX 探针读的） | 用点而不是用字数来定标准：`NSFont.menuFont(ofSize: 0)` 量一遍你要写的那几句话（本机实测：470 → 330pt，剪掉的都是读者不能拿去行动的部分）。写完之后**再把菜单开出来量一次** —— 这一轮没做到，见下条 |
+| 想量「刚改完的菜单长什么样」，而 app 不是 frontmost | 菜单是**点击**才弹的，点落最前面那扇窗上；这台机器上有一个常驻的探针进程（`./wprobe`）一直占着 frontmost，`NSRunningApplication.activate` 改不动它，于是 `AXMenuButton` 能被 press（`AXPress` 返回 0）但菜单没有出现 | 能读的还是读：**闭合的那个控件**在 AX 里读得到（这一轮读到 `AXMenuButton | Thinking: High [985,806 58x17]`，于是可访问性名字是验过的）。菜单**弹开之后**的宽度只能算：`NSFont.menuFont` 量每一项文本 + ~40pt 的勾/内边距。**把「算的」和「量的」分开说**，别把 330pt 这个算术结果写成菜单的实测宽度 |
+| 同上一条，但这次要看的是**弹开的菜单**：`AXPress` 一个工具条里的 `AXMenuButton` 返回 `success`，AX 树里却**一个 `AXMenu` 都没有**（截图里也没有菜单） | 那个菜单的 `AXPress` **要求指针先停在控件上** —— 工具栏菜单是跟着按钮弹的。实测同一个进程：只发 `AXPress` → 树里 `AXMenu` 数 **0**；先 `CGEvent(mouseEventSource:mouseType: .mouseMoved, mouseCursorPosition: 控件 AX 中点)` 再 `AXPress` → 树里 **2 个 `AXMenu`**，而且项标题直接可读（`AXMenu` 的 `AXMenuItem` 是**窗口**子树里的，不用命中测试） | 驱动顺序是「移动 → 按」。**别用 `postToPid`**：事件到了进程，但菜单是 AppKit 的**模态追踪**，指针不在控件上就不会停（实测 `postToPid` 连按三次，一次菜单都没出）。按开的菜单**记得关**（再按一次或 Escape）：留着它挂在那儿，之后每一次点击都会被它吃掉 —— 这一轮就是这么把后面几步驱动全废掉的 |
+| 工具条里一个 `Menu` 的图标自己变成了**强调色**，而旁边两个 `Button` 是普通标签色（同一行、同一份 `Label` 写法、同一个窗口 `.tint`） | 新样式的工具条把 **menu 的 label 当强调色的控件**画。实测同一裁剪里：`.tint(品牌绿)` 之下，`Menu { } label: { Label(…) }` 的图钉 **sat=111 rgb(119,230,164)**，旁边两个 `Button { } label: { Label(…) }`（分叉、铅笔）**sat≤19（灰）**。而这里图钉的填充/描边本来是它**唯一**的状态信号（`pin` / `pin.fill`）—— 一个常亮的绿图钉正好把「绿 = 已置顶」这个误读做实 | label 上写一句 `.foregroundStyle(.primary)`，它就回到和邻居一样的标签色（实测同一裁剪 sat≤16）。判据用**像素饱和度**而不是眼睛：灰的 sat<20、品牌绿的 sat>100 |
+| 按截图数出来的坐标去点，总是**差一行/差几十点** | 截图 PNG 的像素尺寸**不等于点数**：实测一个 1470×835 点的窗口，`screencapture -l` 出来是 **1400×840 像素**（`-R 300x110` 的区域也是 300×110 **像素**） | 坐标一律从 **AX 的 frame** 拿（那是点），截图只用来**看**。非要换算就先把比例量出来（`sips -g pixelWidth` ÷ 窗口的点宽），并记住两个方向都可能不成整数倍 |
+| 想把一个菜单项排成**三列**（`价格 价格 价格  名字`） | **菜单项只能是一个 `Text`。** SwiftUI 的 `Menu` + `Button(label:)` 会取 label 的**第一个片段**：写成 `HStack` 之后，画出来只剩第一段（截图里就是三个模型只剩名字，AX 里也是），一不报错二不警告 | 对齐只能靠**字符串本身**：`monospacedDigit()`（数字等宽）+ 在 shell 里把每个数**切成同样的字符数**（这样「等量空格」就是等量宽度）。判据：屏幕上三行的数字块左右边缘是否对齐（这一轮实测 252.4 / 252.6 / 252.8pt，等于等宽） |
+| 菜单宽度看起来还能塞，加完才**贴到屏幕边** | 菜单宽度 = 它最长那一项的宽度 + 固定开销（内边距 + 勾的位置）。**本轮实测把开销反解出来了：32.8pt**（两条已知行都吻合：338、347）。于是「这一行多少字」可以直接换算成「菜单多少点」——不必先跑起来 | 先算：`NSFont.menuFont(ofSize: 0)` 量最长那一行的文本宽 + 32.8。实测对照：一个价 300pt、三种写法 335–359pt、散文式 484pt（贴边） |
+| 想读**弹出菜单里某一项**的 AX 属性（label / 宽度） | 菜单是**自己的窗口**（`kCGWindowLayer == 101`），而这一轮里它的 item 从 app element **走不到**（同一份代码在 release 的 `.app` 上走到过，debug 上没走到；`AXUIElementCreateSystemWide()` 返回 0 个窗口） | 能读的还是读：**闭合的按钮**在 app element 下稳定可读（这一轮靠它验了 `DeepSeek V4 Flash [142x16]`、`Thinking: High [58x17]`、可访问性名字）。菜单**项**读不到就**算**（上一行），并把「算的」和「量的」分开写 |
 
 ## 六、调试手法（正面清单，别丢）
 
@@ -187,6 +210,30 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
   一个是**事件全对但字段里没有东西**（没有 final，句子永远停留在合成状态），一个是**开头的字
   被吃**（音频先于模型）。两次都是把真实 `NSTextView` 的 `string` 和 `hasMarkedText()` 打出来才看见的
   —— 只打事件日志，两次都会看起来正常。
+- **同一个「闪」下面可能叠着两个完全无关的原因，而修掉一个不会让另一个变轻。** 这次是：列表顺序（32pt，每几秒一次）和滚动视图的
+  上边距（16pt，只在点击那两帧）。第一个修完，第二个**一模一样**地留着 —— 因为症状都是「东西动了一下」，而它们连量出来的数都不同（32 vs 16）。
+  把「动了多少」量准（这里是 32 和 16 两个数），比「还闪不闪」这个是非题更容易分开它们。
+- **两个被量掉的嫌疑犯，写下来免得再试**：① 把绿底从 `listRowBackground` 改成行自己的 `.background`（连平台的 10pt cell inset 都自己补上，画面一模一样）——**一帧都没变好**；② 不再把 `WindowActions.browsing` 发布出去（每次切换项目都会让整窗重算）——**也没变好**。
+  两个都留下了（① 回退成 `listRowBackground`，因为它把对齐交给平台；② 保留不发布，因为确实没有任何视图画它），但**都不是**那个闪的原因。
+- **先录一段、再看，别「重放一次、量一次」。** 一个只在 0.1 秒内存在的布局事件，被重放四轮 × 每轮量一次的结果是：**一模一样**，
+  于是连续四轮我的结论都是「侧栏没动」—— 而它其实在动，只是每次都在我按下快门之前就复位了。换成 60fps 录一段窗
+  （`ScreenCaptureKit`，`SCStreamOutput` 每帧回调），然后**逐帧**找变化（按 4pt 横带求和取差），一次就同时抓到两件
+  自己从没注意的事：运行小节的进出、以及寄存器内部两条行的顺序**每一两秒就换一次**。价钱是几十行 Swift，而它替掉
+  的是「继续重放」这条没有出口的路。同一条也适用于 AX：轮询（每 5–10ms 读一次帧）能抓住过渡，人肉重放抓不住。
+- **AX 报的 y 不是屏幕的 y 时，合成的点击会落在别处一行。** `AXUIElement` 里子元素的 frame 是**相对窗口**的（窗口自己
+  读出来是 `y=0`），而 `CGEvent` 的坐标是**屏幕**的（窗口顶在主屏上其实在 `y=33`）。两者差一个菜单栏的高度，于是
+  「点 y=306 的那一行」会落到下一行上 —— 我按这个错位点了两轮，得到的结论是「点这行选中的是那行」。要么按
+  `kCGWindowBounds`（`CGWindowListCopyWindowInfo`）拿窗口在屏幕上的真实位置再相加，要么点完**读回 AX 的
+  `kAXSelectedAttribute`** 确认落点。
+- **验证「主窗上一个控件把读者送到设置窗的某一页」要五步，不能只看头一步。** 这次的顺序是：
+  按 `Open Settings`（AX 找得到它，靠的是 **`AXDescription`**，不是 `title` —— SwiftUI 把按钮文字
+  放在 `desc` 里，这已让我白找了一次）→ 切到另一个 tab → **只关设置窗** → 再按一次 → 看标题回不回
+  `API Key`。第三、四步是全部意义所在：目标页恰好就是默认页，所以「请求根本没实现」和「实现了」
+  在前两步里长得一模一样。另一个细节：关窗要按 `subrole == "AXCloseButton"` 那枚**且限定标题**，
+  我第一版遍历了所有窗口，把主窗也关了 —— 而主窗一关 app 就退出（`applicationShouldTerminate…`），
+  于是刚排好的验证环境没了。
+- **`.buttonStyle(.link)` 在 AX 树里是 `AXLink`**，不是按钮。一个开窗的控件报成“链接”是骗辅助技术，
+  而这件事在截图上一点看不出来 —— 量角色是量出来的，不是看出来的（见第二组那张表）。
 - **`wei-cli` 是同一套 agent 的终端形态**：怀疑是 shell 侧还是宿主侧时，先在终端复现 —— 这次
   shell 侧一次就通过了，问题定位在宿主，省掉大量窗口里的瞎试。
 - **`ps eww` 看不到运行期的 `setenv`。** 它打的是内核在 `exec` 时记下的那份环境副本，之后进程里
@@ -230,6 +277,11 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 
   所以截图是**只读**的：能看状态，不能驱动。要驱动得靠键盘/鼠标，而那就需要辅助功能。
   截图前先查一次权限，别把 TCC 拒绝当成 app 的问题。
+
+  但**自己的进程不需要这两个权限**：把窗口开出来、`layer.render(in:)` 渲进一张位图，
+  这是同进程读自己的画 —— 适合验「A 和 B 哪个好看」「离屏和真窗口差在哪」，而且能拿到
+  **2× 的实际像素**做数值断言（颜色、边界一读就是数）。这一轮里三个尺寸问题就是这么做出来的，
+  其中「平台的高亮比我们的低 2 点」这种差别，看图是看不出来的。
 - **按 PID 找窗口号**（用户的 app 和你的 demo 同时在跑时，这是唯一可靠的选法）：
   `CGWindowListCopyWindowInfo(.optionAll)` 拿全表，按 `kCGWindowOwnerPID` 过滤，取 `layer == 0`
   且带标题的那个；`screencapture -x -o -l <num>`（`-o` 去掉阴影）。十几行 Swift 存成一个小工具，
@@ -237,6 +289,13 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
   返回空表（同一个查询里有 `onscreen=true` 的窗口，只换 flag 却什么都拿不到）。
 - **演示一段对话不需要一行模型**：`cp` 一条真会话、换掉 assistant 的正文、`WEI_SESSION=` 指
   过去，窗口里就是那段对话。验证「答案里的图」这种纯渲染的事，这样一轮几秒钟，且不花 token。
+- **`WEI_STORE=<目录> open -n` 起自己那份 app，别碰用户那扇窗。** MoonBit 侧认这个环境变量
+  （`macos/appffi/app.mbt` 的 `WEI_STORE`），所以 demo 读写的是自己的 store，选中状态、删除、
+  「New Session」都不会落到用户的数据上；`-n` 是开新实例（同 bundle 默认只会激活已有实例）。
+  用法：`WEI_STORE=/tmp/wei-store open -n "macos/dist/wei Agent.app"`（目录先建好，`cp -R`
+  一份真 store 进去就是一份可点的数据）。要看清空行、空栏的排版时，还能顺手把
+  `defaults write io.github.lindividual.wei-agent NSRequiresAquaSystemAppearance -bool YES` 打上，
+  强开浅色外观 —— **验完记得 `defaults delete` 掉**，否则这台机器上的 app 就一直是浅色的。
 - **量布局用 AX 的 frame，不靠截图估**：`/tmp/wei-shell-probe/axframe <pid>` 把整棵 AX 树连
   `y=.. x=..`（窗口相对坐标）打出来 —— 工具条是 `AXToolbar y=0..52`、按钮 `x=872..917`、
   标题 `y=14..38`，于是「标题和按钮在不在同一行」是一个数字问题。同一套工具里还有：
@@ -255,9 +314,10 @@ app 被 Finder 启动时父进程是 `launchd`，而 `launchd` **不继承读者
 | 症状 | 原因 | 修法 |
 |---|---|---|
 | 终端里 `moon`（或 homebrew 装的任何东西）好使，agent 的 `bash` / `script` 说找不到 —— 同一台机器、同一个读者 | 从 Finder 启动的 app 继承的是 `launchd` 的环境，而 **`launchd` 根本不设 `PATH`**（实测 `launchctl getenv PATH` 为空）；`/bin/bash` 于是回退到编译期默认值（`getconf PATH` → `/usr/bin:/bin:/usr/sbin:/sbin`）。实测那个正在跑的 app：`PATH=/usr/bin:/bin:/usr/sbin:/sbin`、`SHELL=/bin/zsh`、`HOME=/Users/lucas`。`~/.moon/bin` 不在里面 —— 而工具描述向模型承诺的正是「和读者的终端一样」 | 启动时**问一次登录 shell**：`"$SHELL" -l -i -c` 打印一个 marker 加 `$PATH`，把结果并进本进程环境，之后 spawn 的一切都继承。代码在 `platform/environment.mbt`，调用于 `macos/appffi/app.mbt` 的 `start()`。**为什么要 marker**：rc 文件会在 stdout 上说话 —— 本机 `~/.zshrc` 第 2 行那个 source 写坏了（`source ~/.gitrcPATH="…"`，本该是两行），报错里就带着一段 `PATH=` 字样（它在 stderr 上，但换个 rc 文件就可能在 stdout）；「取最后一个 `PATH=`」会取到它，只认「最后一个带 marker 的行」就没有这个歧义。实测 28ms |
+| **每次启动侧栏都多一行工作区（比如 `lucas`），点一下又消失** | 三个事实叠在一起，全部来自「双击的 `.app` cwd 是 `/`」：`working_dir`（当时的名字）把 `/` 读成 home（→ 会话 cwd 是 `/Users/lucas`）；新会话**故意不落盘**（`fresh_session`）；而 `say_sessions` 必须把「屏幕上的会话」列出来，没有匹配的组就**现场造一个**，标签取路径最后一段 → `lucas`。它不是真工作区（实测 `~/.wei/sessions/--Users-lucas--/` 不存在），所以读者一点任意会话，这一组就没了 —— 看起来像“被删掉” | 两半都要改，少一半都还会出现：`start_dir` 把 `/` 先问 **store 里最靠上的工作区**（`last_workspace`），问不到才回 home —— 启动不再总是落在家目录；`carry_current` 只把未落盘的当前会话**塞进已经存在的那一组**，没有组就不塞（侧栏是空的，这是实话）。实测：空 store + cwd=`/` 启动 → `sessions` 事件是 `[]`；`/open` 一条真会话 → 那一行也不出现（以前会多出一行 `lucas`）；`/new` 在已有项目里 → 新会话排在那一组最上面 |
+| **新装机的第一条 prompt 得到 `the turn failed: Failure(the model endpoint returned HTTP 401: Authentication Fails (auth header format should be Bearer sk-...))`**，同时一个空对话被写成了文件、家目录变成侧栏上的项目 | 同一张表最上面那条（Finder 启动的 app 继承 `launchd` 的环境）的**后半段**：没有 key 是这种启动方式的常态，而（a）启动时那句 `set DEEPSEEK_API_KEY and reopen` 不但和宿主那堵墙重复、还指错方向，（b）提问没有前置检查，真的发出去了，（c）`\{err}` 打在 `Failure` 上会连**构造名**一起打印 —— `core/script.mbt` 里早有同一条规则（`unwrap_raise`），但只用在子进程 stderr 上、（d）provider 的协议话（`auth header format`）不是给读者的句子 | 四件事各修各的：`turn_refusal` 在 **`start_turn` 的第一行**拦（无 key → 一句、不置 busy、不写文件、不发请求）；启动时那句 `error` 删掉（`ready` 的 `key: missing` 已经够）；所有 catch 点走 `@core.error_text`（`Failure` 剥包装，子错误原样）；输入区那行给一个 **Open Settings** 按钮，文案从指令变事实（`No API key`）。实测第一个 prompt 的线上：只有一条 `error no API key — add one in Settings`，没有请求、没有 `.wei/sessions`、侧栏仍然空 |
 
 两个决定看起来可以更省事，但都别省：
-
 - **是 merge，不是替换。** 登录 shell 知道读者的工具在哪，`launchd` 知道系统把什么放上了 PATH，
   两者**互不包含** —— 少了后面那份连 `/usr/bin` 都没了，agent 什么命令都跑不起来。
   顺序是登录 shell 在前：读者的 PATH 顺序是读者排的，任何后置条目盖掉前置条目都等于把那个安排作废。

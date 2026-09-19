@@ -42,6 +42,20 @@ struct SettingsView: View {
     enum Pane: String, CaseIterable, Identifiable, Hashable {
         case key, tools, skills, instructions, limits
 
+        /// The same five panes as `SettingsPane`, which is the vocabulary the *window* uses when it
+        /// sends a reader here ("no API key — Open Settings"). One mapping, in one place, so that a
+        /// pane added or renamed on this side is a compile error there rather than a string that
+        /// quietly stops matching.
+        init(_ pane: SettingsPane) {
+            switch pane {
+            case .key: self = .key
+            case .tools: self = .tools
+            case .skills: self = .skills
+            case .instructions: self = .instructions
+            case .limits: self = .limits
+            }
+        }
+
         var id: String { rawValue }
 
         var title: String {
@@ -91,7 +105,29 @@ struct SettingsView: View {
         // hand-editable, and a panel that reported whatever was true when the app launched would be
         // wrong exactly when someone had just been in the file. The push is what keeps the first
         // render from depending on this — which is what it did, and the panel sat here asking.
-        .onAppear { client.refreshSettings() }
+        .onAppear {
+            client.refreshSettings()
+            openWhereAsked()
+        }
+        // **And again on every request**, which is the half `.onAppear` cannot cover: this window
+        // outlives being closed (`Settings` is a scene, and macOS keeps it), so a reader who left it
+        // on Turn Limits and then pressed "Open Settings" under the composer would be shown the pane
+        // about turn limits. `.onChange` rather than a binding to the client's own value: the request
+        // is an event, and reading it as state would re-open the pane every time anything else
+        // redrew.
+        .onChange(of: client.settingsAsk) { _, _ in openWhereAsked() }
+    }
+
+    /// Move to the pane the reader was sent to, if any.
+    ///
+    /// On the first launch nothing has asked for anything — `settingsAsk` is 0 — and the default
+    /// below is `.key`, which is the pane a reader with no key needs. So the untold case and the
+    /// asked-for-key case agree, and only a *later* request (from the wall under the composer, after
+    /// the panel has been somewhere else) has to move anything.
+    private func openWhereAsked() {
+        guard client.settingsAsk > 0 else { return }
+        let wanted = Pane(client.settingsPane)
+        if pane != wanted { pane = wanted }
     }
 
     @ViewBuilder

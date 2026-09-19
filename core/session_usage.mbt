@@ -43,14 +43,27 @@ pub fn Usage::billed_input(self : Usage) -> Int {
 }
 
 ///|
-/// Everything this conversation has spent: every call on the active branch, including the ones
-/// compaction has since summarized away.
+/// Everything **this session** has spent: every call on the active branch since it was forked, including
+/// the ones compaction has since summarized away.
 ///
 /// `path()` rather than `context_entries()` on purpose. What a compaction replaces stops being
 /// sent to the model, but it was still paid for, and a total that shrank when the context was
 /// compacted would be a total nobody could trust. Branches the conversation left behind are not
 /// counted: they belong to a different story, and upstream's `/tree` is where they are accounted for.
+///
+/// **And neither is the history a fork copied.** A forked session starts from entries somebody else
+/// already paid for, and counting them again would bill one conversation's calls to two sessions — the
+/// opposite of what this number is asked: "what has *this* conversation cost me". The fork marker is on
+/// the path (`fork_entry`), and the sum starts after the newest one, so a fork of a fork is right by
+/// construction: it is the same rule, applied to a path with two markers on it.
+///
+/// What deliberately does **not** start over is the size of the context: `last_prompt_tokens` is about
+/// what will be *sent*, and a fork really does carry the parent's conversation to the provider. The two
+/// figures therefore answer different questions and are allowed to disagree — a fresh fork can report
+/// nothing spent and a full window at the same time, and be telling the truth twice.
 pub fn Session::usage(self : Session) -> SessionUsage {
+  let path = self.path()
+  let start = spend_start(path)
   let mut total : SessionUsage = {
     input: 0,
     output: 0,
@@ -67,8 +80,8 @@ pub fn Session::usage(self : Session) -> SessionUsage {
     },
     replies: 0,
   }
-  for entry in self.path() {
-    let usage = match entry.kind {
+  for i in start..<path.length() {
+    let usage = match path[i].kind {
       Message(message~) =>
         match message {
           Assistant(assistant) => assistant.usage
@@ -86,6 +99,26 @@ pub fn Session::usage(self : Session) -> SessionUsage {
     total = add(total, usage)
   }
   total
+}
+
+///|
+/// Where a session's own spending begins: the entry after the newest fork marker on the path, or 0 for
+/// a session that was never forked.
+///
+/// A separate function because it is the whole of the rule and it is worth reading on its own — the
+/// arithmetic below is a loop, and "which entries count" is a decision.
+fn spend_start(path : Array[Entry]) -> Int {
+  let mut start = 0
+  for i in 0..<path.length() {
+    match path[i].kind {
+      Custom(custom_type~, ..) =>
+        if custom_type == fork_type() {
+          start = i + 1
+        }
+      _ => ()
+    }
+  }
+  start
 }
 
 ///|

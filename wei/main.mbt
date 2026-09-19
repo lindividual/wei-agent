@@ -90,19 +90,22 @@ async fn main {
     settings,
     @platform.workspace_agents_md(cwd),
   )
-  let system_prompt = @core.build_system_prompt(cwd, tools, mode~, sections=[
-    instructions.text,
-    @core.skill_catalog_prompt(skills),
+  let system_prompt = @core.build_system_prompt(
+    cwd,
+    tools,
+    mode~,
+    instructions=instructions.text,
+    skills~,
     // Always empty here, because this entry point always starts a new session and a new session has
-    // no earlier calls to have used another mode's tools. It is built anyway so that the prompt this
-    // program sends and the one the server sends come from the same sections in the same order — the
-    // difference between the two would otherwise be invisible until someone taught this one to
-    // resume, and then it would be a turn that ignores a mode change.
-    @core.tool_change_prompt(
-      @core.stale_tool_names(@core.Session::new(header, []).context(), tools),
+    // no earlier calls to have used another mode's tools. It is passed anyway so that the prompt this
+    // program sends and the one the server sends are assembled by the same function from the same
+    // order — the difference between the two would otherwise be invisible until someone taught this
+    // one to resume, and then it would be a turn that ignores a mode change.
+    stale_tools=@core.stale_tool_names(
+      @core.Session::new(header, []).context(),
       tools,
     ),
-  ])
+  )
   let ctx = @agent.AgentContext::new(
     session=@core.Session::new(header, []),
     session_path=path,
@@ -119,7 +122,14 @@ async fn main {
   println("")
 
   let started = @env.now()
-  let result = @agent.run_turn(ctx, prompt, timestamp, thinking_level="high")
+  let result = @agent.run_turn(
+    ctx,
+    prompt,
+    timestamp,
+    // A session started here is empty — nothing has recorded a level — so this is the build's
+    // default, named by the catalog rather than as a literal in a third front end.
+    thinking_level=@core.default_thinking_level(),
+  )
   let elapsed = @env.now() - started
 
   println("")

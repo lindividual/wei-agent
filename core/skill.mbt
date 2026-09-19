@@ -421,6 +421,73 @@ pub fn skill_dir(skill : Skill) -> String {
 }
 
 ///|
+/// The three parts `skill_expansion` built: the name, the body, and the reader's own words.
+///
+/// **The inverse of the function above, and it exists because that function is lossy.** Once a
+/// `/skill:<name>` message is written, the shell's own frame — the `<skill …>` tag, the line about
+/// relative references, the body — is indistinguishable from what the reader typed: the log holds one
+/// text, the front ends draw one bubble, and a wire that carried only that text would draw a twelve-
+/// thousand-character document in the middle of somebody's sentence. Whoever wants the reader's own
+/// words back has to take them out again, and the only thing that knows where they are is the shape
+/// the framing was written in.
+///
+/// Nothing is inferred: the framing is matched, not guessed at. A message that merely *mentions* a
+/// skill — an answer quoting one, a reader pasting a `/skill:` line into a sentence — is not a framing
+/// and answers `None`, because the whole preamble has to be there, in order, at the start. A skill
+/// whose *body* quotes a closing tag is read to its own first one, which is the same rule the frontmatter
+/// parser applies to its fence and wrong in the same rare way (see the note there).
+///
+/// The middle part is the reason this can be trusted: the **body** is whatever the producer wrote in
+/// that slot, so the caller draws the skill's document *and* the reader's words from one parsed
+/// message rather than from a second copy that could drift.
+pub fn skill_expansion_parts(text : String) -> (String, String, String)? {
+  // The tag with the name attribute and the line that follows it — the exact sequence
+  // `skill_expansion` writes. Matching the preamble too is what keeps this from firing on prose that
+  // happens to begin with a tag of its own.
+  let open = "<skill name=\""
+  let preamble = "\">\nReferences are relative to "
+  if !text.has_prefix(open) {
+    return None
+  }
+  // The *first* occurrences, in order. None of them can appear earlier than where they are written:
+  // the attributes are escaped, so neither one holds a quote or a newline.
+  let name_at = match text.find("\" location=\"") {
+    Some(at) => at
+    None => return None
+  }
+  let body_at = match text.find(preamble) {
+    Some(at) => at + preamble.length()
+    None => return None
+  }
+  // Past the preamble's blank line — the directory it names is arbitrary, so the separator is what
+  // marks the end of that line rather than any character count.
+  let rest = match text[body_at:].find("\n\n") {
+    Some(at) => text[body_at + at + 2:]
+    None => return None
+  }
+  let body_end = match rest.find("\n</skill>") {
+    Some(at) => at
+    None => return None
+  }
+  let tail = rest[body_end + 9:].to_owned()
+  // After the closing tag there is the reader's text or nothing at all — see the producer, which
+  // appends two newlines only when there is something to append. Anything else means this is not a
+  // message the producer wrote, and `None` is the honest answer to that.
+  let args = if tail == "" {
+    ""
+  } else if tail.has_prefix("\n\n") {
+    tail[2:].to_owned()
+  } else {
+    return None
+  }
+  // The body keeps every byte it was given: it is what reached the model, and a reader opening the
+  // fold is asking to see exactly that.
+  Some(
+    (text[open.length():name_at].to_owned(), args, rest[:body_end].to_owned()),
+  )
+}
+
+///|
 fn strip_bom(text : String) -> String {
   if text.has_prefix("\u{FEFF}") {
     text[1:].to_owned()

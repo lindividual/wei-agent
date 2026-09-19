@@ -52,6 +52,26 @@ pub fn SessionHeader::to_line(self : SessionHeader) -> String {
 }
 
 ///|
+/// A whole session file: the header, then every entry, in the order they are written.
+///
+/// The counterpart of `parse_session_file`, and the reason it exists as a function rather than at the
+/// one call site that needs it: writing a session in one step is something only a fork does (every
+/// other writer *appends*), and getting the order or the line ending wrong would produce a file that
+/// reads back as a different session. Both halves of that round trip belong in the same package, where
+/// one test can put a session through them.
+pub fn session_file_text(
+  header : SessionHeader,
+  entries : Array[Entry],
+) -> String {
+  let out = StringBuilder()
+  out.write_string(header.to_line())
+  for entry in entries {
+    out.write_string(entry.to_line())
+  }
+  out.to_string()
+}
+
+///|
 /// The directory name upstream derives from a working directory: the leading separator
 /// is dropped, path separators and colons become dashes, and the result is
 /// wrapped in double dashes so it cannot collide with a real directory name.

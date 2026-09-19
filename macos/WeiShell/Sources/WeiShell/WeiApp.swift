@@ -41,6 +41,17 @@ struct WeiApp: App {
                 // command, and the menu bar is the one that owns it.
                 Button("New Session in Folder…") { actions.choosingFolder = true }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
+                Divider()
+                // Here, in the New group, because it makes a session too — that is what the reader is
+                // looking for. It is **not** in the Session menu, which holds the commands that move
+                // between sessions and stop the work in one; those act on what is open rather than
+                // making something new.
+                //
+                // No shortcut this round: ⌘N and ⇧⌘N are taken, and the house rule is that one command
+                // gets one key — the toolbar button and this item are the two ways in, which is already
+                // what "New Session" does.
+                Button("Fork Session") { client.fork() }
+                    .disabled(client.currentPath.isEmpty)
             }
             // A second way to get a picture from the clipboard onto the next prompt. The composer
             // offers ⌘V on the card, but a text field claims ⌘V for itself and the argument about who

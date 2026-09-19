@@ -149,3 +149,58 @@ test "a quote in a name cannot break out of the attribute" {
   let first_close = text.find(">").unwrap()
   assert_true(text[:first_close].contains("&quot;"), msg=text)
 }
+
+///|
+/// The parts come back out of the expansion they went into.
+///
+/// This is the round trip the transcript depends on: the shell writes one text with the reader's
+/// words buried in it, and the front ends have to draw the reader's words — so the take-apart has to
+/// agree with the putting-together, exactly, including a body that is itself full of markdown.
+test "an expansion takes apart into the three parts it was built from" {
+  let skill = a_skill()
+  // **With CJK in it, deliberately.** `find` and slicing share an offset space (UTF-16 units rather
+  // than bytes), which is only visible when there is a multi-byte character before the thing being
+  // found — and a skill here is written in Chinese as often as in English.
+  let body = "# 报告\n\n先用 reference.md，再跑一遍：\n\n```\nopen <skill name=\"x\">\n```\n\n- 一\n- 二"
+  let text = skill_expansion(skill, body, "用 data.csv 里的数字")
+  let (name, args, back) = skill_expansion_parts(text).unwrap()
+  assert_eq(name, "pdf-report")
+  assert_eq(args, "用 data.csv 里的数字")
+  assert_eq(back, body)
+  // With nothing added, the tail is the closing tag and nothing after it.
+  let bare = skill_expansion(skill, body, "")
+  let (_, none, _) = skill_expansion_parts(bare).unwrap()
+  assert_eq(none, "")
+}
+
+///|
+/// Only a framing is a framing. Everything else is prose, and a message that merely mentions a skill
+/// has to stay whole — the label and the bubble both come from this answer.
+test "text that is not a framing answers nothing" {
+  // The reader pasted a skill's text into a sentence: no tag at the start.
+  assert_true(skill_expansion_parts("look at this: <skill name=\"x\">") is None)
+  // A tag with no preamble is not what `skill_expansion` writes.
+  assert_true(
+    skill_expansion_parts(
+      "<skill name=\"x\" location=\"/s/SKILL.md\">\nbody\n</skill>",
+    )
+    is None,
+  )
+  // The opening tag, then nothing that closes it.
+  assert_true(
+    skill_expansion_parts(
+      "<skill name=\"x\" location=\"/s/SKILL.md\">\nReferences are relative to /s.\n\nbody",
+    )
+    is None,
+  )
+  // The reader's own words after the block, but only one newline: not the shape.
+  assert_true(
+    skill_expansion_parts(
+      "<skill name=\"x\" location=\"/s/SKILL.md\">\nReferences are relative to /s.\n\nb\n</skill>\nx",
+    )
+    is None,
+  )
+  // A path with slashes is not a command, and neither is a question about one.
+  assert_true(skill_expansion_parts("/usr/local/bin") is None)
+  assert_true(skill_expansion_parts("") is None)
+}

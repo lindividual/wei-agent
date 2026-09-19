@@ -14,62 +14,173 @@ test "event carries its kind first" {
 
 ///|
 test "ready names the session, model, directory and key source" {
-  let fields = match
-    event("ready", [
-      ("session", Json::string("/tmp/s.jsonl")),
-      ("model", Json::string("DeepSeek V4 Flash (deepseek-v4-flash)")),
-      ("cwd", Json::string("/tmp")),
-      ("key", Json::string("missing")),
-    ]) {
-    Object(fields) => fields
-    _ => fail("not an object")
-  }
-  inspect(fields.get("kind").unwrap().stringify(), content="\"ready\"")
-  inspect(fields.get("key").unwrap().stringify(), content="\"missing\"")
-  // The cwd in the ready event is what the header shows, so it has to be there rather than
-  // derived by the host from its own working directory: the session decides where tools run.
-  inspect(fields.get("cwd").unwrap().stringify(), content="\"/tmp\"")
-}
-
-///|
-test "a piece says which block it belongs to" {
-  let json = event("reply", [
-    ("id", Json::string("reply-1")),
-    ("delta", Json::string("hi")),
-  ])
+  // Through the real producer. This used to rebuild the four fields by hand with `event(...)` — which
+  // is not the function this event goes out with, and omits its routing `session` — so what it pinned
+  // was a shape nothing sends.
+  let open = Open::new(
+    "/tmp/s.jsonl",
+    "/tmp",
+    "deepseek-v4-flash",
+    "off",
+    @core.Session::new(
+      {
+        id: "s",
+        timestamp: @core.format_iso_utc(0L),
+        cwd: "/tmp",
+        parent_session: None,
+        version: Some(3),
+      },
+      [],
+    ),
+  )
   inspect(
-    json.stringify(),
-    content="{\"kind\":\"reply\",\"id\":\"reply-1\",\"delta\":\"hi\"}",
+    ready_event(open, "missing").stringify(),
+    content="{\"kind\":\"ready\",\"session\":\"/tmp/s.jsonl\",\"model\":\"DeepSeek V4 Flash (deepseek-v4-flash)\",\"cwd\":\"/tmp\",\"key\":\"missing\"}",
   )
 }
 
 ///|
+test "a piece says which block it belongs to" {
+  inspect(
+    piece_event("/tmp/s.jsonl", "reply", "reply-1", "hi").stringify(),
+    content="{\"kind\":\"reply\",\"session\":\"/tmp/s.jsonl\",\"id\":\"reply-1\",\"delta\":\"hi\"}",
+  )
+}
+
+///|
+/// The model menu's wire: what each model costs, cut to its column, and the unit said once.
+///
+/// The prices are strings here for the reason `Pricing::columns` gives — three of them are compared
+/// *down* a menu, so their widths are a fact about characters and the shell is the side that owns the
+/// rule. What this pins is the shape the host decodes, and the alignment that is the whole point:
+/// `0.14`, `0.30` and `1.32` are all four characters, because they all come from one catalog-wide
+/// width rather than from each row's own number.
+test "the model menu carries each model's prices" {
+  inspect(
+    models_event("/tmp/s.jsonl", "deepseek-v4-flash").stringify(),
+    content="{\"kind\":\"models\",\"session\":\"/tmp/s.jsonl\",\"items\":[{\"id\":\"deepseek-v4-flash\",\"label\":\"DeepSeek V4 Flash\",\"vision\":true,\"prices\":{\"input\":\"0.14\",\"output\":\"0.28\",\"cached\":\"0.0028\"}},{\"id\":\"deepseek-flash\",\"label\":\"DeepSeek V4.1 Flash\",\"vision\":true,\"prices\":{\"input\":\"0.30\",\"output\":\"1.20\",\"cached\":\"0.0060\"}},{\"id\":\"deepseek-v4-pro\",\"label\":\"DeepSeek V4 Pro\",\"vision\":false,\"prices\":{\"input\":\"1.32\",\"output\":\"3.96\",\"cached\":\"0.0440\"}}],\"current\":\"deepseek-v4-flash\",\"unit\":\"US dollars per million tokens — in · out · cached\"}",
+  )
+}
+
+///|
+/// The label is the name, and the id is asked for separately.
+///
+/// One test, because the two were one string and the split is the whole change: the menu beside a
+/// message draws the name, and `model_report` — where a reader is about to type the id — asks for it.
+/// The name-only form is what keeps the composer's menu narrower than the one it replaced.
+test "a model's label is its name and the id is a separate answer" {
+  assert_eq(@core.default_model().label(), "DeepSeek V4 Flash")
+  assert_eq(
+    @core.default_model().label_with_id(),
+    "DeepSeek V4 Flash (deepseek-v4-flash)",
+  )
+}
+
+///|
+/// The thinking menu's wire: the levels *this model* has, and the one in force.
+///
+/// The literal is the same one `EventTests.testTheThinkingMenuOffersThisModelsLevels` decodes, so the
+/// field names have no unwatched edge — and the fact it pins is the one worth pinning: the list is the
+/// model's, so `low` is here and is not in the pro model's. A menu drawn from a fixed list would offer
+/// it, and the API would refuse the request.
+test "the thinking menu carries the model's own levels" {
+  inspect(
+    think_event("/tmp/s.jsonl", "deepseek-v4-flash", "high").stringify(),
+    content="{\"kind\":\"think\",\"session\":\"/tmp/s.jsonl\",\"items\":[{\"id\":\"off\",\"label\":\"Off\",\"detail\":\"fastest and cheapest; answers may be shallower\",\"default\":false},{\"id\":\"low\",\"label\":\"Low\",\"detail\":\"thinks briefly; a sooner first word\",\"default\":false},{\"id\":\"high\",\"label\":\"High\",\"detail\":\"thinks before answering\",\"default\":true},{\"id\":\"max\",\"label\":\"Max\",\"detail\":\"thinks longest; slowest and dearest\",\"default\":false}],\"current\":\"high\"}",
+  )
+}
+
+///|
+/// The pro model's menu is a shorter list, and that is the whole reason the event exists.
+///
+/// `low` is absent because `deepseek-v4-pro` has no such level. The threshold this crosses is not
+/// cosmetic: `low` sent to that model is a request the API refuses.
+test "a model without low does not offer it" {
+  let json = think_event("/tmp/s.jsonl", "deepseek-v4-pro", "high")
+  let text = json.stringify()
+  assert_false(text.contains("\"low\""))
+  assert_true(text.contains("\"id\":\"high\""))
+  assert_true(text.contains("\"id\":\"max\""))
+}
+
+///|
+/// Every level a menu can offer is a level the request builder will really send.
+///
+/// The pair is the point: `offered` is what a reader may choose and `resolve` is what goes on the
+/// wire, and a level offered but not sendable would be a menu item that either does nothing or is
+/// refused. `off` is the case worth checking by hand — it is offered by every model and it is *not* an
+/// effort, it is the disabled form.
+test "every offered level resolves to something sendable" {
+  for spec in @core.model_catalog() {
+    for level in spec.thinking_levels.offered() {
+      let thinking = spec.thinking_levels.resolve(Some(level))
+      match thinking {
+        Disabled => assert_eq(level, "off", msg="only off disables")
+        Enabled(effort~) =>
+          assert_true(effort is Some(_), msg="\{spec.id} \{level}")
+      }
+    }
+    // And the level in force is always one of them, which is what `say_think` relies on for its tick.
+    assert_true(
+      spec.thinking_levels
+      .offered()
+      .contains(spec.thinking_levels.in_force(Some("paranoid"))),
+      msg=spec.id,
+    )
+  }
+}
+
+///|
 test "a tool row carries its whole state, running or done" {
-  let running = event("tool", [
-    ("id", Json::string("tool-1")),
-    ("name", Json::string("bash")),
-    ("detail", Json::string("ls")),
-    ("done", Json::boolean(false)),
-    ("output", Json::string("")),
-    ("error", Json::boolean(false)),
-  ])
+  // The real producer, not a transcription of it. This used to rebuild the same six fields by hand
+  // with `event(...)` — the wrong builder, which emits no `session` — so what it pinned was a shape
+  // the shell never sends and the host would refuse to decode. A rename here is now a failing test
+  // rather than two builds that quietly disagree.
+  let running = tool_event(
+    "/tmp/s.jsonl", "tool-1", "bash", "ls", false, "", false,
+  )
   inspect(
     running.stringify(),
-    content="{\"kind\":\"tool\",\"id\":\"tool-1\",\"name\":\"bash\",\"detail\":\"ls\",\"done\":false,\"output\":\"\",\"error\":false}",
+    content="{\"kind\":\"tool\",\"session\":\"/tmp/s.jsonl\",\"id\":\"tool-1\",\"name\":\"bash\",\"detail\":\"ls\",\"done\":false,\"output\":\"\",\"error\":false}",
   )
 }
 
 ///|
 test "counts are integers on the wire, not floats" {
   // The host decodes them as `Int`, and a float spelling would make every count a decoding
-  // decision. `Json::number` with a `repr` is the only way to say that.
-  let json = event("end", [
-    ("calls", Json::number(19.0, repr="19")),
-    ("tools", Json::number(0.0, repr="0")),
-  ])
+  // decision. `Json::number` with a `repr` is the only way to say that. Asked of the real ending
+  // event rather than of a hand-built one, so the integer spelling is asserted where it is decided.
+  let json = end_event("/tmp/s.jsonl", "", 19, 0, 0.0)
+  let fields = match json {
+    Object(fields) => fields
+    _ => fail("end_event did not build an object")
+  }
+  // `fail` rather than `unwrap`: a missing key here is this test failing, not the test binary dying,
+  // and a panic takes the other seventy-six tests down with it.
+  match fields.get("calls") {
+    Some(value) => inspect(value.stringify(), content="19")
+    None => fail("the end event has no `calls` field")
+  }
+  match fields.get("tools") {
+    Some(value) => inspect(value.stringify(), content="0")
+    None => fail("the end event has no `tools` field")
+  }
+}
+
+///|
+/// The two events the shell sends without a session of their own to name.
+///
+/// Small, and here for one reason: they are the only two emitters with no test, so the field names
+/// they carry were pinned nowhere — not by a producing-side test, and not by the host either, whose
+/// `status` and `error` cases read `text` and would draw an empty line if it were renamed.
+test "a status and an error carry one field, and name the session that sent them" {
   inspect(
-    json.stringify(),
-    content="{\"kind\":\"end\",\"calls\":19,\"tools\":0}",
+    status_event("/tmp/s.jsonl", "thinking…").stringify(),
+    content="{\"kind\":\"status\",\"session\":\"/tmp/s.jsonl\",\"text\":\"thinking…\"}",
+  )
+  inspect(
+    error_event("", "a path that does not exist").stringify(),
+    content="{\"kind\":\"error\",\"session\":\"\",\"text\":\"a path that does not exist\"}",
   )
 }
 
@@ -96,9 +207,40 @@ test "a turn that finished normally has nothing to report" {
     time_limit_hit: false,
     truncated: false,
     request_drift: [],
+    last_request: [],
   }
   inspect(ending_text(result, false), content="")
   inspect(ending_text(result, true), content="stopped")
+}
+
+///|
+/// A retry says so on the status line, and gives the line back when the call answers.
+///
+/// The pair is the point: this is the one kind of waiting in a turn that nothing else reports. The
+/// model has not answered, no tool has run, and the counts have not moved — so without this the
+/// line under the composer sits on `thinking…` for the whole idle timeout, three times over.
+///
+/// The `None` half is not a second sentence: it is the line the caller was showing, handed back — so
+/// the two are checked together, and with a counts line as well as the plain one, because a retry
+/// that could take the line back but not restore it would leave it saying `no answer` over a turn
+/// that is working, and one that restored a thinner line would take the numbers away from the reader
+/// who was watching them.
+test "a retry is said on the status line and taken back" {
+  inspect(
+    retry_status(Some({ next: 2, total: 4, }), thinking_status),
+    content="no answer — retrying (2 of 4)",
+  )
+  // The last attempt reads the same way: a reader watching the fourth of four is being told that
+  // there is no fifth, which is what the `total` is in the sentence for.
+  inspect(
+    retry_status(Some({ next: 4, total: 4, }), thinking_status),
+    content="no answer — retrying (4 of 4)",
+  )
+  inspect(
+    retry_status(None, "working… 3 model call(s), 2 tool call(s)"),
+    content="working… 3 model call(s), 2 tool call(s)",
+  )
+  inspect(retry_status(None, thinking_status), content="thinking…")
 }
 
 ///|
@@ -116,14 +258,14 @@ test "the session list carries its workspaces and their sessions" {
       [
         session_row(
           "/store/--home-me-project--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl", "set up the project",
-          1787466378656L, true, false,
+          1787466378656L, true, false, true,
         ),
       ],
     ),
   ])
   inspect(
     json.stringify(),
-    content="{\"kind\":\"sessions\",\"workspaces\":[{\"cwd\":\"/home/me/project\",\"label\":\"project\",\"current\":true,\"sessions\":[{\"path\":\"/store/--home-me-project--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl\",\"id\":\"01a02d4c\",\"label\":\"set up the project\",\"modified\":1787466378656,\"current\":true,\"running\":false}]}]}",
+    content="{\"kind\":\"sessions\",\"workspaces\":[{\"cwd\":\"/home/me/project\",\"label\":\"project\",\"current\":true,\"sessions\":[{\"path\":\"/store/--home-me-project--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl\",\"id\":\"01a02d4c\",\"label\":\"set up the project\",\"modified\":1787466378656,\"current\":true,\"running\":false,\"pinned\":true}]}]}",
   )
 }
 
@@ -181,7 +323,7 @@ test "a deleted session is announced with its path, its label and whether it can
 test "a session's row says whether that session is running" {
   let the_row = session_row(
     "/store/--home-me-project--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl", "set up the project",
-    1787466378656L, false, true,
+    1787466378656L, false, true, false,
   )
   let fields = match the_row {
     Json::Object(fields) => fields
@@ -193,7 +335,7 @@ test "a session's row says whether that session is running" {
   let idle = match
     session_row(
       "/store/--home-me-project--/2026-08-23T06-26-15.210Z_01a02d4c.jsonl", "set up the project",
-      1787466378656L, true, false,
+      1787466378656L, true, false, false,
     ) {
     Json::Object(fields) => fields
     _ => fail("a row is not an object")
@@ -259,7 +401,7 @@ test "history keeps one row per tool, with its output attached" {
   // be one more shape for the host to decode, and its default is the empty list either way.
   inspect(
     rows.map(row => row.stringify()).join("\n"),
-    content="{\"kind\":\"user\",\"id\":\"h-1\",\"text\":\"list it\",\"complete\":true,\"blocks\":null,\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false,\"images\":[]}\n{\"kind\":\"tool\",\"id\":\"h-2\",\"text\":\"\",\"complete\":true,\"blocks\":null,\"name\":\"bash\",\"detail\":\"ls\",\"output\":\"a.txt\",\"error\":false,\"images\":[]}",
+    content="{\"kind\":\"user\",\"id\":\"h-1\",\"text\":\"list it\",\"complete\":true,\"blocks\":null,\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false,\"images\":[],\"skill\":null}\n{\"kind\":\"tool\",\"id\":\"h-2\",\"text\":\"\",\"complete\":true,\"blocks\":null,\"name\":\"bash\",\"detail\":\"ls\",\"output\":\"a.txt\",\"error\":false,\"images\":[],\"skill\":null}",
   )
 }
 
@@ -278,12 +420,12 @@ test "history gives a question its pictures" {
   let rows = history_rows(@core.parse_session_file(text))
   assert_eq(
     rows[0].stringify(),
-    "{\"kind\":\"user\",\"id\":\"h-1\",\"text\":\"what is this?\",\"complete\":true,\"blocks\":null,\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false,\"images\":[{\"mime\":\"image/png\",\"data\":\"AAA=\"}]}",
+    "{\"kind\":\"user\",\"id\":\"h-1\",\"text\":\"what is this?\",\"complete\":true,\"blocks\":null,\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false,\"images\":[{\"mime\":\"image/png\",\"data\":\"AAA=\"}],\"skill\":null}",
   )
   // The picture-only one: no text, one picture, and it is still a row.
   assert_eq(
     rows[1].stringify(),
-    "{\"kind\":\"user\",\"id\":\"h-2\",\"text\":\"\",\"complete\":true,\"blocks\":null,\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false,\"images\":[{\"mime\":\"image/jpeg\",\"data\":\"BBB=\"}]}",
+    "{\"kind\":\"user\",\"id\":\"h-2\",\"text\":\"\",\"complete\":true,\"blocks\":null,\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false,\"images\":[{\"mime\":\"image/jpeg\",\"data\":\"BBB=\"}],\"skill\":null}",
   )
 }
 
@@ -404,15 +546,115 @@ test "the settings event names the key source and never the key" {
 /// A double-clicked `.app` gets `/` as its working directory, and `/` is not a workspace.
 ///
 /// The substitution is asserted here rather than left to the launch, because the failure it prevents
-/// is invisible from the outside: a session that works, in a store slice nobody will ever find again.
+/// is invisible from the outside: a session that works, in a store slice nobody will ever find again —
+/// or, worse, a *workspace* nobody asked for, growing in a directory the reader never chose. The two
+/// answers are asserted in their order, because the order is the whole of the rule: the store is asked
+/// first, and the home directory is what a first run falls back to.
 test "the root directory is read as no directory at all" {
-  inspect(working_dir("/", "/Users/me"), content="/Users/me")
+  // No directory chosen, and the reader has worked somewhere before: that place, not home. This is
+  // the case that used to open every Finder launch in `~`.
   inspect(
-    working_dir("/Users/me/project", "/Users/me"),
+    start_dir("/", "/Users/me/projects/wei", "/Users/me"),
+    content="/Users/me/projects/wei",
+  )
+  // No directory chosen and nothing in the store: a first run, which has nowhere else to go.
+  inspect(start_dir("/", "", "/Users/me"), content="/Users/me")
+  // A directory this process was actually given is never second-guessed — not even the one the
+  // fallback would have named.
+  inspect(
+    start_dir("/Users/me/project", "/Users/me/projects/wei", "/Users/me"),
     content="/Users/me/project",
   )
-  // A directory that happens to be `home` is still the directory it is, not a second guess.
-  inspect(working_dir("/Users/me", "/Users/me"), content="/Users/me")
+  // A directory that happens to be `home` is still the directory it is.
+  inspect(
+    start_dir("/Users/me", "/Users/me/projects/wei", "/Users/me"),
+    content="/Users/me",
+  )
+}
+
+///|
+/// A session that has not been written yet is listed **under a workspace that already exists**, and
+/// never as one of its own.
+///
+/// The bug this pins is the difference between "the top row of my project" and "a project": the
+/// version before this inserted a whole group when no group matched, so every Finder launch drew a
+/// workspace named after the home directory (`workspace_name("/Users/me")` → `me`). It then vanished
+/// on the reader's first click, because the session on screen had become a file the store lists — so
+/// what they were looking at was a row that was not real, in a directory they never chose, which one
+/// keystroke would have made real.
+///
+/// Both halves are here: the session is carried into its own group, and **no group is invented when
+/// there is none** — an empty list stays empty, which is what a reader who has just installed the app
+/// sees.
+test "an unwritten session joins a workspace rather than inventing one" {
+  let stored = [("/Users/me/project", "project", false, [])]
+  carry_current(
+    stored,
+    "/Users/me/project",
+    session_row("/store/new.jsonl", "new", 7L, true, false, false),
+  )
+  assert_eq(stored[0].3.length(), 1)
+  // A workspace that is not in the list is not added to the list.
+  let elsewhere = [("/Users/me/project", "project", false, [])]
+  carry_current(
+    elsewhere,
+    "/Users/me/other",
+    session_row("/store/new.jsonl", "new", 7L, true, false, false),
+  )
+  assert_eq(elsewhere.length(), 1)
+  assert_eq(elsewhere[0].3.length(), 0)
+  // And the empty store a first run has is left exactly as empty.
+  let none : Array[(String, String, Bool, Array[Json])] = []
+  carry_current(
+    none,
+    "/Users/me",
+    session_row("/store/new.jsonl", "new", 7L, true, false, false),
+  )
+  assert_true(none.is_empty())
+}
+
+///|
+/// A turn with no key is refused **here**, so it never becomes a request.
+///
+/// The thing this pins is what the reader saw instead: a prompt typed on a first run went to the
+/// endpoint and came back as `HTTP 401: Authentication Fails (auth header format should be Bearer
+/// sk-...)`. A round trip, a log entry, and a provider talking about its auth header — to learn
+/// something this process could see in its own settings. The refusal is a sentence about the panel,
+/// because the panel is where the reader can do something about it.
+test "a turn with no key is refused before it is sent" {
+  // The one word that means "there is nothing to send with".
+  assert_true(
+    turn_refusal("") is Some(reason) &&
+    reason == "no API key — add one in Settings",
+  )
+  // A key that came from the environment or from the panel is the same fact here: this is not a
+  // check on where it came from, which is `@core.choose_api_key`'s decision and nobody else's.
+  assert_true(turn_refusal("sk-abc") is None)
+}
+
+///|
+/// What a reader sees when something they did raised: the message, not the constructor.
+///
+/// `Failure(…)` is the name of the type a turn happened to be raised through, and it was arriving in
+/// front of the reader in the two places that matter most — the first prompt of a new install, and
+/// every failed turn. Both sentences were already written for a person; only the wrapper was not.
+test "an error is shown as its message" {
+  let caught : String = try {
+    raise Failure::Failure("the model endpoint returned HTTP 401: why")
+  } catch {
+    err => @core.error_text(err)
+  }
+  inspect(caught, content="the model endpoint returned HTTP 401: why")
+  // A suberror needs no unwrapping — it already renders as its own sentence — but it must not be
+  // mangled into something else on its way out. `DecodeError` is the one that reaches a reader
+  // (`session_name_of` is the only place it is caught, and this is the text it would carry).
+  let decode : String = try {
+    ignore(@core.parse_session_file("{ not json"))
+    "no error"
+  } catch {
+    err => @core.error_text(err)
+  }
+  inspect(decode, content="line 1: invalid JSON")
 }
 
 ///|
@@ -429,6 +671,12 @@ test "the panel's commands parse to what they say" {
   assert_true(command_of("/key-clear") is ClearKey)
   assert_true(command_of("/settings") is ListSettings)
   assert_true(command_of("/mode code") is SetMode(name) && name == "code")
+  // The thinking level, and the two shapes it comes in: a word with an argument is a request, and the
+  // word alone is a question. The bare form is listed rather than left to the final branch below, so
+  // that a reader asking "what is it set to" does not send the word to the model as a prompt.
+  assert_true(command_of("/think low") is Think(level) && level == "low")
+  assert_true(command_of("/think off") is Think(level) && level == "off")
+  assert_true(command_of("/think") is ReportThink)
   // The commands that were already there are not shadowed by the new prefixes.
   assert_true(
     command_of("/model deepseek-v4-flash") is Model(id) &&
@@ -438,21 +686,62 @@ test "the panel's commands parse to what they say" {
 }
 
 ///|
+/// What the two sentences about thinking say.
+///
+/// The report names the level the next turn will be sent at and the ones this model has, because
+/// those are the two things a reader asking the question wants — and because the sentence is the only
+/// way to check the level from a terminal: the menu's tick is a host control.
+test "thinking is reported with the level in force and this model's levels" {
+  let flash = think_report(
+    Open::new(
+      "/tmp/s.jsonl",
+      "/tmp",
+      "deepseek-v4-flash",
+      "low",
+      @core.Session::new(
+        {
+          id: "s",
+          timestamp: @core.format_iso_utc(0L),
+          cwd: "/tmp",
+          parent_session: None,
+          version: Some(3),
+        },
+        [],
+      ),
+    ),
+  )
+  inspect(flash, content="thinking: low · available: off, low, high, max")
+}
+
+///|
 /// The settings event as the host's decoder sees it, pinned from the producing side.
 ///
 /// The same literal `WeiModelTests/SettingsTests.swift` decodes. `path` is the one field a reader acts
 /// on when they would rather edit the file, so it is asserted rather than left to the schema.
 test "settings carry the key source, the flags, the mode and the file" {
-  let json = event("settings", [
-    ("key", Json::string("environment")),
-    ("env", Json::boolean(true)),
-    ("saved", Json::boolean(true)),
-    ("mode", Json::string("code")),
-    ("path", Json::string("/Users/me/.wei/settings.json")),
-  ])
+  // Through the real producer, and the **same literal** `WeiModelTests/SidebarTests.swift` decodes.
+  //
+  // This test used to build six of the ten fields by hand — no `skills`, no `instructions`, no
+  // `limits` — so it pinned a shape with four of the host's fields missing, and the only place that
+  // shape existed was here. Two literals that are transcriptions of each other catch nothing; the
+  // event built by `settings_event` is what actually crosses.
+  let json = settings_event(
+    "environment",
+    true,
+    true,
+    @core.ToolMode::Code,
+    "/Users/me/.wei/settings.json",
+    [],
+    { text: "Run the tests with moon test.", source: @core.Saved, },
+    {
+      max_rounds: { value: 200.0, source: @core.Default, },
+      max_cost: { value: 0.05, source: @core.Saved, },
+      max_seconds: { value: 1800.0, source: @core.Flag, },
+    },
+  )
   inspect(
     json.stringify(),
-    content="{\"kind\":\"settings\",\"key\":\"environment\",\"env\":true,\"saved\":true,\"mode\":\"code\",\"path\":\"/Users/me/.wei/settings.json\"}",
+    content="{\"kind\":\"settings\",\"key\":\"environment\",\"env\":true,\"saved\":true,\"mode\":\"code\",\"path\":\"/Users/me/.wei/settings.json\",\"skills\":[],\"instructions\":\"Run the tests with moon test.\",\"instructions_source\":\"saved\",\"limits\":{\"rounds\":{\"value\":\"200\",\"source\":\"default\"},\"cost\":{\"value\":\"0.05\",\"source\":\"saved\"},\"seconds\":{\"value\":\"1800\",\"source\":\"flag\"}}}",
   )
 }
 
@@ -484,14 +773,17 @@ test "a reasoning block is not drawn as markdown" {
 /// growing is re-sent as the part that changed, so the part the reader has already read is never sent
 /// twice. `0` means the whole block, which is what a block that has stopped growing always sends.
 test "a block's rendering carries its parse and the index it starts at" {
-  let json = event("blocks", [
-    ("id", Json::string("reply-2")),
-    ("from", Json::number(0, repr="0")),
-    ("blocks", @md.blocks_json("## Heading\n\nwith `code`\n")),
-  ])
+  // Through the real producer, which parses the source rather than being handed a pre-built
+  // `blocks_json` — the parse and the `from` come from the same place in `say_blocks`.
+  let json = blocks_event(
+    "/tmp/s.jsonl",
+    "reply-2",
+    0,
+    @md.parse("## Heading\n\nwith `code`\n"),
+  )
   inspect(
     json.stringify(),
-    content="{\"kind\":\"blocks\",\"id\":\"reply-2\",\"from\":0,\"blocks\":[{\"t\":\"h\",\"level\":2,\"spans\":[{\"t\":\"text\",\"text\":\"Heading\"}]},{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"with \"},{\"t\":\"code\",\"text\":\"code\"}]}]}",
+    content="{\"kind\":\"blocks\",\"session\":\"/tmp/s.jsonl\",\"id\":\"reply-2\",\"from\":0,\"blocks\":[{\"t\":\"h\",\"level\":2,\"spans\":[{\"t\":\"text\",\"text\":\"Heading\"}]},{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"with \"},{\"t\":\"code\",\"text\":\"code\"}]}]}",
   )
   // The three shapes the host branches on: a table, a fence with a language, and the null a row with
   // no text carries. All three are cases `AttributedString(markdown:)` gets wrong, which is why the
@@ -526,8 +818,8 @@ test "a live frame carries the blocks that finished, not the one being written" 
   let state = live_state("reply-1-1")
   let frame = live_frame(state, "one\n\ntwo", 9, 1000).unwrap()
   inspect(
-    event("blocks", frame.fields()).stringify(),
-    content="{\"kind\":\"blocks\",\"id\":\"reply-1-1\",\"from\":0,\"blocks\":[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"one\"}]}]}",
+    blocks_frame_event("/tmp/s.jsonl", frame).stringify(),
+    content="{\"kind\":\"blocks\",\"session\":\"/tmp/s.jsonl\",\"id\":\"reply-1-1\",\"from\":0,\"blocks\":[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"one\"}]}]}",
   )
   // The open paragraph is not in the frame: it is already on the host's screen as text, and sending
   // it would be a frame that redraws it. The frame also recorded what it has sent.
@@ -542,8 +834,8 @@ test "a later live frame starts where the last one ended" {
   ignore(live_frame(state, "one\n\ntwo", 9, 1000))
   let frame = live_frame(state, "one\n\ntwo\n\nthree", 17, 1200).unwrap()
   inspect(
-    event("blocks", frame.fields()).stringify(),
-    content="{\"kind\":\"blocks\",\"id\":\"reply-1-1\",\"from\":1,\"blocks\":[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"two\"}]}]}",
+    blocks_frame_event("/tmp/s.jsonl", frame).stringify(),
+    content="{\"kind\":\"blocks\",\"session\":\"/tmp/s.jsonl\",\"id\":\"reply-1-1\",\"from\":1,\"blocks\":[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"two\"}]}]}",
   )
 }
 
@@ -969,13 +1261,9 @@ test "each limit carries its own value and source" {
 /// A turn's continuation is marked on the wire, so the host can start a new set of row names without
 /// drawing the question twice.
 test "a continued turn says so" {
-  let json = event("user", [
-    ("text", Json::string("the question already in the log")),
-    ("continued", Json::boolean(true)),
-  ])
   inspect(
-    json.stringify(),
-    content="{\"kind\":\"user\",\"text\":\"the question already in the log\",\"continued\":true}",
+    user_event("/tmp/s.jsonl", "the question already in the log", true, []).stringify(),
+    content="{\"kind\":\"user\",\"session\":\"/tmp/s.jsonl\",\"text\":\"the question already in the log\",\"continued\":true,\"images\":[]}",
   )
 }
 
@@ -987,20 +1275,13 @@ test "a continued turn says so" {
 /// Echoed rather than pointed at by path, and that is the same decision `core` makes about the log: the
 /// file behind a picture may be temp, may be gone, and may never have existed on the reader's machine.
 test "a prompt carries the pictures it was sent with" {
-  let json = event("user", [
-    ("text", Json::string("what is this?")),
-    ("continued", Json::boolean(false)),
-    (
-      "images",
-      Json::array([
-        image_row("image/png", "AAA="),
-        image_row("image/jpeg", "BBB="),
-      ]),
-    ),
+  let json = user_event("/tmp/s.jsonl", "what is this?", false, [
+    ("image/png", "AAA="),
+    ("image/jpeg", "BBB="),
   ])
   inspect(
     json.stringify(),
-    content="{\"kind\":\"user\",\"text\":\"what is this?\",\"continued\":false,\"images\":[{\"mime\":\"image/png\",\"data\":\"AAA=\"},{\"mime\":\"image/jpeg\",\"data\":\"BBB=\"}]}",
+    content="{\"kind\":\"user\",\"session\":\"/tmp/s.jsonl\",\"text\":\"what is this?\",\"continued\":false,\"images\":[{\"mime\":\"image/png\",\"data\":\"AAA=\"},{\"mime\":\"image/jpeg\",\"data\":\"BBB=\"}]}",
   )
 }
 
@@ -1012,17 +1293,77 @@ test "a prompt carries the pictures it was sent with" {
 /// because continuing means handing the model the same question back, and a reader should be able to
 /// see which one they are being offered.
 test "a session says whether its last turn was interrupted" {
-  let json = event("session", [
-    ("path", Json::string("/store/s.jsonl")),
-    ("cwd", Json::string("/tmp")),
-    ("model", Json::string("DeepSeek V4 Flash (deepseek-v4-flash)")),
-    ("interrupted", Json::boolean(true)),
-    ("interrupted_prompt", Json::string("refactor the parser")),
-  ])
-  inspect(
-    json.stringify(),
-    content="{\"kind\":\"session\",\"path\":\"/store/s.jsonl\",\"cwd\":\"/tmp\",\"model\":\"DeepSeek V4 Flash (deepseek-v4-flash)\",\"interrupted\":true,\"interrupted_prompt\":\"refactor the parser\"}",
+  // Through the real snapshot, and the reason is a mistake this test had been hiding: the literal it
+  // used to carry named the file `path`, while the shell sends it as `session` — the key the host
+  // actually routes on. A hand-written literal cannot disagree with a hand-written literal, so the
+  // two builds agreed about a field no host would ever read.
+  let open = Open::new(
+    "/store/s.jsonl",
+    "/tmp",
+    "deepseek-v4-flash",
+    "off",
+    @core.Session::new(
+      {
+        id: "s",
+        timestamp: @core.format_iso_utc(0L),
+        cwd: "/tmp",
+        parent_session: None,
+        version: Some(3),
+      },
+      [@core.turn_start_entry("refactor the parser", None, 0L)],
+    ),
   )
+  inspect(
+    session_snapshot(open).stringify(),
+    content="{\"kind\":\"session\",\"session\":\"/store/s.jsonl\",\"cwd\":\"/tmp\",\"model\":\"DeepSeek V4 Flash (deepseek-v4-flash)\",\"interrupted\":true,\"interrupted_prompt\":\"refactor the parser\"}",
+  )
+}
+
+///|
+/// A turn that ends in a conversation nobody is looking at is **not** a `session` event.
+///
+/// That distinction is the whole fix for a window that used to jump: the host reads `session` as "this
+/// is now on screen", and follows it — so a turn finishing in another conversation took the reader's
+/// screen away from what they were reading. `turn_ended_event` is that decision as a pure function, so
+/// it can be asserted without a shell, a window or an emit — the same reason `page_of` is one.
+test "a turn ending elsewhere is its own event, not a switch" {
+  let open = Open::new(
+    "/store/s.jsonl",
+    "/tmp",
+    "m",
+    "high",
+    @core.Session::new(
+      {
+        id: "s",
+        timestamp: @core.format_iso_utc(0L),
+        cwd: "/tmp",
+        parent_session: None,
+        version: Some(3),
+      },
+      [],
+    ),
+  )
+
+  // On screen: the snapshot, which is what refreshes the notice above the transcript. Its session is
+  // the one being drawn, so this moves nobody.
+  let here = match turn_ended_event("/store/s.jsonl", open, "finished") {
+    Object(fields) => fields
+    _ => fail("not an object")
+  }
+  inspect(here.get("kind").unwrap().stringify(), content="\"session\"")
+  inspect(
+    here.get("session").unwrap().stringify(),
+    content="\"/store/s.jsonl\"",
+  )
+
+  // Anywhere else: a fact about that session and nothing about the window.
+  let away = match turn_ended_event("/store/other.jsonl", open, "finished") {
+    Object(fields) => fields
+    _ => fail("not an object")
+  }
+  inspect(away.get("kind").unwrap().stringify(), content="\"elsewhere\"")
+  inspect(away.get("path").unwrap().stringify(), content="\"/store/s.jsonl\"")
+  inspect(away.get("outcome").unwrap().stringify(), content="\"finished\"")
 }
 
 ///|
@@ -1235,13 +1576,9 @@ test "a compaction is drawn as a labelled note, not as a paragraph" {
 ///|
 /// The live case: the same thing, said when it happens rather than when the session is reopened.
 test "a live compaction says so on the wire" {
-  let json = event("note", [
-    ("text", Json::string("they asked for a parser")),
-    ("name", Json::string("context compacted")),
-  ])
   inspect(
-    json.stringify(),
-    content="{\"kind\":\"note\",\"text\":\"they asked for a parser\",\"name\":\"context compacted\"}",
+    note_event("/tmp/s.jsonl", "they asked for a parser", "context compacted").stringify(),
+    content="{\"kind\":\"note\",\"session\":\"/tmp/s.jsonl\",\"text\":\"they asked for a parser\",\"name\":\"context compacted\"}",
   )
 }
 
@@ -1279,6 +1616,27 @@ test "the bare skill command is recognised, and prose is not" {
   assert_false(@core.is_skill_list_command("/skill:demo"))
   assert_false(@core.is_skill_list_command("my /skill is broken"))
   assert_false(@core.is_skill_list_command("/skills"))
+}
+
+///|
+/// `/fork` is a command about the session on screen, so it carries no argument — and the word alone is
+/// what makes it a command.
+///
+/// The interesting half is the boundary: a command that takes no payload has to be **exactly** the word,
+/// or a prompt that happens to contain it would become a fork of the reader's conversation. That is the
+/// failure this pins, because it is the one that costs work rather than a sentence.
+test "fork is a bare command, and prose keeps its meaning" {
+  assert_true(command_of("/fork") is Fork)
+  assert_true(
+    command_of("explain /fork to me") is Prompt("explain /fork to me"),
+  )
+  // Not a prefix match: a word that merely starts with the command is not the command.
+  assert_true(command_of("/forked") is Prompt("/forked"))
+  // And a payload is not silently ignored, which would be a fork taken from the wrong conversation.
+  assert_true(
+    command_of("/fork /other/session.jsonl")
+    is Prompt("/fork /other/session.jsonl"),
+  )
 }
 
 ///|
@@ -1373,6 +1731,7 @@ test "stop reaches the running tool, and only once" {
     "/tmp/s.mbt",
     "/tmp",
     "m",
+    "high",
     @core.Session::new(
       {
         id: "s",
@@ -1412,6 +1771,7 @@ test "the turn's end forgets its tool" {
     "/tmp/s.mbt",
     "/tmp",
     "m",
+    "high",
     @core.Session::new(
       {
         id: "s",
@@ -1594,4 +1954,1186 @@ test "the cursor row itself is not in the page" {
   let rows = rows_of(4)
   let (page, _, _) = page_of(rows, "h-5", 6, 1_000_000)
   assert_eq(ids_of(page), ["h-1", "h-2", "h-3", "h-4"])
+}
+
+// ── a `/skill:<name>` question, live and replayed ───────────────────────────
+
+///|
+/// The three parts of a skill question cross the wire as written — live and replayed alike.
+///
+/// This is the rule the transcript's fold hangs on. The prompt the shell writes is the skill's whole
+/// document with the reader's own words after it, so both paths have to say where those words are; and
+/// they have to say the *same* thing, which is why this compares the two rather than checking two
+/// hand-written expectations. A live turn that draws correctly and a replayed one that draws the
+/// document as the reader's sentence is the bug this catches.
+test "a skill question crosses as its three parts" {
+  let skill : @core.Skill = {
+    name: "pdf-report",
+    description: "Turn data into a PDF.",
+    path: "/home/u/.wei/skills/pdf-report/SKILL.md",
+  }
+  let body = "# Report\n\nRead reference.md first.\n"
+  let expanded = @core.skill_expansion(skill, body, "from data.csv")
+  // Live: the `user` event's own fields.
+  let live = field_of_fields(user_fields(expanded, false, []), "skill")
+  // Replayed: the same prompt, as a session file on disk.
+  let header =
+    #|{"type":"session","version":3,"id":"s1","timestamp":"2026-08-23T06:26:15.210Z","cwd":"/tmp"}
+  let file = header + "\n" + user_line("m1", expanded)
+  let rows = history_rows(@core.parse_session_file(file))
+  let replayed = field_of_object(rows[0], "skill")
+  assert_eq(live.stringify(), replayed.stringify(), msg=live.stringify())
+  match live {
+    Json::Object(fields) => {
+      assert_eq(field_of_map(fields, "name").stringify(), "\"pdf-report\"")
+      assert_eq(field_of_map(fields, "args").stringify(), "\"from data.csv\"")
+      assert_eq(
+        field_of_map(fields, "body").stringify(),
+        Json::string(body).stringify(),
+      )
+    }
+    _ => fail("the skill field is not an object")
+  }
+  // The text still crosses whole — the log and the host's `text` are what the model was asked, and
+  // that is not the part being changed.
+  assert_true(
+    field_of_object(rows[0], "text").stringify().has_prefix("\"<skill name="),
+  )
+}
+
+///|
+/// A question the reader typed is told about no skill at all: the field is absent from the live event
+/// (rather than false) and `null` in a row (rather than `{}`), so the host has one rule — a framing, or
+/// the reader's own words.
+test "an ordinary question carries no skill" {
+  assert_eq(user_fields("just a question", false, []).length(), 3)
+  let header =
+    #|{"type":"session","version":3,"id":"s1","timestamp":"2026-08-23T06:26:15.210Z","cwd":"/tmp"}
+  let rows = history_rows(
+    @core.parse_session_file(header + "\n" + user_line("m1", "just a question")),
+  )
+  assert_eq(field_of_object(rows[0], "skill").stringify(), "null")
+}
+
+///|
+fn field_of_fields(fields : Array[(String, Json)], key : String) -> Json raise {
+  for (name, value) in fields {
+    if name == key {
+      return value
+    }
+  }
+  fail("\{key} is not in the event: \{fields.length()} fields")
+}
+
+///|
+fn field_of_object(row : Json, key : String) -> Json raise {
+  match row {
+    Json::Object(fields) => field_of_map(fields, key)
+    _ => fail("not an object")
+  }
+}
+
+///|
+fn field_of_map(fields : Map[String, Json], key : String) -> Json raise {
+  match fields.get(key) {
+    Some(value) => value
+    None => fail("no \{key} in the object")
+  }
+}
+
+///|
+/// One user message, as a session file line.
+///
+/// Built with the encoder rather than written out, because the skill framing is full of quotes: a
+/// hand-written literal would have to escape the very characters whose handling is part of what is
+/// being tested.
+fn user_line(id : String, text : String) -> String {
+  Json::object(
+    Map([
+      ("type", Json::string("message")),
+      ("id", Json::string(id)),
+      ("parentId", Json::null()),
+      ("timestamp", Json::string("2026-08-23T06:26:18.662Z")),
+      (
+        "message",
+        Json::object(
+          Map([
+            ("role", Json::string("user")),
+            (
+              "content",
+              Json::array([
+                Json::object(
+                  Map([
+                    ("type", Json::string("text")),
+                    ("text", Json::string(text)),
+                  ]),
+                ),
+              ]),
+            ),
+            ("timestamp", Json::number(1.0)),
+          ]),
+        ),
+      ),
+    ]),
+  ).stringify()
+}
+
+///|
+/// The notice for an interrupted turn shows the question **the reader asked**, not the expansion.
+///
+/// A `/skill:<name>` turn's prompt in the log is the skill's document. Quoted in a three-line notice,
+/// that is three lines of somebody else's instructions under the words "this turn was interrupted" —
+/// and the one thing the notice is for is letting the reader check it against what they remember
+/// asking. The command is what they remember.
+///
+/// Display only: Continue replays the prompt from the log, so this cannot change what is sent.
+test "an interrupted skill turn quotes the command, not the document" {
+  let skill : @core.Skill = {
+    name: "pdf-report",
+    description: "Turn data into a PDF.",
+    path: "/home/u/.wei/skills/pdf-report/SKILL.md",
+  }
+  let body = "# Report\n\nRead reference.md, then run the pipeline.\n"
+  assert_eq(
+    prompt_as_asked(@core.skill_expansion(skill, body, "from data.csv")),
+    "/skill:pdf-report from data.csv",
+  )
+  // Nothing after the command: the command is the whole of what was asked.
+  assert_eq(
+    prompt_as_asked(@core.skill_expansion(skill, body, "")),
+    "/skill:pdf-report",
+  )
+  // An ordinary question is handed back untouched, byte for byte.
+  assert_eq(prompt_as_asked("refactor the parser"), "refactor the parser")
+}
+
+// ── a shell, without a world ─────────────────────────────────────────────────
+//
+// The seam, exercised. Everything above this line asserts on a *value* an emitter produced, which
+// leaves one thing untested and it is the expensive one: whether a command is allowed to happen at
+// all, what it says when it is refused, and in what order those two things occur. Those decisions
+// live in `Shell::` methods, and until `Shell::of` existed a `Shell` could only be built by
+// launching the app — so the only way to reach one was to open the window and look.
+//
+// These tests build one from a literal `World` and an array to record into. No store, no socket, no
+// environment, and the same seam the host crosses.
+
+///|
+/// A shell over a literal world, and the list of everything it says.
+///
+/// The recorder is what makes the difference visible: `out` is the shell's field, so a test stands
+/// in the same place the wire does.
+fn test_shell(busy? : Bool = false) -> (Shell, () -> Array[Json]) {
+  let seen : Array[Json] = []
+  let session = @core.Session::new(
+    {
+      id: "s",
+      timestamp: @core.format_iso_utc(0L),
+      cwd: "/tmp",
+      parent_session: None,
+      version: Some(3),
+    },
+    [],
+  )
+  let shell = shell_in("/tmp/sessions", "/tmp/s.jsonl", session, json => {
+    seen.push(json)
+  })
+  let open = shell.shown()
+  open.busy = busy
+  (shell, () => seen)
+}
+
+///|
+/// A shell over a world the caller chooses, saying things into `out`.
+///
+/// The same seam `Shell::of` opens; this is the shorthand the tests below use so that each one is only
+/// about the value it changes.
+fn shell_in(
+  root : String,
+  path : String,
+  session : @core.Session,
+  out : (Json) -> Unit,
+) -> Shell {
+  Shell::of(
+    {
+      home: "/tmp",
+      settings: @core.decode_app_settings(""),
+      root,
+      start: "/tmp",
+      base_url: "https://api.deepseek.com",
+      jobs: @core.JobStore::new(),
+      pins: [],
+      session,
+      path,
+      debug_log: "",
+    },
+    out~,
+  )
+}
+
+///|
+/// The kinds of every event a shell sent, in the order it sent them.
+fn kinds_of(lines : Array[Json]) -> Array[String] raise {
+  let kinds : Array[String] = []
+  for line in lines {
+    match line {
+      Object(fields) =>
+        match fields.get("kind") {
+          Some(String(kind)) => kinds.push(kind)
+          _ => fail("an event with no kind")
+        }
+      _ => fail("an event that is not an object")
+    }
+  }
+  kinds
+}
+
+///|
+/// Whether one field of one event is exactly this string.
+///
+/// A function rather than `assert_true(... contains ...)` at each site so that a failure says which
+/// field of which event disagreed, which is the difference between a test that locates a bug and one
+/// that only reports its existence.
+fn text_field_contains(
+  line : Json,
+  key : String,
+  expected : String,
+) -> Bool raise {
+  text_field(line, key) == expected
+}
+
+///|
+/// One string field of one event, or a failure saying which one was missing.
+fn text_field(line : Json, key : String) -> String raise {
+  match line {
+    Object(fields) =>
+      match fields.get(key) {
+        Some(String(value)) => value
+        Some(other) => fail("\{key} is not a string: \{other.stringify()}")
+        None => fail("no \{key} in \{line.stringify()}")
+      }
+    _ => fail("not an object")
+  }
+}
+
+///|
+/// A refusal is a decision and a sentence, and they are one value now.
+///
+/// `gate` replaced a `Shell::idle() -> Bool` that answered the question **and** wrote the refusal —
+/// so asking it had a side effect, and its own doc comment had drifted into naming three commands
+/// (delete, rename, open-a-fresh-one) as guarded that had since been un-gated on purpose. The stale
+/// names are the test cases below: what is pinned here is the rule, not the prose about the rule.
+test "the gate names the two commands a running turn refuses, and nothing else" {
+  let refusal = Refused("a turn is running here — stop it first")
+  // The two that decide something *about* the turn on screen.
+  assert_eq(gate(ContinueTurn, true), refusal)
+  assert_eq(gate(DismissTurn, true), refusal)
+  // The three the old doc comment claimed to guard, and does not — each for a reason written beside
+  // its arm: they carry a path of their own, so "is the session on screen busy" is not their question.
+  assert_eq(gate(Delete("/s.jsonl"), true), Allowed)
+  assert_eq(gate(Rename("/s.jsonl", "x"), true), Allowed)
+  assert_eq(gate(WorkspaceDelete("/tmp"), true), Allowed)
+  // And the two that have to work *while* a turn runs, or the reader is stuck.
+  assert_eq(gate(Abort, true), Allowed)
+  assert_eq(gate(Prompt("hi"), true), Allowed)
+}
+
+///|
+/// With nothing running, nothing is refused — the table is about a live turn, not about commands.
+test "an idle session refuses nothing" {
+  for command in [ContinueTurn, DismissTurn, Delete("/s.jsonl"), Prompt("hi")] {
+    assert_eq(gate(command, false), Allowed)
+  }
+}
+
+///|
+/// The jobs panel's rule — **sent when it changed, and only then** — is a decision, not a field.
+///
+/// It exists because the tick is every two seconds and most of the time nothing is running, so an
+/// unconditional send would put thirty identical empty events a minute on the wire and wake the host
+/// just as often. That rule lived inside a method that could not be called without a running app, so
+/// "once, not every tick" was only ever checked by watching the log by hand.
+test "an unchanged jobs panel is not re-sent" {
+  let (shell, seen) = test_shell()
+  shell.say_jobs()
+  inspect(seen().length(), content="1")
+  shell.say_jobs()
+  shell.say_jobs()
+  // Three ticks, one event: the second and third found the text unchanged.
+  inspect(seen().length(), content="1")
+}
+
+///|
+/// A level the model has not got is said out loud, and what the session records is not what was typed.
+///
+/// Two decisions in one call, and neither was reachable before: the word the reader typed is checked
+/// against the model's own list, and the sentence says which one is in force when they disagree. An
+/// unknown level that fell back silently would be a setting the reader believes they changed.
+test "a level this model has not got is refused in words, and the model's default is what sticks" {
+  let (shell, seen) = test_shell()
+  let open = shell.shown()
+  shell.set_think_level(open, "bogus")
+  let lines = seen()
+  // The sentence, and then the menu re-said with the level actually in force — a menu left ticking a
+  // level the session is not on would be the same lie in a second place.
+  inspect(lines.length(), content="2")
+  match lines[0] {
+    Object(fields) =>
+      match fields.get("text") {
+        Some(text) =>
+          assert_true(
+            text.stringify().contains("has no bogus level"),
+            msg="the refusal did not name the level that was asked for",
+          )
+        None => fail("the status carries no text")
+      }
+    _ => fail("the status is not an object")
+  }
+  // The session records the level in force, never the one that was typed.
+  assert_true(open.think_level != "bogus")
+}
+
+// ── decisions that name a wrong answer ───────────────────────────────────────
+//
+// Each of these pins a rule whose comment already says what the *mistake* looks like. That is the
+// most valuable kind of test to write and the easiest to see the gap in: whoever wrote the comment
+// knew the failure mode, and had no way to get a machine to watch for it.
+
+///|
+/// A log with one model and one level recorded, or neither.
+fn log_of(model : String?, level : String?) -> @core.Session {
+  let entries : Array[@core.Entry] = []
+  let mut parent : String? = None
+  if model is Some(id) {
+    entries.push(@core.Entry::{
+      id: "m",
+      parent_id: parent,
+      timestamp: @core.format_iso_utc(0L),
+      kind: @core.ModelChange(provider="deepseek", model_id=id),
+    })
+    parent = Some("m")
+  }
+  if level is Some(name) {
+    entries.push(@core.Entry::{
+      id: "l",
+      parent_id: parent,
+      timestamp: @core.format_iso_utc(0L),
+      kind: @core.ThinkingLevelChange(level=name),
+    })
+  }
+  @core.Session::new(
+    {
+      id: "s",
+      timestamp: @core.format_iso_utc(0L),
+      cwd: "/tmp",
+      parent_session: None,
+      version: Some(3),
+    },
+    entries,
+  )
+}
+
+///|
+/// The model travels as the **two-part spelling**, and an id this build does not know travels as
+/// itself.
+///
+/// The second half is the named mistake: `model_spec_for` answers with the *default's* spec for an
+/// unknown id, so the old single-call version drew `DeepSeek V4 Flash` over a log that said
+/// `deepseek-v9` — a window confidently naming a model the session is not running on. Which is worse
+/// than showing an ugly id, because there is nothing on screen to suggest anything is wrong.
+test "an unknown model id is shown as itself, not as the default's name" {
+  let open = Open::new(
+    "/tmp/s.jsonl",
+    "/tmp",
+    "deepseek-v4-pro",
+    "high",
+    log_of(None, None),
+  )
+  inspect(model_name(open), content="DeepSeek V4 Pro (deepseek-v4-pro)")
+  open.model_id = "deepseek-v9"
+  inspect(model_name(open), content="deepseek-v9")
+}
+
+///|
+/// A resumed session runs on **what its log recorded**, not on the build's default.
+///
+/// The mistake is priced rather than cosmetic: a session last run on the pro model, reopened on the
+/// default, silently answers its old questions at a different model's rates.
+test "a resumed session's model is the one its log recorded" {
+  inspect(
+    session_model(log_of(Some("deepseek-v4-pro"), None)),
+    content="deepseek-v4-pro",
+  )
+  // Nothing recorded: a session nobody has asked anything of yet is the one place the default is
+  // the honest answer.
+  inspect(session_model(log_of(None, None)), content=@core.default_model_id())
+}
+
+///|
+/// A level the session's model does not have is settled to one it does — per model, not per
+/// provider.
+///
+/// This is `model_catalog.mbt`'s own example, end to end: `deepseek-v4-pro` has no `low`, so a log
+/// that recorded one is asking for an effort the API would reject. Answering with the level that
+/// will really be used is what keeps a resumed session honest.
+test "a recorded level is settled against the model that will run" {
+  // `low` exists on flash and not on pro, so the same log means two different things.
+  inspect(
+    session_level(
+      log_of(Some("deepseek-v4-flash"), Some("low")),
+      "deepseek-v4-flash",
+    ),
+    content="low",
+  )
+  inspect(
+    session_level(
+      log_of(Some("deepseek-v4-flash"), Some("low")),
+      "deepseek-v4-pro",
+    ),
+    content="high",
+  )
+  // The rule behind both literals: whatever comes out is a level this model offers, always.
+  for model in ["deepseek-v4-flash", "deepseek-v4-pro"] {
+    let levels = @core.model_spec_for(model).0.thinking_levels
+    for wanted in ["off", "low", "high", "max", "bogus"] {
+      let got = session_level(log_of(Some(model), Some(wanted)), model)
+      assert_true(
+        levels.offered().contains(got),
+        msg="\{model} does not offer \{got}, which is what a session recording \{wanted} would run at",
+      )
+    }
+  }
+}
+
+///|
+/// Switching a session's model re-settles its level, and that is the whole reason it is a function.
+///
+/// The named mistake is the easy one to write: keep the level, and send `reasoning_effort: low` to a
+/// model that has no `low`. Nothing writes to the log here — the driver records both at the top of
+/// the next turn — so a reader who changes their mind twice leaves no trace of either decision.
+test "retargeting a session clamps its level to the new model" {
+  let open = Open::new(
+    "/tmp/s.jsonl",
+    "/tmp",
+    "deepseek-v4-flash",
+    "low",
+    log_of(None, None),
+  )
+  retarget(open, "deepseek-v4-pro")
+  inspect(open.model_id, content="deepseek-v4-pro")
+  // Flash's `low` is not pro's, so it becomes pro's default rather than being carried over.
+  inspect(open.think_level, content="high")
+  // And a level the new model does have survives the move.
+  retarget(open, "deepseek-v4-flash")
+  inspect(open.think_level, content="high")
+}
+
+///|
+/// "The reader may choose" is two facts, and the second one is the one that is easy to miss.
+///
+/// `turn_in_flight` alone is true for the whole time a turn *runs* — the opening entry is written
+/// before any of the work happens — so a log-only answer describes a healthy turn as an interrupted
+/// one, and offers to continue a conversation that is being continued, with two buttons that cannot
+/// be pressed while it runs. It was found by switching away and coming back to watch the turn that
+/// was left behind.
+test "a turn that is running is not a turn that was interrupted" {
+  inspect(interrupted_turn(open_with_turn(false)), content="true")
+  inspect(interrupted_turn(open_with_turn(true)), content="false")
+  // No turn open at all: nothing to offer.
+  let plain = Open::new("/tmp/s.jsonl", "/tmp", "m", "high", log_of(None, None))
+  inspect(interrupted_turn(plain), content="false")
+}
+
+///|
+/// One open session with a turn that was started and never ended, busy or not.
+fn open_with_turn(busy : Bool) -> Open {
+  let session = log_of(None, None)
+  let started = @core.turn_start_entry("build the thing", None, 0L)
+  let open = Open::new(
+    "/tmp/s.jsonl",
+    "/tmp",
+    "deepseek-v4-flash",
+    "high",
+    @core.Session::new(session.header, [started]),
+  )
+  open.busy = busy
+  open
+}
+
+///|
+/// A turn that ended in a conversation nobody is looking at is its own event.
+///
+/// Its own kind rather than a flag on `session`, **so that the window cannot follow it**: a turn
+/// ending elsewhere used to arrive as a switch, and the window moved away from what the reader was
+/// reading. The path is in the payload as well as in the routing because the host's "show me that
+/// one" click hands the payload to `/open` — one is the envelope, the other is a command argument.
+test "an elsewhere turn carries its path twice, on purpose" {
+  inspect(
+    elsewhere_event("/store/other.jsonl", "finished").stringify(),
+    content="{\"kind\":\"elsewhere\",\"session\":\"/store/other.jsonl\",\"path\":\"/store/other.jsonl\",\"outcome\":\"finished\"}",
+  )
+}
+
+// ── one line in, what came out ───────────────────────────────────────────────
+//
+// `Shell::handle` is the body of the command loop, so these cross the same seam a *keystroke* does.
+// Everything above asserts on an event built from values; these assert on what a command **decided**,
+// which is where the thirty-six arms and their guards live.
+//
+// What is deliberately not here: `Prompt`. That arm spawns a real turn, and `with_task_group` waits
+// for everything it spawned — so testing it in-process would mean making a request to a provider. Its
+// decision (which of the two things a prompt is) is covered where it lives, by `command_of` and
+// `turn_refusal`.
+
+///|
+/// Send one command line through the loop, and read back everything the shell said.
+///
+/// The task group is real because the arm genuinely takes one — a command loop that could not answer
+/// `abort` while a turn ran is the bug the spawned turns exist to avoid. Nothing is waited on.
+async fn command(shell : Shell, line : String) -> Unit {
+  ignore(@async.with_task_group(group => ignore(shell.handle(group, line))))
+}
+
+///|
+/// `abort` does three things, and the second is the one that was measured.
+///
+/// The flag is read *between steps* and the step in progress is the tool — so with the flag alone, a
+/// reader who pressed Stop during a two-minute test suite watched it run to the end while the status
+/// line said "stopping…". `stop_running_tool` is what reaches the child process, and the sentence is
+/// what tells the reader that the click landed.
+async test "abort sets this session's flag, stops its command, and says so" {
+  let (shell, seen) = test_shell()
+  let open = shell.shown()
+  let stopped : Ref[Int] = { val: 0, }
+  open.running_tool = Some({
+    name: "bash",
+    detail: "sleep 60",
+    arguments: Json::string("sleep 60"),
+    stop: () => stopped.val = stopped.val + 1,
+  })
+  command(shell, "abort")
+  assert_true(open.aborting.val)
+  assert_eq(stopped.val, 1)
+  // And exactly one sentence: the reader is told the click landed, once.
+  let lines = seen()
+  inspect(lines.length(), content="1")
+  inspect(
+    lines[0].stringify(),
+    content="{\"kind\":\"status\",\"session\":\"/tmp/s.jsonl\",\"text\":\"stopping…\"}",
+  )
+}
+
+///|
+/// `quit` is the only thing a command can say to the loop, and it stops **every** session.
+///
+/// Not just the one on screen: this is the process shutting down, and a turn left running in a
+/// conversation nobody was looking at would keep the runtime's event loop alive after the window
+/// closed. The loop's own `quit` flag is what the returned `Keep` becomes — this asserts the decision,
+/// and `serve` is left with one line of consequence.
+async test "quit is the answer to the loop, and it stops every session" {
+  let (shell, seen) = test_shell()
+  let open = shell.shown()
+  let mut keep = Going
+  ignore(@async.with_task_group(group => keep = shell.handle(group, "quit")))
+  assert_eq(keep, Quit)
+  assert_true(open.aborting.val)
+  // Nothing said: quitting is not a fact about a conversation.
+  inspect(seen().length(), content="0")
+}
+
+///|
+/// A model this build does not know is **refused**, and the refusal names what there was to pick.
+///
+/// The reason it is a branch at all is priced: an unknown id has no pricing and no context window, so
+/// accepting one would bill the turn at the default's rates and silently send the wrong prompt. The
+/// check is `is_known_model`'s, at the arm — which is exactly the kind of guard that lived only inside
+/// a running loop.
+async test "an unknown model is refused, and the sentence lists what is available" {
+  let (shell, seen) = test_shell()
+  let open = shell.shown()
+  command(shell, "/model deepseek-v9")
+  let lines = seen()
+  inspect(lines.length(), content="1")
+  match lines[0] {
+    Object(fields) =>
+      match fields.get("text") {
+        Some(text) =>
+          assert_true(
+            text.stringify().contains("unknown model deepseek-v9"),
+            msg="the refusal did not name the model that was asked for",
+          )
+        None => fail("the refusal carries no text")
+      }
+    _ => fail("the refusal is not an object")
+  }
+  // The session is left alone: a refused switch must not half-happen.
+  inspect(open.model_id, content="deepseek-v4-flash")
+}
+
+///|
+/// A model this build knows is switched, and **four** facts follow it.
+///
+/// The count is the rule, not padding. Each of the four is a control the host has already drawn from
+/// the old model: the status line names it, the picker ticks it, the composer's picture warning was
+/// judged against it, and the thinking menu lists *its* levels — so a tick left from the old model is
+/// a level the new one does not have. Sending three of the four is how the window comes to describe a
+/// model the session is not on.
+async test "switching to a known model says four things, and the last is the level" {
+  let (shell, seen) = test_shell()
+  let open = shell.shown()
+  command(shell, "/model deepseek-v4-pro")
+  let lines = seen()
+  inspect(lines.length(), content="4")
+  let kinds : Array[String] = []
+  for line in lines {
+    match line {
+      Object(fields) =>
+        match fields.get("kind") {
+          Some(String(kind)) => kinds.push(kind)
+          _ => fail("an event with no kind")
+        }
+      _ => fail("an event that is not an object")
+    }
+  }
+  assert_eq(kinds, ["status", "models", "images", "think"])
+  // The session moved, and its level was settled against the new model in the same step.
+  inspect(open.model_id, content="deepseek-v4-pro")
+  inspect(open.think_level, content="high")
+}
+
+///|
+/// `/think` with a level this model has not got answers **twice**, and the first one says no.
+///
+/// The refusal and the menu are two events because they are two facts: what was asked for is not
+/// happening, and here is the level that is. The second is what keeps the tick from being left on the
+/// level the reader typed.
+async test "an unknown level is refused in words, then the menu is re-said" {
+  let (shell, seen) = test_shell()
+  command(shell, "/think bogus")
+  let lines = seen()
+  inspect(lines.length(), content="2")
+  match lines[0] {
+    Object(fields) =>
+      match fields.get("text") {
+        Some(text) =>
+          assert_true(
+            text.stringify().contains("has no bogus level"),
+            msg="the refusal did not name the level that was asked for",
+          )
+        None => fail("the refusal carries no text")
+      }
+    _ => fail("the refusal is not an object")
+  }
+  match lines[1] {
+    Object(fields) =>
+      match fields.get("kind") {
+        Some(String(kind)) => inspect(kind, content="think")
+        _ => fail("the menu has no kind")
+      }
+    _ => fail("the menu is not an object")
+  }
+}
+
+///|
+/// Continuing a turn that is not open is **said**, not silently ignored.
+///
+/// The host offers this from a notice built on its own copy of the session, which can be out of date —
+/// and an error that leaves what it is about on the screen reads as a click that did nothing. So the
+/// sentence goes out with the refreshed snapshot: the stale notice cannot outlive the click.
+async test "continuing nothing says so, and re-sends the snapshot with it" {
+  let (shell, seen) = test_shell()
+  command(shell, "continue")
+  let lines = seen()
+  inspect(lines.length(), content="2")
+  match lines[0] {
+    Object(fields) =>
+      match fields.get("text") {
+        Some(text) =>
+          inspect(
+            text.stringify(),
+            content="\"nothing to continue: that turn has already ended\"",
+          )
+        None => fail("the error carries no text")
+      }
+    _ => fail("the error is not an object")
+  }
+  match lines[1] {
+    Object(fields) =>
+      match fields.get("kind") {
+        Some(String(kind)) => inspect(kind, content="session")
+        _ => fail("the snapshot has no kind")
+      }
+    _ => fail("the snapshot is not an object")
+  }
+}
+
+///|
+/// A busy session refuses `continue`, and refuses it **before** anything else happens.
+///
+/// This is the `handle` half of the `gate` test: the gate's *value* is asserted next to `gate`, and
+/// what is asserted here is that the loop obeys it — a refused command leaves no trace but the
+/// sentence, which is why the order (gate first, command second) is the rule rather than a style.
+async test "a refused command leaves only the sentence saying why" {
+  let (shell, seen) = test_shell(busy=true)
+  command(shell, "continue")
+  let lines = seen()
+  inspect(lines.length(), content="1")
+  inspect(
+    lines[0].stringify(),
+    content="{\"kind\":\"error\",\"session\":\"\",\"text\":\"a turn is running here — stop it first\"}",
+  )
+}
+
+///|
+/// The drift log is written when asked for, and says whether a turn's first request was a rewrite.
+///
+/// This is the whole point of carrying a request across the turn boundary: the seam between two turns
+/// is where the trim boundary most often moves — the turn just appended the messages that released it
+/// — so the first request of a turn is the one most likely to have rewritten the conversation, and it
+/// used to be the one request per turn nothing compared. The log is the only place outside a test
+/// that figure is visible, so what it records is what this checks.
+///
+/// Silent by default: a turn that wrote this unasked would be a file beside the app filling up with
+/// ordinary turns. `debug_log` empty is the ordinary case and the first assertion.
+async test "the drift log says what a turn's first request cost, when asked" {
+  let path = "_build/app_test/drift-\{@core.new_entry_id()}.jsonl"
+  @platform.make_dirs("_build/app_test")
+  let session = @core.Session::new(
+    {
+      id: "s",
+      timestamp: @core.format_iso_utc(0L),
+      cwd: "/tmp",
+      parent_session: None,
+      version: Some(3),
+    },
+    [],
+  )
+  let shell = Shell::of(
+    {
+      home: "/tmp",
+      settings: @core.decode_app_settings(""),
+      root: "/tmp/sessions",
+      start: "/tmp",
+      base_url: "https://api.deepseek.com",
+      jobs: @core.JobStore::new(),
+      pins: [],
+      session,
+      path: "/tmp/s.jsonl",
+      debug_log: path,
+    },
+    out=_json => (),
+  )
+  // A turn whose first request was measured against the previous turn's, and which rewrote 4,000
+  // bytes of it — the shape a moved trim boundary has.
+  let across : @core.RequestDrift = {
+    messages: 40,
+    bytes: 90_000,
+    first_changed: 30,
+    previous_messages: 39,
+    changed_bytes: 4_000,
+    within_turn: false,
+    comparable: true,
+  }
+  let own : @core.RequestDrift = {
+    messages: 42,
+    bytes: 92_000,
+    first_changed: 40,
+    previous_messages: 40,
+    changed_bytes: 2_000,
+    within_turn: true,
+    comparable: true,
+  }
+  let finished : @agent.TurnResult = {
+    session,
+    replies: [],
+    model_calls: 2,
+    tool_calls: 1,
+    compactions: 0,
+    usage: @core.Usage::zero(),
+    settled: true,
+    cost_limit_hit: false,
+    time_limit_hit: false,
+    truncated: false,
+    request_drift: [across, own],
+    last_request: [],
+  }
+  shell.log_drift("/tmp/s.jsonl", finished)
+  let text = @platform.read_text(path)
+  assert_true(text.has_suffix("\n"), msg="one JSON object per line")
+  // The fields a reader of the log needs: which session, how many requests were comparable, the
+  // worst rewrite of the turn, and the first request's own reading including its provenance.
+  assert_true(text.contains("\"session\":\"/tmp/s.jsonl\""), msg=text)
+  assert_true(text.contains("\"comparable\":2"), msg=text)
+  assert_true(text.contains("\"worst_changed_bytes\":4000"), msg=text)
+  assert_true(text.contains("\"within_turn\":false"), msg=text)
+  assert_true(text.contains("\"changed_bytes\":4000"), msg=text)
+  @platform.delete_file(path)
+}
+
+///|
+/// A shell that was not asked for the log writes nothing, which is what keeps it off in the app.
+async test "no debug log means no file" {
+  let path = "_build/app_test/should-not-exist-\{@core.new_entry_id()}.jsonl"
+  let (shell, _seen) = test_shell()
+  let finished : @agent.TurnResult = {
+    session: shell.shown().session,
+    replies: [],
+    model_calls: 1,
+    tool_calls: 0,
+    compactions: 0,
+    usage: @core.Usage::zero(),
+    settled: true,
+    cost_limit_hit: false,
+    time_limit_hit: false,
+    truncated: false,
+    request_drift: [],
+    last_request: [],
+  }
+  shell.log_drift(path, finished)
+  assert_false(@platform.path_exists(path))
+}
+
+// ── the refusal sentences ────────────────────────────────────────────────────
+//
+// Twenty-odd sentences in this package tell a reader why a command did not happen. They are the
+// whole of what a failed command gives back — no error code, no state to inspect, just a line of
+// prose — and until this section, almost none of them had a test. ADR-0003 names this exact failure
+// mode and fixed it on the web side; it had quietly grown back on this one.
+//
+// They are pure once the facts are handed in, which is the only reason they can be checked at all.
+
+///|
+/// Every way a deletion can be refused, and the sentence for each.
+///
+/// One literal per sentence, deliberately unparameterised: what is being pinned is the *wording*, and
+/// a test that built the string from the same constant the code uses would pass while the sentence a
+/// reader sees drifted.
+test "a deletion is refused in words, one sentence per reason" {
+  let ok : Deletion = {
+    path: "/store/s.jsonl",
+    busy: false,
+    live_jobs: 0,
+    exists: true,
+  }
+  inspect(refuse_deletion(ok) is None, content="true")
+
+  let no_path : Deletion = { ..ok, path: "", }
+  inspect(refuse_deletion(no_path), content="Some(delete: no session path)")
+
+  let running : Deletion = { ..ok, busy: true, }
+  inspect(
+    refuse_deletion(running),
+    content="Some(cannot delete a session with a turn running — stop it first)",
+  )
+
+  let working : Deletion = { ..ok, live_jobs: 1, }
+  inspect(
+    refuse_deletion(working),
+    content="Some(cannot delete a session with a background job still running)",
+  )
+
+  let gone : Deletion = { ..ok, exists: false, }
+  inspect(refuse_deletion(gone), content="Some(that session is already gone)")
+}
+
+///|
+/// The order of the four checks is load-bearing, and the case that shows it is a job whose file is
+/// gone.
+///
+/// `npm run dev &` outlives the session that started it. If `exists` were asked first, that session
+/// would be refused as "already gone" — a true sentence that sends the reader looking for a file,
+/// while the process it should have been told about keeps running with no row on screen pointing at
+/// it. `live_jobs` therefore comes first, and this is the only input that can tell the two orders
+/// apart.
+test "a job that outlived its file is refused for the job, not for the file" {
+  let orphan : Deletion = {
+    path: "/store/s.jsonl",
+    busy: false,
+    live_jobs: 2,
+    exists: false,
+  }
+  inspect(
+    refuse_deletion(orphan),
+    content="Some(cannot delete a session with a background job still running)",
+  )
+  // And a turn beats a job, for the same shape of reason: stopping the turn is what the reader has to
+  // do first, and the job is reachable afterwards.
+  let both : Deletion = { ..orphan, busy: true, }
+  inspect(
+    refuse_deletion(both),
+    content="Some(cannot delete a session with a turn running — stop it first)",
+  )
+  // Nothing named at all beats everything: there is nothing to have a turn or a job.
+  let nothing : Deletion = { ..both, path: "", }
+  inspect(refuse_deletion(nothing), content="Some(delete: no session path)")
+}
+
+///|
+/// **No silent refusal.** Every combination of the four facts either allows the deletion or explains
+/// itself — there is no input for which the command would do nothing and say nothing, which is the
+/// failure a reader experiences as "the button is broken".
+test "every refusal names a reason, and every allow is silent" {
+  for path in ["", "/store/one.jsonl"] {
+    for busy in [false, true] {
+      for live_jobs in [0, 1] {
+        for exists in [false, true] {
+          let d : Deletion = { path, busy, live_jobs, exists, }
+          match refuse_deletion(d) {
+            Some(reason) =>
+              assert_true(reason.length() > 0, msg="a refusal with no words")
+            None =>
+              // Allowed means all four facts were fine — and the empty path is the one that never is.
+              assert_true(path != "" && !busy && live_jobs == 0 && exists)
+          }
+        }
+      }
+    }
+  }
+}
+
+///|
+/// Removing a project is refused in words, the same way a deletion is.
+///
+/// The two sentences here are the ones a reader sees when a project-row delete does not go through, and
+/// like `refuse_deletion`'s four they lived inside a method that answered the question and wrote the
+/// sentence in the same call — so neither could be asserted.
+test "a project removal is refused in words, turn before job" {
+  let idle : Array[ProjectLoad] = [{ busy: false, live_jobs: 0, }]
+  inspect(refuse_project_removal("/tmp", idle) is None, content="true")
+  // A project nobody has open at all is also removable: the loads list is empty, not "unknown".
+  inspect(refuse_project_removal("/tmp", []) is None, content="true")
+
+  inspect(
+    refuse_project_removal("", idle),
+    content="Some(remove: no project path)",
+  )
+  inspect(
+    refuse_project_removal("/tmp", [{ busy: true, live_jobs: 0, }]),
+    content="Some(a turn is running in this project — stop it first)",
+  )
+  inspect(
+    refuse_project_removal("/tmp", [{ busy: false, live_jobs: 3, }]),
+    content="Some(a background job is still running in this project)",
+  )
+  // **A turn is asked for before a job**, and the input that tells the two apart is a session with
+  // both: stopping the turn is what the reader does next, and the job is reachable afterwards.
+  inspect(
+    refuse_project_removal("/tmp", [{ busy: true, live_jobs: 3, }]),
+    content="Some(a turn is running in this project — stop it first)",
+  )
+  // One busy session anywhere in the project is enough — the row stands for all of them.
+  inspect(
+    refuse_project_removal("/tmp", [
+      { busy: false, live_jobs: 0, },
+      { busy: true, live_jobs: 0, },
+      { busy: false, live_jobs: 0, },
+    ]),
+    content="Some(a turn is running in this project — stop it first)",
+  )
+  // And a job in any of them, likewise.
+  inspect(
+    refuse_project_removal("/tmp", [
+      { busy: false, live_jobs: 0, },
+      { busy: false, live_jobs: 1, },
+    ]),
+    content="Some(a background job is still running in this project)",
+  )
+}
+
+///|
+/// The same no-silent-refusal property as a deletion: every combination either allows it or explains.
+test "every project refusal names a reason" {
+  let named = ["", "/tmp"]
+  let loads : Array[Array[ProjectLoad]] = [
+    [],
+    [{ busy: false, live_jobs: 0, }],
+    [{ busy: true, live_jobs: 0, }],
+    [{ busy: false, live_jobs: 2, }],
+    [{ busy: true, live_jobs: 2, }],
+  ]
+  for path in named {
+    for load in loads {
+      match refuse_project_removal(path, load) {
+        Some(reason) =>
+          assert_true(reason.length() > 0, msg="a refusal with no words")
+        None =>
+          assert_true(
+            path != "" && load.all(fn(l) { !l.busy && l.live_jobs == 0 }),
+            msg="allowed with a turn or a job in it",
+          )
+      }
+    }
+  }
+}
+
+// ── the fork, and the file it produces ───────────────────────────────────────
+//
+// `fork` is the first operation in this program that *produces* a session file rather than extending
+// one, which makes it the first that can leave a file looking complete and holding half a
+// conversation. ADR-0010 wrote eleven acceptance criteria around it; these are the ones that are about
+// the shell — the rest are `core`'s, and live in `core/session_fork_test.mbt`.
+
+///|
+/// A store directory of this test's own, so a fork can be looked for on disk afterwards.
+async fn fork_root() -> String {
+  let root = "_build/app_test/fork-\{@core.new_entry_id()}"
+  @platform.make_dirs(root)
+  root
+}
+
+///|
+/// One session file with one question in it, and the session read back from it.
+///
+/// Written and re-read rather than built in memory, because what a fork copies is the parent's *label*
+/// as well as its entries — and the label comes from the file (`label_of` → `Labels::facts`). A parent
+/// built in memory would label as `New Session`, which is the one case that tells nothing about whether
+/// the name was computed at all.
+async fn parent_on_disk(root : String, question : String) -> @core.Session {
+  let path = "\{root}/parent.jsonl"
+  let header =
+    #|{"type":"session","version":3,"id":"p1","timestamp":"2026-08-23T06:26:15.210Z","cwd":"/tmp"}
+  inspect(
+    @platform.write_session(path, header + "\n" + user_line("m1", question)),
+    content="true",
+  )
+  @platform.load_session(path)
+}
+
+///|
+/// A fork that cannot happen writes **nothing**, and says so.
+///
+/// A session nobody has asked anything in has nothing to fork: the copy would be an empty session with a
+/// parent recorded, which is a row the reader has to delete. Refused rather than allowed quietly,
+/// because a fork that produced an indistinguishable new session is a click that did not work.
+async test "forking a session with nothing in it is refused, and writes nothing" {
+  let root = fork_root()
+  let empty = @core.Session::new(
+    {
+      id: "e",
+      timestamp: @core.format_iso_utc(0L),
+      cwd: "/tmp",
+      parent_session: None,
+      version: Some(3),
+    },
+    [],
+  )
+  let seen : Array[Json] = []
+  let shell = shell_in(root, "\{root}/parent.jsonl", empty, json => {
+    seen.push(json)
+  })
+  shell.fork()
+  inspect(kinds_of(seen), content="[error]")
+  inspect(
+    text_field(seen[0], "text"),
+    content="nothing to fork: this session has no messages yet",
+  )
+  // **And nothing was produced.** Not a file, not a row: the refusal is the whole of what happened.
+  inspect(@platform.list_sessions(root).length(), content="0")
+}
+
+///|
+/// A fork copies the parent's history into a file of its own, and tells the host **afterwards**.
+///
+/// The order is the whole of the first half of ADR-0010's criterion 11 — "先写完再报" — and it is proved
+/// by the test below rather than here: a write that fails leaves nothing told, which is only possible if
+/// the write came first. What this asserts is that the file exists, that it says where it came from, and
+/// that the host was told about the session that was actually written.
+async test "a fork's file says where it came from, and names itself after the parent" {
+  let root = fork_root()
+  let parent_path = "\{root}/parent.jsonl"
+  let parent = parent_on_disk(root, "refactor the parser")
+  let seen : Array[Json] = []
+  let shell = shell_in(root, parent_path, parent, json => seen.push(json))
+  shell.fork()
+  let lines = seen
+  // What the host is told, in order: the new session's rows, then the snapshots that belong to it, then
+  // the sentence about the fork, then the list. `history` first is the load-bearing one (the host swaps
+  // transcript on the `session` event, and swapping before the rows arrive is a blank column).
+  inspect(
+    kinds_of(lines),
+    content="[history, session, usage, models, think, images, status, sessions]",
+  )
+  // The session the host was told about is the one on disk, and `history` carries the routing it needs
+  // to file those rows under it.
+  let child = text_field(lines[0], "session")
+  assert_true(child != parent_path, msg="the fork is the parent's path")
+  assert_true(@platform.path_exists(child))
+  let loaded = @platform.load_session(child)
+  assert_eq(loaded.header.parent_session, Some(parent_path))
+  // The parent's entries come first, **ids included**, because an entry is referred to by its id (a
+  // child's `parent_id`, a tool result's `call_id`) and renumbering would break the chain and the tool
+  // results at once. Then the two a fork adds, at the end: the marker that records where this came from
+  // and where its own spending starts, and the name.
+  assert_eq(loaded.entries.length(), parent.entries.length() + 2)
+  for index in 0..<parent.entries.length() {
+    assert_eq(loaded.entries[index].id, parent.entries[index].id)
+  }
+  // ADR-0010's criterion 4, end to end: the parent's *displayed* name is its first question, and the
+  // child's is that with the literal prefix — the two rows have to be told apart in the list.
+  assert_true(@platform.read_text(child).contains("(fork) refactor the parser"))
+  // And the sentence says the one thing the label cannot: the two are now independent.
+  inspect(
+    text_field_contains(
+      lines[6],
+      "text",
+      "forked from “refactor the parser” · independent from here",
+    ),
+    content="true",
+  )
+}
+
+///|
+/// **A fork whose file cannot be written says so, and switches nothing.**
+///
+/// This is the test that pins ADR-0010's criterion 11 — "*写不进去*: `say_error` + 不切走 + 不留半截行" —
+/// and it was not possible before this change. `@platform.write_session` returned `Unit`, so a failed
+/// write raised out of `fork`: no sentence for the reader, and a raise that would have taken the command
+/// loop's task with it.
+///
+/// It also proves the *order*: exactly one event came out, and it is the error. Had anything been told to
+/// the host before the write, there would be an `open` or a `sessions` in this list — and a list showing
+/// a fork that is not on disk is the half-row this criterion exists to forbid.
+async test "a fork that cannot be written says so, and leaves nothing half-done" {
+  // A store that cannot be written: its parent path is a *file*, so no directory can be created under it.
+  @platform.make_dirs("_build/app_test")
+  let blocker = "_build/app_test/fork-blocked-\{@core.new_entry_id()}"
+  @platform.write_text(blocker, "not a directory")
+  let root = "\{blocker}/sessions"
+  let parent = @core.Session::new(
+    {
+      id: "p",
+      timestamp: @core.format_iso_utc(0L),
+      cwd: "/tmp",
+      parent_session: None,
+      version: Some(3),
+    },
+    [
+      @core.Entry::{
+        id: "u1",
+        parent_id: None,
+        timestamp: @core.format_iso_utc(0L),
+        kind: @core.Message(
+          message=@core.Message::User({
+            content: [@core.Text("hello")],
+            timestamp: 0L,
+          }),
+        ),
+      },
+    ],
+  )
+  let seen : Array[Json] = []
+  let shell = shell_in(root, "\{root}/parent.jsonl", parent, json => {
+    seen.push(json)
+  })
+  shell.fork()
+  let lines = seen
+  // One event, and it is the sentence. No `open`, no `sessions`, nothing about a session that does not
+  // exist.
+  inspect(kinds_of(lines), content="[error]")
+  assert_true(
+    text_field(lines[0], "text").contains("could not write the fork"),
+    msg="the failure did not say what could not be written",
+  )
+  // **And the window did not move.** A fork that failed must leave the reader where they were.
+  inspect(shell.current, content="\{root}/parent.jsonl")
 }

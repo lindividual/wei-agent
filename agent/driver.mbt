@@ -112,6 +112,27 @@ pub(all) struct ToolEvent {
 } derive(Eq, Debug)
 
 ///|
+/// A model call that failed and is about to be tried again.
+///
+/// Reported because a retry is the longest silence in a turn, and the one with the least to watch:
+/// an endpoint that accepts the connection and then says nothing holds the turn for the whole idle
+/// timeout, and three of those without a word reads as a program that has stopped working rather
+/// than as one that is waiting. A caller puts the numbers on whatever line shows what is happening,
+/// and the driver says `None` when the call answers — nothing else in the turn knows a line has to
+/// be taken back.
+///
+/// The numbers travel rather than a sentence, for the reason `TurnEnding` and the session events
+/// travel as tokens: the shell says what happened, the front end says it in the words it uses for
+/// the rest of its status line.
+pub(all) struct RetryAttempt {
+  /// The attempt about to be made, counting the second as 2 — the number a reader counts, not an
+  /// index: the first attempt is not a retry and is never reported.
+  next : Int
+  /// How many attempts one model call gets, `next` included.
+  total : Int
+} derive(Eq, Debug)
+
+///|
 /// What one turn cost, in the units a reader cares about.
 pub(all) struct TurnResult {
   session : @core.Session
@@ -155,6 +176,14 @@ pub(all) struct TurnResult {
   /// message rewritten in the middle is nearly all fresh. `usage` says what was billed; this says
   /// why.
   request_drift : Array[@core.RequestDrift]
+  /// The messages of this turn's last request, for a caller that runs turn after turn.
+  ///
+  /// Handed back so the next turn's first request can be measured against it. Without it that
+  /// request is the one request per turn nobody compares to anything, and it is the one where a
+  /// trim boundary most often moves — the previous turn appended the messages that released it —
+  /// which makes it the expensive one to leave unmeasured. A caller that drops this loses only the
+  /// reading, not the turn.
+  last_request : Array[Json]
 } derive(Debug)
 
 ///|
@@ -512,7 +541,15 @@ fn request_for(
     messages: prepared.messages_for_model(),
     system_prompt: Some(ctx.system_prompt),
     tools: ctx.tools,
-    thinking: @core.deepseek_v4_thinking_levels().resolve(thinking_level),
+    // The levels the *model being called* has, asked of the catalog on the next line and of the same
+    // place `vision` comes from. It used to be `deepseek_v4_thinking_levels()` written down here, which
+    // is flash's table: harmless only because `resolve` forwards a name it does not recognise as itself,
+    // so a level pro does not have went out as itself rather than as something nobody asked for. Asking
+    // the catalog removes the chance that the table used to build a request and the table of the model
+    // it is sent to are two different tables.
+    thinking: @core.model_spec_for(ctx.model).0.thinking_levels.resolve(
+      thinking_level,
+    ),
     max_tokens: None,
     temperature: None,
     // Asked of the catalog rather than written down here, so the decision to send an image and the
@@ -577,6 +614,7 @@ async fn request_model(
   timestamp : Int64,
   on_delta : async (@core.StreamEvent) -> Unit,
   stopping : () -> Bool,
+  on_retry : async (RetryAttempt?) -> Unit,
 ) -> @core.Message {
   let url = "\{ctx.base_url}/chat/completions"
   let headers : Map[String, String] = Map([
@@ -584,6 +622,9 @@ async fn request_model(
     ("Content-Type", "application/json"),
   ])
   let mut attempt = 1
+  // Whether anything has been reported about a retry: a line saying "retrying" is only there to be
+  // taken back once it has been put up, and the first attempt has nothing to take back.
+  let mut reported_retry = false
   while true {
     // A fresh parser per attempt. The previous one may hold half a stream, and feeding a second
     // response into it would splice two answers together into one message.
@@ -625,7 +666,16 @@ async fn request_model(
       result => result
     }
     match outcome {
-      Ok(message) => return message
+      Ok(message) => {
+        // The call answered, so "retrying" is no longer true of this moment. Said before the
+        // message is returned because the caller reads it as "the turn is about to write an
+        // answer": a status line left saying the model has not answered would be contradicted by
+        // the text arriving under it a second later.
+        if reported_retry {
+          on_retry(None)
+        }
+        return message
+      }
       Err(message) => {
         if emitted.val || stopping() || attempt >= model_attempts() {
           // `emitted` is worth saying out loud: the turn did produce output, so the failure is
@@ -639,6 +689,12 @@ async fn request_model(
             "\{message}; gave up after \{attempt} attempt(s)\{suffix}",
           )
         }
+        // Before the wait rather than after it: the wait is the part with nothing to watch, and
+        // this is what turns it from silence into something the reader can see is happening. The
+        // failure itself is not reported here — a retry that works is not news, and a run of them
+        // that does not ends in the message above.
+        on_retry(Some({ next: attempt + 1, total: model_attempts(), }))
+        reported_retry = true
         @async.sleep(retry_delay_ms(attempt))
         attempt = attempt + 1
       }
@@ -692,18 +748,26 @@ async fn call_model(
   timestamp : Int64,
   on_delta : async (@core.StreamEvent) -> Unit,
   stopping : () -> Bool,
-  /// The previous request of this turn, or `None` for its first.
+  /// The request to compare this one against, or `None` when there is none.
   previous : Array[Json]?,
+  /// Whether `previous` came from this same turn. See `RequestDrift::within_turn`.
+  previous_in_turn : Bool,
+  on_retry : async (RetryAttempt?) -> Unit,
 ) -> ModelCall {
   let body = request_for(ctx, session, thinking_level)
   let messages = body_messages(body)
-  let drift = @core.request_drift(previous, messages)
+  let drift = @core.request_drift(
+    previous,
+    messages,
+    within_turn=previous_in_turn,
+  )
   let message = request_model(
     ctx,
     body.stringify(),
     timestamp,
     on_delta,
     stopping,
+    on_retry,
   )
   let updated = commit(
     session,
@@ -786,6 +850,7 @@ async fn compact_if_needed(
   ctx : AgentContext,
   session : @core.Session,
   timestamp : Int64,
+  on_retry : async (RetryAttempt?) -> Unit,
 ) -> (@core.Session, @core.Usage, Bool) {
   let zero = @core.Usage::zero()
   let settings = @core.CompactionSettings::for_window(ctx.context_window)
@@ -842,9 +907,16 @@ async fn compact_if_needed(
   }
   let body = @core.build_deepseek_request(spec)
   let discard : async (@core.StreamEvent) -> Unit = fn(_event) { () }
-  let message = request_model(ctx, body.stringify(), timestamp, discard, () => {
-    false
-  })
+  // The summarization call is a model call like any other, so it retries like one and says so
+  // like one: a compaction that is waiting out a silence is the same wait to the reader.
+  let message = request_model(
+    ctx,
+    body.stringify(),
+    timestamp,
+    discard,
+    () => false,
+    on_retry,
+  )
   let prose = assistant_text(message)
   if prose == "" {
     // A failed summarization call must not throw away the history it was meant to
@@ -1164,6 +1236,15 @@ pub async fn run_turn(
   /// longest ran 34 minutes. Half an hour is past everything that was measured and still bounds
   /// what a stuck turn can do to the reader's afternoon.
   max_seconds? : Int = 1800,
+  /// The messages of the previous turn's last request, when the caller has them.
+  ///
+  /// Optional, and what it buys is the turn's first request: with it that request is measured
+  /// against the one before it like every other request, so a trim boundary that moved between
+  /// turns — the common case, because a turn appends the messages that release one — shows up in
+  /// `request_drift` instead of being the one rewrite in the turn that nothing reports. A caller
+  /// that runs one turn and stops passes nothing, and the first request is simply unmeasured, which
+  /// is what it was before this existed.
+  previous_request? : Array[Json]? = None,
   /// Continue a turn that a crash left open, instead of starting a new one.
   ///
   /// The difference is one message. A new turn commits the user's prompt and opens a turn; a
@@ -1191,6 +1272,13 @@ pub async fn run_turn(
   on_tool_process? : async (ToolHandle?) -> Unit,
   /// Called after each round with (model calls, tool calls) so far.
   on_progress? : async (Int, Int) -> Unit,
+  /// Called when a model call is about to be retried, and with `None` once that call answers.
+  ///
+  /// One callback for both directions rather than a "retrying" event and a "stopped retrying"
+  /// event, because the pair is one fact about one line on the reader's screen: whatever shows
+  /// what the turn is doing has to be able to say "waiting to try again" for the length of the
+  /// wait and then go back to saying what it was saying.
+  on_retry? : async (RetryAttempt?) -> Unit,
   /// Called after every commit that changes what the next request would carry: the prompt going
   /// in, each model call's response, each tool round. The log as it now stands is passed, which is
   /// what a caller showing the figures *while* the turn runs needs — a turn of twenty rounds would
@@ -1222,6 +1310,10 @@ pub async fn run_turn(
     Some(callback) => callback
     None => fn(_calls, _tools) { () }
   }
+  let retry_report : async (RetryAttempt?) -> Unit = match on_retry {
+    Some(callback) => callback
+    None => fn(_attempt) { () }
+  }
   let committed : async (@core.Session) -> Unit = match on_commit {
     Some(callback) => callback
     None => fn(_session) { () }
@@ -1245,11 +1337,16 @@ pub async fn run_turn(
       timestamp,
     )
   }
+  // A level is written down even when the caller did not name one, and the name is the resolution of
+  // `None` — `off`. That is what makes the two states distinguishable when the log is read back: a
+  // session that ran with thinking disabled has said so, and a front end asking what to send next
+  // gets that answer instead of falling back to its default for someone who has already chosen. See
+  // `SessionContext::thinking_level`, which is `None` only for a log this has not yet happened to.
   let level_name = match level {
     Some(name) => name
     None => "off"
   }
-  if existing.thinking_level != level_name {
+  if existing.thinking_level != Some(level_name) {
     session = commit(
       session,
       ctx.session_path,
@@ -1366,7 +1463,13 @@ pub async fn run_turn(
   // sequence: the prefix a request can be served from is the previous request's, not some
   // ideal one.
   let drifts : Array[@core.RequestDrift] = []
-  let mut previous_request : Array[Json]? = None
+  // Seeded from the caller rather than always `None`: a request that continues the previous turn's
+  // conversation has a previous request to be measured against, and the seam between turns is
+  // exactly where a trim boundary tends to move.
+  let mut previous_request : Array[Json]? = previous_request
+  // Whether the anchor above came from this turn. The first request of a turn inherits the
+  // caller's anchor and is therefore an across-turn reading; every later one is within the turn.
+  let mut anchor_in_turn = false
   // The deadline is read from the clock here rather than derived from the caller's `timestamp`,
   // which is the time an entry is stamped with and not necessarily "now" — a resumed session can
   // pass an older one. Measuring from this moment is the only reading that bounds how long the
@@ -1399,7 +1502,7 @@ pub async fn run_turn(
     // Before the request rather than after the turn: a tool round can double the
     // context, and by then the next request has to fit in what is left.
     let (compacted, spent, happened) = compact_if_needed(
-      ctx, session, timestamp,
+      ctx, session, timestamp, retry_report,
     )
     session = compacted
     usage = add_usage(usage, spent)
@@ -1412,12 +1515,14 @@ pub async fn run_turn(
     }
     rounds += 1
     let call = call_model(
-      ctx, session, level, timestamp, report, stopping, previous_request,
+      ctx, session, level, timestamp, report, stopping, previous_request, anchor_in_turn,
+      retry_report,
     )
     session = call.session
     let message = call.message
     drifts.push(call.drift)
     previous_request = Some(call.messages)
+    anchor_in_turn = true
     model_calls += 1
     usage = add_usage(usage, usage_of(message))
     // As soon as the call is in the log, so the reader watching a long turn sees what it has spent
@@ -1489,5 +1594,9 @@ pub async fn run_turn(
     time_limit_hit,
     truncated,
     request_drift: drifts,
+    last_request: match previous_request {
+      Some(messages) => messages
+      None => []
+    },
   }
 }

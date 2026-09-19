@@ -1099,6 +1099,43 @@ async test "a transient failure is retried and the turn finishes" {
 }
 
 ///|
+/// The wait between attempts is reported, so the longest silence in a turn is not silent.
+///
+/// A retry is where a turn has the least to watch: the model has not answered, no tool has run, and
+/// neither count has moved. What a front end gets is the pair — which attempt is about to be made —
+/// and then a `None` when the call answers, because a line saying the model has not answered would
+/// otherwise still be saying it over an answer that had started to arrive.
+///
+/// The first attempt is not reported: it is not a retry, and a line announcing "trying" before
+/// anything has failed would be a line about nothing.
+async test "a retry is reported and then taken back" {
+  let dir = scratch("retry-reported")
+  let seen : Array[String] = []
+  let reported : Array[String] = []
+  let on_retry : async (@agent.RetryAttempt?) -> Unit = attempt => {
+    match attempt {
+      Some(pending) =>
+        reported.push("about to try \{pending.next} of \{pending.total}")
+      None => reported.push("answered")
+    }
+  }
+  // One refused request rather than two: the wait before a retry is real, and this test is about
+  // what is said during it rather than about how many can be waited out.
+  with_flaky_model(1, [text_sse("recovered")], seen, async fn(base_url) {
+    let ctx = context_for(dir, base_url, [])
+    let result = @agent.run_turn(
+      ctx,
+      "say something",
+      FIXED_TIME,
+      thinking_level="high",
+      on_retry~,
+    )
+    assert_eq(result.replies, ["recovered"])
+  })
+  assert_eq(reported, ["about to try 2 of 4", "answered"])
+}
+
+///|
 /// A permanent failure is not retried: the endpoint would say the same thing again.
 ///
 /// The distinction is what keeps a bad key from turning into four identical failures and three
@@ -1108,6 +1145,10 @@ async test "a permanent failure is reported without retrying" {
   let seen : Array[String] = []
   let server = @socket.TcpServer(@socket.Addr::parse("127.0.0.1:0"))
   let port = server.addr.port()
+  // Outside the group's closure, because it is read after the group has finished: a front end that
+  // announced a retry for every failed request would have to be wrong about something the driver
+  // never told it, and this is what says it was not told.
+  let reported : Ref[Bool] = Ref(false)
   let failed = @async.with_task_group(group => {
     ignore(
       group.spawn(
@@ -1129,8 +1170,11 @@ async test "a permanent failure is reported without retrying" {
     )
     @async.sleep(30)
     let ctx = context_for(dir, "http://127.0.0.1:\{port}", [])
+    let on_retry : async (@agent.RetryAttempt?) -> Unit = _attempt => {
+      reported.val = true
+    }
     let raised = try {
-      ignore(@agent.run_turn(ctx, "say something", FIXED_TIME))
+      ignore(@agent.run_turn(ctx, "say something", FIXED_TIME, on_retry~))
       false
     } catch {
       _ => true
@@ -1142,6 +1186,7 @@ async test "a permanent failure is reported without retrying" {
   assert_true(failed, msg="a 401 should end the turn")
   // One request, not four: a permanent failure is an answer, not a hiccup.
   assert_eq(seen.length(), 1)
+  assert_false(reported.val, msg="a permanent failure is never retried")
 }
 
 ///|
@@ -2501,5 +2546,57 @@ async test "a tool call that refuses before running leaves no job" {
     assert_eq(result.replies, ["ok then"])
     // And nothing is left claiming to be running.
     assert_eq(jobs.list().length(), 0, msg="a phantom job outlived its call")
+  })
+}
+
+///|
+/// The level a turn is asked for reaches the wire, and the *off* level reaches it as thinking off.
+///
+/// Two halves of one fact, and the second is the one that was wrong until `ThinkingLevels::resolve`
+/// learned the name: a level is recorded in the log as a string, so a session that ran with thinking
+/// disabled reads back as `"off"`, and a resume that sent `reasoning_effort: "off"` would be asking
+/// for an effort the API does not have rather than for no thinking.
+async test "the thinking level a turn asks for is the one the model is sent" {
+  let dir = scratch("thinking-level")
+  let seen : Array[String] = []
+  with_fake_model([text_sse("ok")], seen, async fn(base_url) {
+    let ctx = context_for(dir, base_url, [])
+    ignore(
+      @agent.run_turn(ctx, "think a little", FIXED_TIME, thinking_level="low"),
+    )
+    assert_eq(seen.length(), 1)
+    assert_true(
+      seen[0].contains("\"thinking\":{\"type\":\"enabled\"}"),
+      msg=seen[0],
+    )
+    assert_true(seen[0].contains("\"reasoning_effort\":\"low\""), msg=seen[0])
+    // And the log records the level, so a resume asks for the same thing.
+    let session = logged(ctx.session_path)
+    assert_eq(session.context().thinking_level, Some("low"))
+  })
+}
+
+///|
+/// A turn asked for no level at all is a turn with thinking **off**, and it is written down.
+///
+/// `None` used to be indistinguishable from a log nobody had set a level in, which is what made a
+/// reader's choice impossible to remember *and* impossible to override: a front end had no way to
+/// tell "this session runs at off" from "this session has not decided". The driver writing the
+/// resolution down is what separates them — and the request it sends is the disabled form, not an
+/// effort called `off`.
+async test "a turn with no level is recorded as off and sent as disabled" {
+  let dir = scratch("thinking-default")
+  let seen : Array[String] = []
+  with_fake_model([text_sse("ok")], seen, async fn(base_url) {
+    let ctx = context_for(dir, base_url, [])
+    ignore(@agent.run_turn(ctx, "just answer", FIXED_TIME))
+    assert_eq(seen.length(), 1)
+    assert_true(
+      seen[0].contains("\"thinking\":{\"type\":\"disabled\"}"),
+      msg=seen[0],
+    )
+    assert_false(seen[0].contains("reasoning_effort"), msg=seen[0])
+    let session = logged(ctx.session_path)
+    assert_eq(session.context().thinking_level, Some("off"))
   })
 }

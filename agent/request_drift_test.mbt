@@ -78,11 +78,17 @@ async test "the first request of a turn follows the previous turn's last" {
       "second",
       FIXED_TIME,
       thinking_level="high",
+      // What a caller that runs turn after turn does: hand back the last request so this turn's
+      // first one has something to be compared against.
+      previous_request=Some(first.last_request),
     )
     assert_eq(second.model_calls, 1)
-    // A new turn has nothing to compare against: the drift is a within-turn sequence, so its
-    // first entry is incomparable even though a previous turn exists.
-    assert_false(second.request_drift[0].comparable)
+    // The first request of a turn is measured against the previous turn's last request, which the
+    // caller hands back for exactly this. A flow that drops `last_request` gets `comparable: false`
+    // here instead -- and that is the request where a trim boundary most often moves, so losing it
+    // would hide the expensive rewrite this report exists to show.
+    assert_true(second.request_drift[0].comparable)
+    assert_false(second.request_drift[0].within_turn)
     // The two turns together still only ever appended: the last request of the first turn has to
     // be a prefix of the request the second turn made, which `seen` can answer because the
     // scripted model records what it was sent.

@@ -255,6 +255,30 @@ public struct Usage: Equatable, Decodable {
     }
 }
 
+/// The three rates for one model, as the shell formatted them.
+///
+/// **Strings rather than numbers, deliberately.** These are drawn as three columns read *down* a menu
+/// — is this model dearer than that one — and a column that moves cannot be read that way. Equal widths
+/// are a fact about characters, so the side that owns the catalog does the cutting (`Pricing::columns`
+/// in `core/model_catalog.mbt`) rather than this side re-deriving it from Doubles.
+///
+/// USD per million tokens. The unit itself travels once, on `ModelCatalog.unit`.
+public struct ModelPrices: Equatable, Decodable, Sendable {
+    public let input: String
+    public let output: String
+    public let cached: String
+
+    /// What a build that predates the price columns sends. Drawn as three em dashes rather than as
+    /// zeros: a menu row reading `0.00` would be claiming the model is free.
+    public static let unknown = ModelPrices(input: "—", output: "—", cached: "—")
+
+    public init(input: String, output: String, cached: String) {
+        self.input = input
+        self.output = output
+        self.cached = cached
+    }
+}
+
 /// One entry in the model picker.
 public struct ModelChoice: Equatable, Decodable, Identifiable {
     /// The wire id: what goes in the request, and what `send` names.
@@ -264,11 +288,28 @@ public struct ModelChoice: Equatable, Decodable, Identifiable {
     /// Whether this model accepts images. Shown in the picker because a reader who has just attached
     /// a screenshot is the one choosing a model.
     public let vision: Bool
+    /// What it costs, already cut to its column.
+    public let prices: ModelPrices
 
-    public init(id: String, label: String, vision: Bool) {
+    public init(id: String, label: String, vision: Bool, prices: ModelPrices = .unknown) {
         self.id = id
         self.label = label
         self.vision = vision
+        self.prices = prices
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, label, vision, prices
+    }
+
+    /// `prices` is read leniently: a shell that predates the columns sends none, and a missing value
+    /// draws as em dashes in that shell's own menu rather than as a catalog this side refuses.
+    public init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        id = try fields.decode(String.self, forKey: .id)
+        label = try fields.decode(String.self, forKey: .label)
+        vision = try fields.decode(Bool.self, forKey: .vision)
+        prices = try fields.decodeIfPresent(ModelPrices.self, forKey: .prices) ?? .unknown
     }
 }
 
@@ -278,12 +319,30 @@ public struct ModelCatalog: Equatable, Decodable {
     /// The session's own model id. Empty until the shell says, which is drawn as "no model yet"
     /// rather than as a guess.
     public let current: String
+    /// What the prices are denominated in and which column is which, said once for the whole menu.
+    /// Empty for a shell that does not send it, and the menu then draws no header.
+    public let unit: String
 
-    public static let empty = ModelCatalog(items: [], current: "")
+    public static let empty = ModelCatalog(items: [], current: "", unit: "")
 
-    public init(items: [ModelChoice], current: String) {
+    public init(items: [ModelChoice], current: String, unit: String = "") {
         self.items = items
         self.current = current
+        self.unit = unit
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case items, current, unit
+    }
+
+    public init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        items = try fields.decode([ModelChoice].self, forKey: .items)
+        current = try fields.decode(String.self, forKey: .current)
+        // Absent from a shell older than the price columns: a missing header draws no header, which is
+        // what that shell's menu did — rather than refusing to decode the whole catalog, which would
+        // leave a picker with nothing in it.
+        unit = try fields.decodeIfPresent(String.self, forKey: .unit) ?? ""
     }
 
     public var currentChoice: ModelChoice? {

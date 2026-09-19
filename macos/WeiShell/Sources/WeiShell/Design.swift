@@ -37,6 +37,26 @@ extension Wei {
         /// A highlight let down to a wash: a chip's or a badge's background.
         public static let highlightWash = dynamic(Ink.highlightWash)
 
+        /// The brand as a **selected row's** background — the wash's step up, because a row of a list is
+        /// something the reader scans rather than glances at. See `Wei.Ink.selection`.
+        public static let selection = dynamic(Ink.selection)
+
+        /// The mark's own two colours: the container `mint` and the strokes `pine`, **the same in both
+        /// appearances**.
+        ///
+        /// Deliberately not `highlight` and `accent`, which is what the mark was drawn with first. Those two
+        /// swap lightness between appearances — the accent is pine on light and mint on dark — and the mark is
+        /// one picture in two fixed colours (`wei-logo.svg`): in the dark appearance its strokes were painted
+        /// in the same mint as the container they sit on and the mark came out a plain green blob. A brand that
+        /// changes shape with the appearance is not a brand; the *interface* re-decides which of the two is
+        /// readable where, and that re-decision is exactly what these two must not do.
+        ///
+        /// Through `dynamic` anyway, with the same value twice: the appearance still has to be asked, because
+        /// these two are drawn over a window that changes colour (`NSColor` would otherwise resolve once, in
+        /// whichever appearance happened to be current).
+        public static let markFill = dynamic((light: Brand.mint, dark: Brand.mint))
+        public static let markInk = dynamic((light: Brand.pine, dark: Brand.pine))
+
         /// A hairline. The platform's separator, which answers to contrast settings.
         public static let separator = Color(nsColor: .separatorColor)
 
@@ -165,8 +185,8 @@ extension Wei {
         public var body: some View {
             let width = height * Mark.box.width / Mark.box.height
             ZStack {
-                MarkShape(.container).fill(Palette.highlight)
-                MarkShape(.strokes).fill(Palette.accent)
+                MarkShape(.container).fill(Palette.markFill)
+                MarkShape(.strokes).fill(Palette.markInk)
             }
             .frame(width: width, height: height)
         }

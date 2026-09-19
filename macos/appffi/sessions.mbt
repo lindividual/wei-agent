@@ -189,12 +189,18 @@ async fn Shell::label_of(
 /// `modified` goes over as an integer rather than a date: the host already has a formatter, and one
 /// that decides for itself how long ago a session was used is the only one that can be right about
 /// it as time passes.
+/// `pinned` is a fact about the reader rather than about the conversation, and it travels on the row
+/// because that is what the row *is*: the list a reader pinned things on, one flag per line. Where
+/// the pinned ones are then drawn — a bar above the day headings, in the macOS window — is the
+/// host's decision, and deliberately not the shell's: the order of that bar is the order this list
+/// is already in.
 fn session_row(
   path : String,
   label : String,
   modified : Int64,
   current : Bool,
   running : Bool,
+  pinned : Bool,
 ) -> Json {
   Json::object(
     Map([
@@ -211,6 +217,7 @@ fn session_row(
       // itself, and a row that showed a spinner because *a* turn was running would point at the wrong
       // conversation.
       ("running", Json::boolean(running)),
+      ("pinned", Json::boolean(pinned)),
     ]),
   )
 }
@@ -270,6 +277,7 @@ async fn Shell::say_sessions(self : Shell) -> Unit {
           session.modified,
           current,
           running,
+          self.pins.contains(session.path),
         ),
       )
     }
@@ -281,29 +289,56 @@ async fn Shell::say_sessions(self : Shell) -> Unit {
     // The session on screen was created in this process and has not been written yet, so it has no
     // modification time of its own. Now is the honest stand-in: it was created now, and a reader
     // seeing "just now" is being told the right thing about it.
-    let row = session_row(
-      shown.path,
-      self.label_of(shown.path, 0L),
-      @env.now().reinterpret_as_int64(),
-      true,
-      shown.busy,
+    carry_current(
+      groups,
+      shown.cwd,
+      session_row(
+        shown.path,
+        self.label_of(shown.path, 0L),
+        @env.now().reinterpret_as_int64(),
+        true,
+        shown.busy,
+        self.pins.contains(shown.path),
+      ),
     )
-    let mut placed = false
-    for i in 0..<groups.length() {
-      // Only to find the group: `rows` is a reference, so inserting into it has already changed the
-      // tuple's own array and no write-back is needed.
-      let (cwd, _, _, rows) = groups[i]
-      if cwd == shown.cwd {
-        rows.insert(0, row)
-        placed = true
-        break
-      }
-    }
-    if !placed {
-      groups.insert(0, (shown.cwd, workspace_name(shown.cwd), true, [row]))
+  }
+  self.emit(sessions_event(groups))
+}
+
+///|
+/// Put the session on screen at the top of its own workspace's group.
+///
+/// **Only into a group that is already there, and that is the whole of this function.** A group is a
+/// *workspace* — a directory the reader chose to work in — and a session that has not been written
+/// says nothing about where the agent works. The version before this one invented a group when no
+/// group matched, which is how a launch from the Finder grew a workspace nobody had asked for: a
+/// `.app` starts with `/` for a working directory, `start_dir` reads that as the home directory (or,
+/// since that changed, as the workspace used last), and the sidebar drew the results under a group
+/// that existed only in memory. It then disappeared the moment the reader clicked anything, because
+/// the session on screen was by then a file the store listed — a row that both was not real and could
+/// be made real by typing into it, in a directory they never chose.
+///
+/// So a reader who has just installed the app sees no workspaces, which is the truth, and a reader who
+/// starts a second conversation in a project they are already in sees it at the top of that project,
+/// which is what they asked for. Nothing here is a fallback: a list of workspaces is a list of
+/// workspaces, and the store is the only thing that can put one on it.
+///
+/// `rows.insert` rather than a push, because the session the reader just started is the one they are
+/// looking at and it belongs at the top of the list they are about to click through.
+fn carry_current(
+  groups : Array[(String, String, Bool, Array[Json])],
+  cwd : String,
+  row : Json,
+) -> Unit {
+  for group in groups {
+    // Only to find the group: `rows` is a reference, so inserting into it has already changed the
+    // tuple's own array and no write-back is needed.
+    let (group_cwd, _, _, rows) = group
+    if group_cwd == cwd {
+      rows.insert(0, row)
+      return
     }
   }
-  emit(sessions_event(groups))
 }
 
 // ── switching ──────────────────────────────────────────────────────────────
@@ -322,7 +357,7 @@ async fn Shell::say_sessions(self : Shell) -> Unit {
 /// avoids by describing them rather than reading them.
 async fn Shell::show(self : Shell, path : String) -> Unit {
   if path == "" {
-    say_error("open: no session path")
+    self.say_error("open: no session path")
     self.say_sessions()
     return
   }
@@ -342,7 +377,7 @@ async fn Shell::show(self : Shell, path : String) -> Unit {
     }
     None => {
       if !@platform.path_exists(path) {
-        say_error("no session at \{path}")
+        self.say_error("no session at \{path}")
         self.say_sessions()
         return
       }
@@ -358,6 +393,7 @@ async fn Shell::show(self : Shell, path : String) -> Unit {
         path,
         loaded.header.cwd,
         session_model(loaded),
+        session_level(loaded, session_model(loaded)),
         loaded,
       )
       self.display(open)
@@ -391,13 +427,15 @@ fn interrupted_turn(open : Open) -> Bool {
 }
 
 ///|
-/// The session that is now open and what a reader needs to know about it: where its tools run, which
-/// model it calls, and whether there is a turn waiting on a decision.
+/// What a reader needs to know about a session: where its tools run, which model it calls, and whether
+/// there is a turn waiting on a decision.
 ///
-/// Sent whenever that changes — a switch, a turn starting, a turn ending, a turn failing — because the
-/// host draws from this snapshot and has no other way to hear that it is out of date: a notice left on
-/// screen describes a decision that may already have been made.
-fn say_session(open : Open) -> Unit {
+/// A pure value, so that the one rule about it — *who may be told this, and when* — can be stated and
+/// checked without an emit: see `turn_ended_event` and the test beside `elsewhere_event`.
+///
+/// The model travels as the two-part spelling (`model_name`), which is the change: the id is the one
+/// field here a reader can act on, and a log naming a model this build does not have must show it.
+fn session_snapshot(open : Open) -> Json {
   let interrupted = interrupted_turn(open)
   // The question that turn was asked, read back from the log rather than retyped: continuing means
   // carrying on with the same question, and the reader should be shown which one they are being
@@ -405,20 +443,125 @@ fn say_session(open : Open) -> Unit {
   // and here is what it is about" when there is no choice.
   let prompt = if interrupted {
     match open.session.in_flight_prompt() {
-      Some(question) => question
+      Some(question) => prompt_as_asked(question)
       None => ""
     }
   } else {
     ""
   }
-  emit(
-    session_event(open.path, "session", [
-      ("cwd", Json::string(open.cwd)),
-      ("model", Json::string(@core.model_spec_for(open.model_id).0.label())),
-      ("interrupted", Json::boolean(interrupted)),
-      ("interrupted_prompt", Json::string(prompt)),
-    ]),
-  )
+  session_event(open.path, "session", [
+    ("cwd", Json::string(open.cwd)),
+    ("model", Json::string(model_name(open))),
+    ("interrupted", Json::boolean(interrupted)),
+    ("interrupted_prompt", Json::string(prompt)),
+  ])
+}
+
+///|
+/// The model one session is on, in the two-part spelling: the name, and the id a reader would type.
+///
+/// One helper because this fact is said in three events (`ready`, `session` and the snapshot) and a
+/// copy in each is how they drift — which they already had, in a way worth naming: the id is the only
+/// thing in these events a reader can *act* on (it is what they would type, and what their log says),
+/// and a session whose log names a model this build does not have must show that id rather than a name.
+/// `model_spec_for` answers with the default's spec for such a session, so the old single call named
+/// the wrong model outright — a window saying `DeepSeek V4 Flash` over a `deepseek-v9` log.
+fn model_name(open : Open) -> String {
+  let (spec, known) = @core.model_spec_for(open.model_id)
+  if known {
+    spec.label_with_id()
+  } else {
+    open.model_id
+  }
+}
+
+///|
+/// The question a reader is being offered to continue, as **they** would recognise it.
+///
+/// The log holds what the model was asked, and for a `/skill:<name>` turn that is the skill's whole
+/// document with the reader's own words at the bottom of it — three lines of somebody else's
+/// instructions in a notice whose whole job is "this is the question you asked, still want it?".
+/// What they typed is the command; put it back the way they wrote it.
+///
+/// Display only, and worth saying so: **Continue does not send this string.** It replays the prompt
+/// from the log (`Shell::continue_turn`), so nothing here can change what the model is asked.
+fn prompt_as_asked(text : String) -> String {
+  match @core.skill_expansion_parts(text) {
+    Some((name, args, _)) =>
+      if args == "" {
+        "/skill:\{name}"
+      } else {
+        "/skill:\{name} \{args}"
+      }
+    None => text
+  }
+}
+
+///|
+/// The session that is now open and what a reader needs to know about it, said again because one of
+/// those facts changed — a switch, a turn starting, a turn ending.
+///
+/// **Only for the session that is on screen**, and that is a rule rather than a habit the callers
+/// happen to keep. A `session` event is the host's "this one is now on screen": it answers it by
+/// swapping which transcript it is drawing, so a snapshot sent about any other session is a window
+/// that moves without being asked to. This function therefore says nothing at all about a session that
+/// is not `self.current` — a silent drop is the failure mode that cannot take the reader's screen,
+/// which is the trade this whole refactor is about.
+///
+/// Every caller is a switch — `display` has already set `self.current` by the time this is reached —
+/// or the session on screen by construction (`start_turn` is called from the command loop, which is
+/// blocked on `self.shown()`). What a turn ending *elsewhere* sends instead is `say_turn_ended`.
+fn Shell::say_session(self : Shell, open : Open) -> Unit {
+  if open.path == self.current {
+    self.emit(session_snapshot(open))
+  }
+}
+
+///|
+/// A turn finished, failed or was stopped in `open`, as the event that says so.
+///
+/// **The decision, and the whole of it:** the reader watching the conversation that ran it hears the
+/// refreshed snapshot, because that snapshot is out of date in the direction of a decision that no
+/// longer exists (which is what the interrupted-turn notice is drawn from). The reader looking at
+/// *something else* is told a fact instead — `elsewhere`, which the host may draw a line from, and
+/// which it will not move the window for.
+///
+/// Pure, and takes `current` as a parameter rather than reading it, because this is the rule the window
+/// used to get wrong: a turn ending in a background session arrived as a switch, and the window
+/// followed it away from what the reader was reading. A rule that can be asserted without a shell, a
+/// window or an emit is a rule that stays fixed.
+fn turn_ended_event(current : String, open : Open, outcome : String) -> Json {
+  if open.path == current {
+    session_snapshot(open)
+  } else {
+    elsewhere_event(open.path, outcome)
+  }
+}
+
+///|
+/// Say it: the sender for `turn_ended_event`, and nothing else.
+///
+/// `outcome` is `finished`, `failed` or `stopped`, and it is a token rather than a sentence — the words
+/// belong to the front end that draws them. That is the same split the rest of this wire keeps: the
+/// shell says what happened, the host says it in the reader's language.
+fn Shell::say_turn_ended(self : Shell, open : Open, outcome : String) -> Unit {
+  self.emit(turn_ended_event(self.current, open, outcome))
+}
+
+///|
+/// The wire shape of `elsewhere`, split out so it can be pinned from this side the way the rest of the
+/// contract is: the field names are read by the host, and a rename nobody told it about is a pair of
+/// builds that disagree.
+///
+/// The path travels as a payload as well as in the routing, for the reason `deleted_event` does: the
+/// routing says which session this is about, and the payload is what the host's own “show me that one”
+/// click hands to `/open`. One is the envelope, the other is a command argument; they are the same string
+/// because a session is its file.
+fn elsewhere_event(path : String, outcome : String) -> Json {
+  session_event(path, "elsewhere", [
+    ("path", Json::string(path)),
+    ("outcome", Json::string(outcome)),
+  ])
 }
 
 ///|
@@ -441,7 +584,7 @@ fn say_session(open : Open) -> Unit {
 /// is not showing is file them under that session, so the switch brings them in with it. One render
 /// instead of two.
 async fn Shell::say_open(self : Shell, open : Open) -> Unit {
-  say_history(open.path, open.session)
+  self.say_history(open.path, open.session)
   self.say_show(open)
 }
 
@@ -452,10 +595,15 @@ async fn Shell::say_open(self : Shell, open : Open) -> Unit {
 /// changes which session's numbers are on screen, the model it runs on, and therefore whether a picture
 /// can be attached to it at all — none of which the host can work out from the rows alone.
 async fn Shell::say_show(self : Shell, open : Open) -> Unit {
-  say_session(open)
+  self.say_session(open)
   self.say_usage(open)
-  say_models(open)
-  say_images(open)
+  self.say_models(open)
+  // With the models, because it is the pair of them that describes what the next turn will be: the
+  // level is a fact about the model in force, and a switch changes both. A session opened on a larger
+  // model is one whose level the new model may not have — `Open` is built through `session_level` so
+  // what goes out here is the level that will be used rather than the one the log recorded.
+  self.say_think(open)
+  self.say_images(open)
 }
 
 // ── paging the history ─────────────────────────────────────────────────────
@@ -632,8 +780,12 @@ fn page_fields(page : (Array[Json], String, Bool)) -> Array[(String, Json)] {
 ///
 /// One place, because two situations need it and they are the same situation: a switch, where the host
 /// is looking at the wrong session, and a startup on a resumed session, where it is looking at none.
-fn say_history(path : String, session : @core.Session) -> Unit {
-  emit(
+fn Shell::say_history(
+  self : Shell,
+  path : String,
+  session : @core.Session,
+) -> Unit {
+  self.emit(
     session_event(
       path,
       "history",
@@ -650,8 +802,13 @@ fn say_history(path : String, session : @core.Session) -> Unit {
 /// A separate event from `history` because the host treats them differently — `history` *replaces* the
 /// transcript it names, and this one **prepends** to it. Sending `history` again would throw away live
 /// rows the shell has not written down yet, which is the same reason a re-show sends no history at all.
-fn say_earlier(path : String, session : @core.Session, before : String) -> Unit {
-  emit(
+fn Shell::say_earlier(
+  self : Shell,
+  path : String,
+  session : @core.Session,
+  before : String,
+) -> Unit {
+  self.emit(
     session_event(
       path,
       "earlier",
@@ -681,6 +838,22 @@ fn session_model(session : @core.Session) -> String {
 }
 
 ///|
+/// The thinking level a session was last run at, in terms of the model it was last run on.
+///
+/// The log's answer first, for the reason `session_model` gives — a resumed session should not
+/// quietly gain or lose reasoning because a reader opened it on another day — and the model's default
+/// when the log has none, which is a session nobody has asked anything of yet.
+///
+/// The `in_force` step is not a formality: the level is per model, so a log that recorded `low` for
+/// a session that its own log says was last run on the pro model is a session asking for a level the
+/// pro model does not have. Answering with the level that will really be used is what keeps a resumed
+/// session honest, and it is the same rule the request builder applies.
+fn session_level(session : @core.Session, model_id : String) -> String {
+  let spec = @core.model_spec_for(model_id).0
+  spec.thinking_levels.in_force(session.recorded_settings().0)
+}
+
+///|
 /// Start a session in one project, and show it.
 ///
 /// `dir` is the project the host asked for — the one the reader is looking at, named by the control
@@ -700,24 +873,62 @@ fn session_model(session : @core.Session) -> String {
 /// a marker here would be a second copy of a fact the store already holds, and a sentence about a
 /// workspace that did not change.
 ///
+/// **Except when the store does not hold it**, which is the one case `note_workspace` covers: a
+/// directory named by hand (`/new /somewhere/new`) has no group to put its session's row in, so the
+/// sidebar would have a conversation on screen and no line for it. Recording *that* directory is not
+/// a second copy of anything — it is the store being told where this session works — and it happens
+/// only for a directory the reader named, never for one a session merely inherited.
+///
 /// The path is canonicalised for the reason `new_in` does it: `/new` typed by hand is a path a
 /// reader thinks in, and the store has to see one spelling per directory.
 ///
 /// The file is not written here, and that is deliberate rather than lazy: a session with nothing in
 /// it is a header-only file nobody asked for, and the first prompt is what writes the first line. The
-/// store therefore does not list it yet — `say_sessions` carries it anyway.
+/// store therefore does not list *the session* yet — `say_sessions` carries it anyway.
 async fn Shell::create_in(self : Shell, dir : String) -> Unit {
   if dir == "" {
     self.open_fresh(self.shown().cwd)
     return
   }
   match @platform.canonical_dir(dir) {
-    Some(cwd) => self.open_fresh(cwd)
+    Some(cwd) => {
+      self.note_workspace(cwd)
+      self.open_fresh(cwd)
+    }
     // Possible rather than theoretical: the directory can be gone between the list that named it and
     // this line. Said rather than silently leaving the reader where they were, because a click on
     // "New Session" that produced nothing is a click that did not work.
-    None => say_error("not a directory: \{dir}")
+    None => self.say_error("not a directory: \{dir}")
   }
+}
+
+///|
+/// Record a directory as a workspace, if the store does not already list it.
+///
+/// The sidebar's rule is that **every group is a place the store knows about** (`carry_current`), so
+/// a session opened in a directory nobody has recorded is a conversation with no row to be reachable
+/// from. This is the one way that can happen by a reader's own choice — they named the directory —
+/// and naming it is the statement that they work there.
+///
+/// Deliberately not called for a directory a session merely *inherits*: ⌘N with no project, and a
+/// launch with no directory of its own, both take the directory of the session on screen. Recording
+/// those would put the home directory on the sidebar the first time the app was ever launched, which
+/// is the bug this whole rule came from — a row the reader never asked for. A workspace is a place
+/// somebody chose.
+///
+/// Silent, unlike `new_in`: that one answers a folder chooser, which closes and leaves nothing else
+/// on screen to say what happened. Here the reader is looking at a session that opened where they
+/// said, and the group it lands in is its own explanation.
+async fn Shell::note_workspace(self : Shell, cwd : String) -> Unit {
+  for stored in @platform.list_workspaces(self.root) {
+    if stored.cwd == cwd {
+      return
+    }
+  }
+  @platform.write_workspace(@core.session_dir_for(self.root, cwd), {
+    cwd,
+    title: None,
+  })
 }
 
 ///|
@@ -732,7 +943,7 @@ async fn Shell::create_in(self : Shell, dir : String) -> Unit {
 /// is the other half of it).
 async fn Shell::new_in(self : Shell, path : String) -> Unit {
   if path == "" {
-    say_error("no folder chosen")
+    self.say_error("no folder chosen")
     return
   }
   let cwd = match @platform.canonical_dir(path) {
@@ -740,22 +951,18 @@ async fn Shell::new_in(self : Shell, path : String) -> Unit {
     // Possible rather than theoretical: a chooser hands back a path, and something can remove the
     // directory between the dialog closing and this line.
     None => {
-      say_error("not a directory: \{path}")
+      self.say_error("not a directory: \{path}")
       return
     }
   }
   // Recorded before the session exists, so a workspace whose session fails to open is still a
-  // workspace — the row is what makes the directory reachable again. The existing title is kept:
-  // this file is the only place a workspace's name lives, and overwriting it would erase a name the
-  // reader had given a folder every time they started a session in it.
-  let dir = @core.session_dir_for(self.root, cwd)
-  let title = match @platform.read_workspace(dir) {
-    Some(record) => record.title
-    None => None
-  }
-  @platform.write_workspace(dir, { cwd, title, })
+  // workspace — the row is what makes the directory reachable again. ("Added" is said whether or not
+  // the store already had it: this is the folder chooser's feedback, and the chooser closes without
+  // leaving anything else on screen. A title the reader gave this folder lives in the same marker and
+  // is left alone, which is why this goes through `note_workspace` rather than writing one itself.)
+  self.note_workspace(cwd)
   self.open_fresh(cwd)
-  say_status(self.shown().path, "workspace added: \{cwd}")
+  self.say_status(self.shown().path, "workspace added: \{cwd}")
 }
 
 ///|
@@ -769,7 +976,15 @@ async fn Shell::open_fresh(self : Shell, cwd : String) -> Unit {
   // A brand-new session, so there is nothing to carry over: the attachments belonged to the question
   // that was being written somewhere else, and the last turn's figures belonged to the conversation
   // being left. Both live per session now, which is why this does not have to clear them.
-  let open = Open::new(path, cwd, self.shown().model_id, session)
+  let open = Open::new(
+    path,
+    cwd,
+    self.shown().model_id,
+    // A session nobody has run inherits the reader's last choice rather than a default, the same rule
+    // the model follows above: the two settings are made in the same place, about the same message.
+    self.shown().think_level,
+    session,
+  )
   self.display(open)
   // The model is the log's answer for a session that has one, and a session nobody has run has no
   // log to answer — so it stays whatever was in force, which is what the reader last chose.
@@ -796,7 +1011,7 @@ async fn Shell::attach(
   temporary? : Bool = false,
 ) -> Unit {
   if path == "" {
-    say_error("attach: no path")
+    self.say_error("attach: no path")
     return
   }
   // The session on screen: a picture is part of the message being written, and the message being
@@ -807,7 +1022,7 @@ async fn Shell::attach(
   let image = match @platform.load_image(path) {
     Ok(image) => image
     Err(reason) => {
-      say_error("cannot attach: \{reason}")
+      self.say_error("cannot attach: \{reason}")
       return
     }
   }
@@ -815,12 +1030,12 @@ async fn Shell::attach(
   if temporary {
     @platform.delete_file(path)
   }
-  say_images(open)
+  self.say_images(open)
   if !@core.model_sees_images(open.model_id) {
     // Said now rather than after the send: the request would go out with a placeholder in place of
     // the picture, and the reader is the only one who can do something about it — another model, or
     // no picture.
-    say_error(
+    self.say_error(
       "\{@core.model_spec_for(open.model_id).0.label()} cannot be shown images — switch model first",
       session=open.path,
     )
@@ -868,7 +1083,7 @@ fn without_attachment(
 fn Shell::detach(self : Shell, path : String) -> Unit {
   let open = self.shown()
   open.attached = without_attachment(open.attached, path)
-  say_images(open)
+  self.say_images(open)
 }
 
 ///|
@@ -876,7 +1091,7 @@ fn Shell::detach(self : Shell, path : String) -> Unit {
 fn Shell::clear_attachments(self : Shell) -> Unit {
   let open = self.shown()
   open.attached = []
-  say_images(open)
+  self.say_images(open)
 }
 
 // ── deleting ───────────────────────────────────────────────────────────────
@@ -909,8 +1124,13 @@ fn deleted_event(path : String, label : String, restorable : Bool) -> Json {
 ///
 /// The label is what the host draws its line with, read by the caller because the moment this is said
 /// is the last moment the file is there to be described.
-fn say_deleted(path : String, label : String, restorable : Bool) -> Unit {
-  emit(deleted_event(path, label, restorable))
+fn Shell::say_deleted(
+  self : Shell,
+  path : String,
+  label : String,
+  restorable : Bool,
+) -> Unit {
+  self.emit(deleted_event(path, label, restorable))
 }
 
 ///|
@@ -941,27 +1161,28 @@ fn say_deleted(path : String, label : String, restorable : Bool) -> Unit {
 /// the list" — the `restorable` field is the one part that differs, and it is what keeps an Undo button
 /// off a file that is not there to put back.
 async fn Shell::discard(self : Shell, path : String, purge~ : Bool) -> Unit {
-  if path == "" {
-    say_error("delete: no session path")
-    self.say_sessions()
-    return
-  }
-  if self.open_of(path) is Some(open) && open.busy {
-    say_error("cannot delete a session with a turn running — stop it first")
-    self.say_sessions()
-    return
-  }
-  if self.jobs.live_count(path) > 0 {
+  // The four facts, read here and decided in one pure place. Each of the four sentences below was
+  // written into a method no test could call — ADR-0003's failure mode, in the file that reports it.
+  let d : Deletion = {
+    path,
+    busy: match self.open_of(path) {
+      Some(open) => open.busy
+      None => false
+    },
     // The other state that outlives the file: a job the conversation started would keep running with
     // no row to find it on, and no way to stop it from the window.
-    say_error("cannot delete a session with a background job still running")
-    self.say_sessions()
-    return
+    live_jobs: self.jobs.live_count(path),
+    // Asked only about a path that is there: `path_exists("")` is a question about a directory that
+    // cannot exist, and the empty case has its own sentence.
+    exists: path != "" && @platform.path_exists(path),
   }
-  if !@platform.path_exists(path) {
-    say_error("that session is already gone")
-    self.say_sessions()
-    return
+  match refuse_deletion(d) {
+    Some(reason) => {
+      self.say_error(reason)
+      self.say_sessions()
+      return
+    }
+    None => ()
   }
   // Read before the file moves, and while the cache still knows what it looked like: the offer the
   // host draws says *which* conversation went, and a row that is gone cannot be asked.
@@ -988,7 +1209,7 @@ async fn Shell::discard(self : Shell, path : String, purge~ : Bool) -> Unit {
   // Said before the window moves: the offer names the conversation that went, and the host is about to
   // be handed a different one. `restorable` is the checkbox: a purged file is not waiting to be put
   // back, and the host is told which of the two happened rather than left to assume.
-  say_deleted(path, label, !purge)
+  self.say_deleted(path, label, !purge)
   match successor {
     Some(open) => {
       // Displayed by hand rather than through `show`, and the difference is the whole of a bug this
@@ -1012,6 +1233,56 @@ async fn Shell::discard(self : Shell, path : String, purge~ : Bool) -> Unit {
     None => ()
   }
   self.say_sessions()
+}
+
+///|
+/// The facts a deletion is decided on.
+///
+/// A struct rather than four parameters, because they answer one question — *may this conversation be
+/// taken out of the store?* — and four positional values at a call site say nothing about which is
+/// which. It is also why this is testable at all: `Shell::discard` reads these out of a running
+/// shell, and a test hands them in.
+priv struct Deletion {
+  /// The path the command named. Empty when it named nothing at all.
+  path : String
+  /// Whether this process has a turn running in it.
+  busy : Bool
+  /// How many of its background jobs are still alive.
+  live_jobs : Int
+  /// Whether the file is still on disk.
+  exists : Bool
+}
+
+///|
+/// Why this deletion cannot happen, or `None` when it can.
+///
+/// **Four sentences, and not one of them was tested.** They are the whole of what a reader gets when
+/// a delete does not go through, and they were written into a method nobody could call — which is the
+/// failure ADR-0003 named and fixed on the web side ("five of six refusal messages existed only in the
+/// one file with no tests"), and which had quietly happened again here.
+///
+/// The order is the order of the reader's surprise: nothing named, a turn, a job, a file somebody else
+/// already removed. `live_jobs` is checked **before** `exists` for a reason worth stating — a job
+/// outlives the file it belongs to, so a session whose file is gone while its `npm run dev &` is still
+/// running is refused for the job, which is the sentence that says what to do about it. Refusing it as
+/// "already gone" would leave the process running with nothing on screen pointing at it.
+///
+/// Deliberately short: the four facts are checked, not the store. A path that is *spelled* wrong is not
+/// this function's business — `exists` covers it, and the sentence a reader gets is the honest one.
+fn refuse_deletion(d : Deletion) -> String? {
+  if d.path == "" {
+    return Some("delete: no session path")
+  }
+  if d.busy {
+    return Some("cannot delete a session with a turn running — stop it first")
+  }
+  if d.live_jobs > 0 {
+    return Some("cannot delete a session with a background job still running")
+  }
+  if !d.exists {
+    return Some("that session is already gone")
+  }
+  None
 }
 
 ///|
@@ -1055,6 +1326,7 @@ async fn Shell::successor_after(self : Shell, path : String) -> Open {
             stored.path,
             loaded.header.cwd,
             session_model(loaded),
+            session_level(loaded, session_model(loaded)),
             loaded,
           )
         }
@@ -1064,7 +1336,7 @@ async fn Shell::successor_after(self : Shell, path : String) -> Open {
   // in the store. It is what "there is no other session" looks like as something to look at — and its
   // model is the one in force, the same rule a new session follows everywhere else.
   let (session, created) = fresh_session(self.root, shown.cwd)
-  Open::new(created, shown.cwd, shown.model_id, session)
+  Open::new(created, shown.cwd, shown.model_id, shown.think_level, session)
 }
 
 // ── the projects ───────────────────────────────────────────────────────────
@@ -1075,21 +1347,56 @@ async fn Shell::successor_after(self : Shell, path : String) -> Open {
 /// The same two states that keep a session from being deleted, asked of the whole project: a turn
 /// running in any of its sessions is appending to a log this is about to move out from under the
 /// sidebar, and a job it started is a process whose output nobody can reach any more.
-fn Shell::project_idle(self : Shell, cwd : String) -> Bool {
+fn Shell::project_loads(self : Shell, cwd : String) -> Array[ProjectLoad] {
+  let loads : Array[ProjectLoad] = []
   for open in self.opens {
-    if open.cwd != cwd {
-      continue
-    }
-    if open.busy {
-      say_error("a turn is running in this project — stop it first")
-      return false
-    }
-    if self.jobs.live_count(open.path) > 0 {
-      say_error("a background job is still running in this project")
-      return false
+    if open.cwd == cwd {
+      loads.push({
+        busy: open.busy,
+        live_jobs: self.jobs.live_count(open.path),
+      })
     }
   }
-  true
+  loads
+}
+
+///|
+/// One open session's contribution to "may this project be taken out of the sidebar".
+priv struct ProjectLoad {
+  busy : Bool
+  live_jobs : Int
+}
+
+///|
+/// Why this project cannot be removed, or `None` when it can.
+///
+/// The same shape as `refuse_deletion`, and for the same reason: this was `Shell::project_idle`, which
+/// answered the question *and* said the sentence — so asking it had a side effect, and neither sentence
+/// was reachable from a test.
+///
+/// The order is the order things have to be dealt with. A turn first, because stopping it is what the
+/// reader does next and the job is reachable afterwards; then a job, because `npm run dev &` outlives
+/// the row it was started from and would keep running with nothing on screen pointing at it.
+///
+/// Whether the *store* lists this project is not here: that answer costs a readdir, and asking it
+/// before the two checks above would put that readdir on the path of every refusal. It is the
+/// caller's last check, and it is one boolean and one sentence.
+fn refuse_project_removal(
+  named : String,
+  loads : Array[ProjectLoad],
+) -> String? {
+  if named == "" {
+    return Some("remove: no project path")
+  }
+  for load in loads {
+    if load.busy {
+      return Some("a turn is running in this project — stop it first")
+    }
+    if load.live_jobs > 0 {
+      return Some("a background job is still running in this project")
+    }
+  }
+  None
 }
 
 ///|
@@ -1112,14 +1419,15 @@ async fn Shell::remove_project(
   cwd : String,
   delete~ : Bool,
 ) -> Unit {
-  if cwd == "" {
-    say_error("remove: no project path")
-    self.say_sessions()
-    return
-  }
-  if !self.project_idle(cwd) {
-    self.say_sessions()
-    return
+  // What the reader is told when this cannot happen, decided in one pure place. The third refusal —
+  // "that project is not in the list" — needs the store and stays below, after the listing is asked.
+  match refuse_project_removal(cwd, self.project_loads(cwd)) {
+    Some(reason) => {
+      self.say_error(reason)
+      self.say_sessions()
+      return
+    }
+    None => ()
   }
   // The listing has the last word: it is what the reader is looking at, and it is where the label and
   // the session count come from. A project it does not list is a project already gone — refused rather
@@ -1135,7 +1443,7 @@ async fn Shell::remove_project(
   let stored = match found {
     Some(stored) => stored
     None => {
-      say_error("that project is not in the list")
+      self.say_error("that project is not in the list")
       self.say_sessions()
       return
     }
@@ -1151,7 +1459,7 @@ async fn Shell::remove_project(
     None => {
       // Nothing moved — the store does not list this project, or the rename failed. Said plainly: a
       // click that appears to do nothing is the one outcome the reader cannot act on.
-      say_error("could not remove \{label}")
+      self.say_error("could not remove \{label}")
       self.say_sessions()
       return
     }
@@ -1160,7 +1468,7 @@ async fn Shell::remove_project(
   // because that is where the conversations are: the reader asked for them gone and has to be able to
   // go and finish the job. This is the only irreversible act in the program.
   if delete && !@platform.purge_workspace(aside) {
-    say_error(
+    self.say_error(
       "\{label} removed, but its \{sessions} sessions could not be deleted — they are at \{aside}",
     )
     self.say_sessions()
@@ -1206,7 +1514,7 @@ async fn Shell::remove_project(
   }
   // Said on the session now on screen, which is why the re-homing above comes first: the status line is
   // the only thing that reports a project whose row is no longer there to look at.
-  say_status(self.current, what)
+  self.say_status(self.current, what)
   self.say_sessions()
 }
 
@@ -1220,12 +1528,12 @@ async fn Shell::remove_project(
 /// 1. a session this process already holds, and it must be in a *different* project: everything the
 ///    registry has in the one being removed is about to be dropped from it, and a window left on a session
 ///    the store no longer lists would put the removed project straight back on the sidebar (`say_sessions`
-///    always lists the session on screen, under the project it belongs to);
+///    carries the session on screen into its own project's group, which is now the top row of it);
 /// 2. failing that (every session open is in this project) the *top* of the store — the newest session of
 ///    the most recently used other project, which is the first row the sidebar will draw. Costing one file
 ///    read, on the one path where the alternative is an empty window;
-/// 3. and failing that a brand-new session in the home directory, which is the place `working_dir` already
-///    names for "the process has nowhere in particular to work". A fresh session in the doomed project
+/// 3. and failing that a brand-new session in the home directory — the same last resort `start_dir` names
+///    for "no directory to work in, and no store to ask". A fresh session in the doomed project
 ///    would make an empty row that persists for exactly as long as the reader leaves it unused, and one of
 ///    the project's own *saved* sessions would have the same problem as an open one.
 ///
@@ -1259,11 +1567,18 @@ async fn Shell::rehome_after(self : Shell, cwd : String) -> Open {
       newest.path,
       loaded.header.cwd,
       session_model(loaded),
+      session_level(loaded, session_model(loaded)),
       loaded,
     )
   }
   let (session, path) = fresh_session(self.root, self.home)
-  Open::new(path, self.home, self.shown().model_id, session)
+  Open::new(
+    path,
+    self.home,
+    self.shown().model_id,
+    self.shown().think_level,
+    session,
+  )
 }
 
 // ── history ────────────────────────────────────────────────────────────────
@@ -1288,6 +1603,10 @@ priv struct Draft {
   /// result arrives in a later message than the call it answers, while these are in the very message
   /// the words are in.
   images : Array[(String, String)]
+  /// A question that was a `/skill:<name>` command: the name, the reader's own words, and the skill's
+  /// body — the three parts `say_user` sends as `skill`. `None` for every other row, and for a
+  /// question that merely mentions a skill, because only a framing is one.
+  skill : (String, String, String)?
 }
 
 ///|
@@ -1331,7 +1650,16 @@ fn blocks_of(kind : String, text : String) -> Json {
 /// labelled is a paragraph the reader will read as an answer — the label is not decoration, it is
 /// what makes the row say what it is.
 fn note_draft(id : String, text : String, label : String) -> Draft {
-  { kind: "note", id, text, name: label, detail: "", call_id: "", images: [], }
+  {
+    kind: "note",
+    id,
+    text,
+    name: label,
+    detail: "",
+    call_id: "",
+    images: [],
+    skill: None,
+  }
 }
 
 ///|
@@ -1340,8 +1668,9 @@ fn text_draft(
   id : String,
   text : String,
   images? : Array[(String, String)] = [],
+  skill? : (String, String, String)? = None,
 ) -> Draft {
-  { kind, id, text, name: "", detail: "", call_id: "", images, }
+  { kind, id, text, name: "", detail: "", call_id: "", images, skill, }
 }
 
 ///|
@@ -1492,7 +1821,19 @@ fn history_rows(session : @core.Session) -> Array[Json] {
         // image-only prompt has no text at all, and a row skipped for having none would drop the
         // message — and the turn that answered it — from the transcript entirely.
         if text != "" || images.length() > 0 {
-          drafts.push(text_draft("user", next_id(), text, images~))
+          // A question that was a `/skill:<name>` command is the shell's framing with the skill's
+          // whole document inside it, so the host is told where the reader's words are — by the same
+          // function the live stream is sent through, which is what keeps a replayed turn and a live
+          // one from drawing the same message two ways.
+          drafts.push(
+            text_draft(
+              "user",
+              next_id(),
+              text,
+              images~,
+              skill=@core.skill_expansion_parts(text),
+            ),
+          )
         }
       }
       @core.Assistant(assistant) =>
@@ -1516,6 +1857,7 @@ fn history_rows(session : @core.Session) -> Array[Json] {
                 detail: @core.tool_summary(arguments),
                 call_id: id,
                 images: [],
+                skill: None,
               })
             }
             _ => ()
@@ -1535,6 +1877,7 @@ fn history_rows(session : @core.Session) -> Array[Json] {
             detail: "",
             call_id: result.tool_call_id,
             images: [],
+            skill: None,
           })
         }
         results.set(
@@ -1591,11 +1934,117 @@ fn history_rows(session : @core.Session) -> Array[Json] {
           // would be one more shape for the host to decode, and its default is the empty list either
           // way. The same reasoning the live stream follows in `say_user`.
           ("images", Json::array(pictures)),
+          // A question that was a `/skill:<name>` command, taken apart: the name, the reader's own
+          // words, and the skill's document. `null` for every other row — and for a question that
+          // merely mentions a skill, which is prose and stays one bubble.
+          //
+          // Last for the same reason `images` is, and on **every** row for the same reason too: one
+          // shape for the host to decode, with the absent case spelled `null`.
+          ("skill", skill_field(draft.skill)),
         ]),
       ),
     )
   }
   rows
+}
+
+///|
+/// The three parts of a skill framing as the host reads them, or `null`.
+fn skill_field(skill : (String, String, String)?) -> Json {
+  match skill {
+    Some((name, args, body)) =>
+      Json::object(
+        Map([
+          ("name", Json::string(name)),
+          ("args", Json::string(args)),
+          ("body", Json::string(body)),
+        ]),
+      )
+    None => Json::null()
+  }
+}
+
+///|
+/// **Fork the session on screen: a copy with a file of its own.**
+///
+/// The reader's "try something else from here, without risking this". What comes back is a new session
+/// with the same conversation, switched to immediately, and nothing that connects the two afterwards —
+/// see `core/session_fork.mbt` for why a fork is a snapshot rather than a branch inside one log, and
+/// why it is not called a duplicate.
+///
+/// **Not gated on being idle**, which is the same correction `NewSession` carries and for the same
+/// reason: a fork writes a *new* file and does not touch the one being read. The parent may be mid-turn,
+/// and what is copied is the parent's committed state — the copy the driver hands back after each step
+/// — rather than the file, which could be read mid-line. What a reader gets is therefore what they can
+/// see, which is the only thing they could have meant by "fork this".
+///
+async fn Shell::fork(self : Shell) -> Unit {
+  let parent = self.shown()
+  // A session nobody has asked anything in has nothing to fork: the copy would be an empty session with
+  // a parent recorded, which is a row the reader has to delete. Refused rather than allowed quietly,
+  // because a Fork that produced an indistinguishable new session is a click that did not work.
+  if parent.session.entries.length() == 0 {
+    self.say_error("nothing to fork: this session has no messages yet")
+    return
+  }
+  let now = @env.now().reinterpret_as_int64()
+  let id = @core.new_entry_id()
+  // What the parent is called *here*, because that is the name the reader will see on the two rows — and
+  // the two rows are the only place the fork has to be recognisable.
+  let parent_label = self.label_of(
+    parent.path,
+    self.labels.modified_of(parent.path),
+  )
+  let (header, entries) = @core.fork_session(
+    parent.session,
+    parent.path,
+    id,
+    @core.fork_name(parent_label),
+    now,
+  )
+  let path = @core.session_file_path(self.root, parent.cwd, now, id)
+  // **The whole file in one write, before anything is told about it.** Every other writer here appends
+  // to a session that already exists; this is the first operation that *produces* one, so it is the
+  // first that can leave a file looking complete and holding half a conversation. Telling the host
+  // afterwards is what makes the list show a fork that is finished.
+  //
+  // **And it is allowed to fail, which it could not before.** A store that cannot be written is the one
+  // failure a reader can act on and the one this path had nothing to say about: `write_session` returned
+  // `Unit`, so a failed write raised out of here instead. By then nothing had been told to the host, so
+  // the error is the only new fact — no list to re-send, no session to switch to, no half row, which is
+  // the whole of what criterion 11 of `docs/adr/0010-session-forking.md` asks for.
+  if !@platform.write_session(path, @core.session_file_text(header, entries)) {
+    self.say_error("could not write the fork to \{path}")
+    return
+  }
+  let session = @core.Session::new(header, entries)
+  // **The copied history is made acceptable to a provider here, not later.** A parent that was
+  // interrupted, or that is running right now, ends mid-turn (or with a tool call nobody answered) —
+  // and a session whose first request is refused fails with a byte offset for a reason, which reads as
+  // "the model is broken". `close_open_turn: true` is the half that matters: this is a reader who has
+  // moved on, so the turn the parent left open is abandoned in the copy.
+  let repaired = @agent.repair_session(session, path, now)
+  let open = Open::new(
+    path,
+    parent.cwd,
+    parent.model_id,
+    parent.think_level,
+    repaired,
+  )
+  self.display(open)
+  self.labels.forget(path)
+  self.say_open(open)
+  // **After the history, not before.** A `history` event clears the status line (it belongs to whatever
+  // was on screen before), so a line sent first would be wiped by the switch it is describing.
+  //
+  // Saying it is the point of the line rather than decoration: a fork arrives as *another session with
+  // the same conversation in it*, and the one thing a reader cannot see from the label is that the two
+  // are now independent — no later turn in either will ever appear in the other.
+  self.say_status(
+    path,
+    "forked from \u{201C}\{parent_label}\u{201D} · independent from here",
+  )
+  self.say_sessions()
 }
 
 ///|
@@ -1615,14 +2064,14 @@ fn history_rows(session : @core.Session) -> Array[Json] {
 /// must never be forked.
 async fn Shell::rename(self : Shell, path : String, name : String) -> Unit {
   if path == "" {
-    say_error("rename: no session path")
+    self.say_error("rename: no session path")
     self.say_sessions()
     return
   }
   let open = match self.open_of(path) {
     Some(open) => open
     None => {
-      say_error("cannot rename a session that is not open")
+      self.say_error("cannot rename a session that is not open")
       self.say_sessions()
       return
     }
@@ -1643,7 +2092,7 @@ async fn Shell::rename(self : Shell, path : String, name : String) -> Unit {
   // one before it — a session whose parents disagree with the file is a session whose next request
   // is built from a log nobody wrote.
   open.session = open.session.add_entries([entry])
-  say_status(
+  self.say_status(
     open.path,
     if name == "" {
       "name cleared"
@@ -1664,6 +2113,62 @@ async fn Shell::rename(self : Shell, path : String, name : String) -> Unit {
 }
 
 ///|
+/// Pin a session to the top of the list, or take the pin away.
+///
+/// **Not a rename's twin, and the difference is why this is not an entry in the log.** A name is part
+/// of the conversation and travels with the file; which conversations a reader keeps at hand is a fact
+/// about their window, and writing it into the session would hand it to every other reader of that
+/// file. So it is a file of its own (`platform/pins.mbt`), and this is the whole of the shell's part:
+/// decide the new set, write it, keep the copy in memory in step, and re-say the list.
+///
+/// **No status line.** The change is on screen the moment the list is re-said — the row moves into the
+/// bar above the headings, and the menu item it was asked from flips to "Unpin" — so a line saying so
+/// would be a second sentence about a fact the reader just watched happen. That is also what makes
+/// this safe to do to a session that is not on screen: nothing is being told to a conversation.
+async fn Shell::set_pinned(self : Shell, path : String, pinned : Bool) -> Unit {
+  if path == "" {
+    self.say_error("pin: no session path")
+    self.say_sessions()
+    return
+  }
+  let next = @core.pins_set(self.live_pins(), path, pinned)
+  @platform.save_pins(self.home, next)
+  self.pins = next
+  self.say_sessions()
+}
+
+///|
+/// The pins that still name a session, dropping the rest.
+///
+/// A deleted session leaves its pin behind, and deliberately so: the delete is an undoable rename for
+/// twelve seconds, and a pin that vanished at the click would not come back with the Undo. What
+/// keeps the file from growing a line per delete forever is this — every change to the pins rewrites
+/// them without the entries nothing is at — so a store nobody ever cleans up by hand is cleaned up
+/// by the next pin.
+///
+/// A path that is not there covers both kinds of gone: a purged file, and a project removed with its
+/// sessions. The in-memory copy is not rewritten here; only the file is, and only by a caller that
+/// has a reason to write one.
+///
+/// **The registry counts as being there.** A session a reader just created has no file yet — the first
+/// prompt is what writes one — so "not on disk" is not the same question as "gone", and a pin on a
+/// session that has not been asked anything in would otherwise be dropped by the next pin anywhere.
+/// The registry is the one place that knows the difference, and it is the right one: it holds exactly
+/// the sessions this process can still show.
+async fn Shell::live_pins(self : Shell) -> Array[String] {
+  let out : Array[String] = []
+  for path in self.pins {
+    if path == "" || out.contains(path) {
+      continue
+    }
+    if @platform.path_exists(path) || self.open_of(path) is Some(_) {
+      out.push(path)
+    }
+  }
+  out
+}
+
+///|
 /// Put a deleted session back where it was.
 ///
 /// The inverse of `discard`, from the same place as the web UI's Undo: the file was renamed aside
@@ -1671,18 +2176,18 @@ async fn Shell::rename(self : Shell, path : String, name : String) -> Unit {
 /// back — the bytes are still on disk under a predictable name.
 async fn Shell::restore(self : Shell, path : String) -> Unit {
   if path == "" {
-    say_error("nothing to restore")
+    self.say_error("nothing to restore")
     self.say_sessions()
     return
   }
   if @platform.path_exists(path) {
-    say_error("that session is already back")
+    self.say_error("that session is already back")
     self.say_sessions()
     return
   }
   @platform.restore_session(path)
   self.labels.forget(path)
-  say_status(self.current, "restored")
+  self.say_status(self.current, "restored")
   self.say_sessions()
 }
 
@@ -1699,7 +2204,10 @@ async fn Shell::dismiss_turn(self : Shell, open : Open) -> Unit {
     // it is not: there is nothing left to resume. What was wrong is the *host's* copy, one event
     // behind — so the snapshot is re-sent, or the click would leave on screen the very notice it was
     // about. No history: nothing was appended, so it is the snapshot that can be stale and not the rows.
-    say_status(open.path, "nothing to dismiss: that turn has already ended")
+    self.say_status(
+      open.path,
+      "nothing to dismiss: that turn has already ended",
+    )
     self.say_show(open)
     return
   }
@@ -1714,6 +2222,6 @@ async fn Shell::dismiss_turn(self : Shell, open : Open) -> Unit {
   @platform.ensure_session(open.path, open.session.header)
   @platform.append_entry(open.path, entry)
   open.session = open.session.add_entries([entry])
-  say_status(open.path, "closed the interrupted turn")
+  self.say_status(open.path, "closed the interrupted turn")
   self.say_open(open)
 }

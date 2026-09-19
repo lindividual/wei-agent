@@ -86,6 +86,41 @@ final class DesignTests: XCTestCase {
         XCTAssertGreaterThan(Wei.Ink.highlightWash.dark.contrast(with: Wei.Backdrop.dark), 1.05)
     }
 
+    /// A selected row is the chip's claim one size up, and it is checked on its own numbers rather than
+    /// inherited: a row is a bigger thing than a chip, so it carries more of the brand (`Ink.selection` is the
+    /// wash's step up), and the text on it has to hold up on the fill it is actually drawn on.
+    ///
+    /// This is the pairing a reader complained about, in the version where the platform drew the fill in the
+    /// *system's* blue: the app's own secondary line is a grey, and a grey over a saturated fill is neither
+    /// readable nor the same hue as what it sits on.
+    func testASelectedRowIsReadableInBothAppearances() {
+        XCTAssertGreaterThanOrEqual(
+            Wei.Ink.onHighlight.light.contrast(with: Wei.Ink.selection.light), aa,
+            "the second line of a selected row is not readable on its fill"
+        )
+        XCTAssertGreaterThanOrEqual(
+            Wei.Ink.onHighlight.dark.contrast(with: Wei.Ink.selection.dark), aa,
+            "the second line of a selected row is not readable on its fill in dark mode"
+        )
+        // The row's *name* is `labelColor`, which is the platform's and is not in this palette, so what is
+        // checkable is the direction: a light fill gets the platform's dark label, a dark fill gets its light
+        // one. A fill on the wrong side of the midpoint would put the platform's white label on a pale row.
+        XCTAssertGreaterThan(Wei.Ink.selection.light.luminance, 0.5, "the light fill is not a light colour")
+        XCTAssertLessThan(Wei.Ink.selection.dark.luminance, 0.5, "the dark fill is not a dark colour")
+        // A selection has to be visible *as* a selection, which is the claim that makes it a token of its own
+        // rather than the chip's wash: it is further from the window than the wash is, in both appearances.
+        XCTAssertGreaterThan(
+            Wei.Ink.selection.light.contrast(with: Wei.Backdrop.light),
+            Wei.Ink.highlightWash.light.contrast(with: Wei.Backdrop.light),
+            "the selection fill is no more visible than a chip's wash"
+        )
+        XCTAssertGreaterThan(
+            Wei.Ink.selection.dark.contrast(with: Wei.Backdrop.dark),
+            Wei.Ink.highlightWash.dark.contrast(with: Wei.Backdrop.dark),
+            "the selection fill is no more visible than a chip's wash in dark mode"
+        )
+    }
+
     /// The two brand colours are far enough apart in *lightness* to be told apart, which is the axis a
     /// one-hue palette has. If the mint and the pine ever converge, the mark stops reading as a shape and the
     /// accent stops being distinguishable from its own fill.

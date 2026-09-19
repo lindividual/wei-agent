@@ -1,5 +1,41 @@
 import Foundation
 
+/// A question that was a `/skill:<name>` command, with the shell's framing taken off it.
+///
+/// **Why this exists at all**: a skill's document is thousands of characters, and the prompt the shell
+/// writes is that document with the reader's own words after it. Drawn as it stands, a two-line
+/// question is a bubble the height of the window with the reader's sentence somewhere near the bottom.
+/// The expansion is lossy — the log and the wire both hold one text — so the shell takes it apart where
+/// it wrote it (`core.skill_expansion_parts`) and sends the three parts.
+///
+/// The parts are what the transcript needs and nothing more: the command to show in place of the
+/// question, the reader's own words to show as the question, and the body to fold away until someone
+/// asks to see what the model was actually given.
+public struct SkillFrame: Equatable, Decodable, Sendable {
+    /// The skill's name, as the frontmatter spells it.
+    public let name: String
+    /// What the reader added after the command. Empty when they added nothing.
+    public let args: String
+    /// The skill's document: the part that is not their message.
+    public let body: String
+
+    public init(name: String, args: String, body: String) {
+        self.name = name
+        self.args = args
+        self.body = body
+    }
+
+    /// What the fold over the document says.
+    ///
+    /// **The count is the point of it.** A fold raises one question — how much is behind this — and a
+    /// label that answers with a word like "details" leaves the reader to open it to find out. Abbreviated
+    /// with the composer's own rule (`TokenText.compact`), because `57422 characters` is a number nobody
+    /// reads at a glance; the exact figure is one click away, in the text itself.
+    public var foldLabel: String {
+        "skill \(name) · \(TokenText.compact(body.count)) characters"
+    }
+}
+
 /// A picture a message carried, as the row carries it.
 ///
 /// The media type and base64, and **no path**: a prompt's pictures have no file behind them. One came
@@ -73,6 +109,12 @@ public struct Row: Identifiable, Equatable, Decodable {
     /// every delta is quadratic (the web UI measured it: 40KB of reasoning in 64-character frames).
     /// The view's rule is the simple one: draw the parse if it is here, the text otherwise.
     public var blocks: [Block]?
+    /// A question that was a `/skill:<name>` command: the command, the reader's own words, and the
+    /// skill's document — which is most of the characters in that message and none of what they typed.
+    ///
+    /// `nil` for every other row. The shell takes the framing apart where it wrote it, so the two
+    /// front ends and the log all mean the same thing by it; see `core.skill_expansion_parts`.
+    public var skill: SkillFrame?
     /// The pictures this message carried, a question's only. Drawn above its words, right-aligned
     /// with them, because a message is one thing and its picture is part of what was said.
     ///
@@ -84,7 +126,7 @@ public struct Row: Identifiable, Equatable, Decodable {
     /// `isError` crosses as `error`, the same name the `tool` event uses for the same fact — one
     /// field, spelled once, so a row from a history and a row from a live stream decode alike.
     private enum CodingKeys: String, CodingKey {
-        case id, kind, text, complete, name, detail, output, blocks, images
+        case id, kind, text, complete, name, detail, output, blocks, images, skill
         case isError = "error"
     }
 
@@ -110,6 +152,10 @@ public struct Row: Identifiable, Equatable, Decodable {
         isError = try fields.decode(Bool.self, forKey: .isError)
         blocks = try fields.decodeIfPresent([Block].self, forKey: .blocks)
         images = try fields.decodeIfPresent([RowImage].self, forKey: .images) ?? []
+        // Optional **on the wire** for the same reason `images` is, and it cannot be a defaulted
+        // property: only a question that was a `/skill:<name>` command has one, and an older shell
+        // never sends it at all.
+        skill = try fields.decodeIfPresent(SkillFrame.self, forKey: .skill)
     }
 
     public init(
@@ -122,6 +168,7 @@ public struct Row: Identifiable, Equatable, Decodable {
         output: String = "",
         isError: Bool = false,
         blocks: [Block]? = nil,
+        skill: SkillFrame? = nil,
         images: [RowImage] = []
     ) {
         self.id = id
@@ -133,6 +180,7 @@ public struct Row: Identifiable, Equatable, Decodable {
         self.output = output
         self.isError = isError
         self.blocks = blocks
+        self.skill = skill
         self.images = images
     }
 }
@@ -270,10 +318,14 @@ public struct Conversation: Equatable {
             // none at all — is dropped rather than guessed at. Frames arrive in order, so the only
             // way here is a shell replaying a session the host has already drawn.
 
-        case .sessions, .session, .settings, .models, .jobs:
-            // The sidebar's, the panel's and the picker's own facts. The transcript is unchanged by any
+        case .sessions, .session, .settings, .models, .think, .jobs, .elsewhere:
+            // The sidebar's, the panel's and the pickers' own facts. The transcript is unchanged by any
             // of them: a switch says which session is open and only the history that follows says
             // what is in it.
+            //
+            // `elsewhere` is here for the same reason and one of its own: a turn ending in *another*
+            // conversation says nothing about this transcript — the notice that says it lives on the
+            // window (`ShellClient.notice`), not on any one conversation's rows.
             return
 
         case let .images(items, canSend):
@@ -289,7 +341,7 @@ public struct Conversation: Equatable {
             _ = (model, cwd, key)
             status = ""
 
-        case let .user(text, continued, images):
+        case let .user(text, continued, images, skill):
             running = true
             // The prompt's own row is named by the turn rather than by how many rows there are: a
             // count is not an identity — a `history` replace resets it, and two rows that happened to
@@ -302,7 +354,10 @@ public struct Conversation: Equatable {
                 // would have without them: the shell takes them off the composer in the same breath, so
                 // this event is the last place they exist as part of the question.
                 rows.append(
-                    Row(id: "user-\(turn)", kind: .user, text: text, complete: true, images: images)
+                    Row(
+                        id: "user-\(turn)", kind: .user, text: text, complete: true,
+                        skill: skill, images: images
+                    )
                 )
             }
             // The prompt is what the answer is about, so everything before it is finished.

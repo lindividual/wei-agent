@@ -62,7 +62,7 @@ test "a summary is converted before the request is built" {
       CompactionSummary(summary="old work", tokens_before=1000, timestamp=1L),
       User({ content: [Text("carry on")], timestamp: 2L, }),
     ],
-    thinking_level: "high",
+    thinking_level: Some("high"),
     model: None,
   }
   let messages = context.messages_for_model()
@@ -172,6 +172,40 @@ test "session_label clips a long first turn" {
 test "session_label is empty when there is nothing to show" {
   assert_eq(session_label(""), "")
   assert_eq(session_label(header().to_line()), "")
+}
+
+///|
+/// A session started with `/skill:<name>` is labelled with **what the reader asked for**, not with
+/// the skill's document.
+///
+/// The shell writes the framing and the body into the log as the prompt, so the naive label is the
+/// first eighty characters of somebody else's instructions — a JSON schema, a table of contents,
+/// whatever the skill happens to open with. What the reader typed after the command is the question;
+/// when they typed nothing, the command is the whole of what they did.
+test "a skill command is labelled with the reader's words, not the skill's body" {
+  let skill : Skill = {
+    name: "pdf-report",
+    description: "Turn data into a PDF.",
+    path: "/home/u/.wei/skills/pdf-report/SKILL.md",
+  }
+  let asked = skill_expansion(
+    skill,
+    "# Report\n\nFirst read reference.md, then run the pipeline. ".repeat(20),
+    "do the  numbers from data.csv",
+  )
+  let lines = [header().to_line(), entry_for("a", None, asked).to_line()]
+  assert_eq(session_label(lines.join("\n")), "do the numbers from data.csv")
+  // Nothing added: the command is the label, and it reads as the command rather than as the
+  // expanded text somebody was sent.
+  let bare = skill_expansion(skill, "# Report\n\nDo the thing.", "")
+  let bare_lines = [header().to_line(), entry_for("a", None, bare).to_line()]
+  assert_eq(session_label(bare_lines.join("\n")), "/skill:pdf-report")
+  // And what a reader typed themselves is still taken whole — the rule only fires on a framing.
+  let plain = [
+    header().to_line(),
+    entry_for("a", None, "just   a question").to_line(),
+  ]
+  assert_eq(session_label(plain.join("\n")), "just a question")
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────

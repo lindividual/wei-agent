@@ -276,6 +276,53 @@ pub fn TurnEnding::is_interruption(self : TurnEnding) -> Bool {
 }
 
 ///|
+/// The `customType` under which a session records that it was forked from another.
+///
+/// A `custom` entry rather than a field somewhere, for three reasons that all have to hold at once: it
+/// must not be replayed to the model (it is not a message), it must be visible to a *later* reader of
+/// the file (so a fact written on the header would do, but a second reader would have to know the
+/// field), and it must be something the arithmetic can find (see `Session::usage`, which starts its sum
+/// after the newest one). A `custom` entry is the only shape here that is silent to the model and
+/// still an entry.
+///
+/// The entry's own `parent_id` is the fork point, and its `data` repeats that id: an entry explains
+/// itself without its neighbours, which is what makes a log readable a year later.
+pub fn fork_type() -> String {
+  "fork"
+}
+
+///|
+/// Build the entry that marks where a session's own history begins.
+///
+/// `parent_session` is the file it was copied from, `from_id` the entry in that history the copy ends
+/// at. Both are recorded because they answer different questions — "which conversation did this come
+/// from" and "how much of this is mine" — and because the second is what lets a reader of the log see
+/// the point without following `parent_id` links back through it.
+pub fn fork_entry(
+  parent_session : String,
+  from_id : String?,
+  parent_id : String?,
+  timestamp : Int64,
+) -> Entry {
+  let fields : Array[(String, Json?)] = [
+    ("parent", Some(Json::string(parent_session))),
+  ]
+  match from_id {
+    Some(id) => fields.push(("from", Some(Json::string(id))))
+    None => ()
+  }
+  {
+    id: new_entry_id(),
+    parent_id,
+    timestamp: format_iso_utc(timestamp),
+    kind: Custom(
+      custom_type=fork_type(),
+      data=Some(Json::object(obj_opt_pairs(fields))),
+    ),
+  }
+}
+
+///|
 /// The `customType` under which a turn's opening is stored.
 ///
 /// A turn is *durably open* between this entry and its outcome. That is what makes an

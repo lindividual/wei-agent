@@ -618,12 +618,37 @@ pub fn format_script_result(
 ///
 /// `async fn main raise` reports an uncaught error as `Failure(message)` on stderr
 /// and exits 1 — clean, but the constructor is noise the caller did not write.
+///
+/// This is the text form; `error_text` below is the same rule for the value form. Kept separate
+/// because the inputs are different things — one is stderr a child process wrote, the other is an
+/// `Error` this process caught — and unified in the rule rather than in the code.
 fn unwrap_raise(text : String) -> String {
   let trimmed = text.trim()
   if trimmed.has_prefix("Failure(") && trimmed.has_suffix(")") {
     return trimmed[8:trimmed.length() - 1].to_owned()
   }
   text
+}
+
+///|
+/// What to show a reader for an error this program caught.
+///
+/// **A message, not a constructor.** `\{err}` on a `Failure` prints `Failure(the model endpoint
+/// returned HTTP 401: ...)` — the name of the type a turn happened to raise through, wrapped around
+/// a sentence that was already written for a person. Measured twice, both times in front of a reader:
+/// a first run with no API key, where the real answer ("add one in Settings") was already on the
+/// status line, and a failed turn, where the provider's own words and its protocol jargon arrived
+/// inside a `Failure(…)` that named neither.
+///
+/// Every front end catches errors at its own edge and says what it caught, so this is where the
+/// shape of that sentence is decided rather than at each `catch`. A suberror renders as its own
+/// message already (`DecodeError` prints `line 1: invalid JSON`), so only `Failure` needs unwrapping
+/// — and if the runtime adds another wrapper, this is the one place that has to learn about it.
+pub fn error_text(err : Error) -> String {
+  match err {
+    Failure(message) => message
+    _ => "\{err}"
+  }
 }
 
 ///|
