@@ -108,7 +108,15 @@ public final class ShellClient: ObservableObject {
     /// that fails *silently*: an answer written into the wrong transcript looks exactly like an answer,
     /// and only two conversations at once make it visible at all.
     func receive(_ line: String) {
-        WireLog.line("<-", WireLog.elided(line.trimmingCharacters(in: .whitespacesAndNewlines)))
+        // **Both halves of this are inside the guard, and `WireLog.line`'s own guard is not enough.**
+        // `trimmingCharacters` copies the line and `elided` scans it (and rewrites it, when it finds
+        // an attachment), so for the one event that carries a whole conversation they were measured at
+        // **101ms of main-thread work for a log that was not being written** — `WEI_DEBUG` unset,
+        // which is every ordinary run. A disabled feature that costs a tenth of a second on the
+        // biggest event on the wire is the most expensive kind of disabled feature.
+        if WireLog.isOn {
+            WireLog.line("<-", WireLog.elided(line.trimmingCharacters(in: .whitespacesAndNewlines)))
+        }
         guard let envelope = Envelope.decode(line: line) else { return }
         let event = envelope.event
         switch event {

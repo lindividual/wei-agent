@@ -10,8 +10,8 @@
 #     executable in the Dock is a generic document icon with a name taken from its file;
 #   - a bundle, so LaunchServices treats it as an app: a menu bar, a real name, and a place in
 #     the Dock and in the app switcher;
-#   - a signature. Ad-hoc, which is enough for this machine and says so out loud rather than
-#     pretending a downloaded copy would open.
+#   - a signature, and with it the app's *identity* — the thing macOS keys a TCC grant on. Ad-hoc
+#     is the fallback; a stable identity is what makes a permission survive a rebuild. See below.
 #
 # The bundle is assembled rather than produced by an Xcode project on purpose. There is no nib, no
 # asset catalog and no build phase that does anything SwiftPM cannot, so an `.xcodeproj` would be a
@@ -139,11 +139,34 @@ swift "$MACOS/make-icon.swift" "$ICONSET" >/dev/null
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf "$(dirname "$ICONSET")"
 
-# Ad-hoc, and `--force` because rebuilding over an existing bundle is the common case. Not `--deep`:
-# there is one executable here, and signing everything under a path is the flag that hides a second
-# binary somebody forgot to sign.
-echo "==> sign (ad-hoc)"
-codesign --force --sign - "$APP"
+# The identity, when the machine has one, and ad-hoc otherwise. `--force` because rebuilding over an
+# existing bundle is the common case. Not `--deep`: there is one executable here, and signing
+# everything under a path is the flag that hides a second binary somebody forgot to sign.
+#
+# This is not about Gatekeeper — an ad-hoc copy is refused over the network either way. It is about
+# TCC, which keys a permission on the app's *designated requirement*:
+#
+#     ad-hoc:  designated => identifier "…" and cdhash H"…"
+#     signed:  designated => identifier "…" and certificate root = H"…"
+#
+# The cdhash is a hash of the build, so every rebuild is a different app to macOS and the reader is
+# asked again — measured, and written up in `docs/macos-pitfalls.md`. The certificate does not
+# change, so the requirement does not either: two binaries built from different sources and signed
+# with one identity have different cdhashes and byte-identical requirements. That is the whole of
+# why the grant survives.
+#
+# `wei-dev` is the self-signed identity `macos/README.md` shows how to make. `WEI_SIGN_IDENTITY`
+# overrides it, and `WEI_SIGN_IDENTITY=-` forces ad-hoc — a machine with no identity still has to
+# be able to build this.
+SIGN_IDENTITY="${WEI_SIGN_IDENTITY:-wei-dev}"
+if [ "$SIGN_IDENTITY" != "-" ] &&
+  ! security find-identity -v -p codesigning 2>/dev/null | grep -q "\"$SIGN_IDENTITY\""; then
+  echo "note: no code-signing identity '$SIGN_IDENTITY' — falling back to ad-hoc" >&2
+  echo "      (a permission granted now will not survive the next rebuild; macos/README.md)" >&2
+  SIGN_IDENTITY="-"
+fi
+echo "==> sign ($SIGN_IDENTITY)"
+codesign --force --sign "$SIGN_IDENTITY" "$APP"
 
 echo
 echo "$APP"
@@ -152,6 +175,11 @@ echo "  bundle id $BUNDLE_ID"
 echo
 echo "open \"$APP\"        # or double-click it in Finder"
 echo
-echo "Note: ad-hoc signed, so a copy that arrives over the network is refused by Gatekeeper. A"
-echo "release wants a Developer ID signature and notarization; this is enough for the machine that"
-echo "built it."
+if [ "$SIGN_IDENTITY" = "-" ]; then
+  echo "Note: ad-hoc signed. macOS keys a permission to a hash that changes every build, so a grant"
+  echo "made to this app will not survive the next one. See macos/README.md for the identity to make."
+else
+  echo "Signed with '$SIGN_IDENTITY': permissions granted to this app survive a rebuild."
+fi
+echo "Note: either way a copy that arrives over the network is refused by Gatekeeper. A release"
+echo "wants a Developer ID signature and notarization; this is enough for the machine that built it."

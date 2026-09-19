@@ -944,6 +944,13 @@ private struct StatusLine: View {
                 .truncationMode(.tail)
             Spacer(minLength: 8)
             if let usage = client.conversation.usage {
+                // The figures in the order they are read: how full the window is, what the cache
+                // saved, and what it all cost. The web UI puts the same four on one row under its
+                // composer as chips (tokens, cache, cost, context), and the reason to match it is not
+                // symmetry: a reader comparing two answers — "why was that one cheaper" — is looking
+                // at this line, and a figure that only exists in a popover is a figure they have to
+                // already know is there.
+                CacheMeter(usage: usage)
                 ContextMeter(usage: usage)
                 Button {
                     client.refreshUsage()
@@ -996,6 +1003,12 @@ private struct StatusLine: View {
             parts.append("\(last.toolCalls) tool call\(last.toolCalls == 1 ? "" : "s")")
         }
         parts.append("\(TokenText.compact(last.input)) in / \(TokenText.compact(last.output)) out")
+        // Thinking tokens, when the provider reports them. They are part of what the turn cost and
+        // invisible in the answer, which is exactly the case where a reader wonders why a one-line
+        // reply was expensive.
+        if let thinking = last.reasoning, thinking > 0 {
+            parts.append("\(TokenText.compact(thinking)) thinking")
+        }
         return parts.joined(separator: " · ")
     }
 }
@@ -1022,11 +1035,41 @@ private struct ContextMeter: View {
                 .frame(width: 11, height: 11)
                 Text("\(Int((fill * 100).rounded()))%")
                     .monospacedDigit()
+                // Beside the percentage, not instead of it: the share is what a reader checks at a
+                // glance, and the pair is what they check when the share looks high — a number they
+                // can compare against a model's published window without opening anything.
+                Text("\(TokenText.compact(usage.contextFigure))/\(TokenText.compact(usage.window))")
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                // The ring says how full it is; this says that being full is now a thing that will
+                // *happen* rather than a thing to watch. It is the one figure on this line that
+                // changes what the next turn does, so it gets a mark as well as a colour: amber
+                // already means "getting close" at 70%, and "the next turn may summarize this
+                // conversation" is a different fact.
+                if usage.compactSoon {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                }
             }
-            .help(
-                "\(TokenText.exact(usage.prompt)) of \(TokenText.compact(usage.window)) context tokens"
-            )
+            .help(figure)
         }
+    }
+
+    /// What the ring is measuring, and whether that is a measurement at all.
+    ///
+    /// A tooltip rather than a label beside the number: this is the figure a reader checks when they
+    /// wonder whether it is time to start a new conversation, which makes it worth explaining and not
+    /// worth a second line of text under the composer.
+    private var figure: String {
+        let used = "\(TokenText.exact(usage.contextFigure)) of \(TokenText.compact(usage.window)) context tokens"
+        let source = usage.contextIsMeasured
+            ? "measured: the provider's prompt size for the last reply, plus what has been added since"
+            : "estimated: no reply in this conversation has reported a prompt size yet"
+        guard usage.overhead > 0 else { return "\(used) · \(source)" }
+        let fixed = "the system prompt and tool schemas are included (~\(TokenText.compact(usage.overhead)))"
+        guard usage.compactSoon else { return "\(used) · \(source) · \(fixed)" }
+        return "\(used) · \(source) · \(fixed) · the next turn may summarize this conversation"
     }
 
     /// Amber well before full, because the interesting moment is the compaction that happens when it
@@ -1035,6 +1078,44 @@ private struct ContextMeter: View {
         if fill >= 0.9 { return .red }
         if fill >= 0.7 { return .orange }
         return .accentColor
+    }
+}
+
+/// What the provider's cache bought, on the line rather than in the panel.
+///
+/// It earns its place there because it is the one figure that explains a bill a reader would
+/// otherwise find surprising: the same conversation, sent twice, costs very different amounts
+/// depending on how much of it the provider recognized. Absent when nothing has been read from a
+/// cache, which is the normal state on a first turn and on a provider that does not cache at all —
+/// a chip reading `0 · 0%` would be a chip every reader learns to skip.
+private struct CacheMeter: View {
+    let usage: Usage
+
+    var body: some View {
+        if usage.cacheRead > 0 {
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.trianglehead.2.clockwise")
+                    .font(.system(size: 9))
+                // The share first, because that is the number that answers "is caching working here",
+                // and the volume second, compacted: `186M · 99%` reads as "nearly everything".
+                Text(share)
+                    .monospacedDigit()
+                Text(TokenText.compact(usage.cacheRead))
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+            }
+            .help(figure)
+        }
+    }
+
+    private var share: String {
+        usage.cacheHit.map { "\($0)%" } ?? "—"
+    }
+
+    private var figure: String {
+        let read = "\(TokenText.exact(usage.cacheRead)) prompt tokens came from the provider's cache"
+        guard let hit = usage.cacheHit else { return read }
+        return "\(read) — \(hit)% of all billed input this session"
     }
 }
 
@@ -1065,6 +1146,12 @@ private struct UsagePanel: View {
             row("model calls", "\(last.modelCalls)")
             if last.toolCalls > 0 { row("tool calls", "\(last.toolCalls)") }
             row("tokens", TokenText.exact(last.total))
+            // Only when it happened: a turn that read nothing from the cache is the normal case, and
+            // a row of zeroes for it would be a row every reader learns to skip.
+            if last.cacheRead > 0 { row("cached input", TokenText.exact(last.cacheRead)) }
+            if let thinking = last.reasoning, thinking > 0 {
+                row("thinking", TokenText.exact(thinking))
+            }
             row("cost", last.cost)
             section("Session")
         }
@@ -1078,13 +1165,48 @@ private struct UsagePanel: View {
             row("cache writes", TokenText.exact(usage.cacheWrite))
         }
         row("output", TokenText.exact(usage.output))
+        // Absent rather than zero when the provider does not report it: unlike a cache read, where
+        // nothing means nothing, this one is a fact about the *provider*, and a `0` would claim the
+        // model did no thinking.
+        if usage.reasoning > 0 {
+            row("thinking", TokenText.exact(usage.reasoning))
+        }
         row("total tokens", TokenText.exact(usage.total))
-        row("context", "\(TokenText.compact(usage.prompt)) / \(TokenText.compact(usage.window))")
+        context
         Divider()
         row("input cost", usage.costInput)
         row("output cost", usage.costOutput)
         if usage.cacheRead > 0 || usage.cacheWrite > 0 {
             row("cache cost", sum(usage.costCacheRead, usage.costCacheWrite))
+        }
+    }
+
+    /// How close the conversation is to the model's window, and how much of that it can do nothing
+    /// about.
+    ///
+    /// A section of its own rather than three more rows under the totals: this is the block a reader
+    /// opens the panel for, and the rest of the panel is the bill.
+    @ViewBuilder private var context: some View {
+        section("Context")
+        // The figure for the **next** request against the window it has to fit in, which is the
+        // question the panel is opened to answer. Not the size of the last request: see
+        // `Usage::contextFill` for why those are two numbers and why this is the one that matters.
+        row("next request", "\(TokenText.compact(usage.contextFigure)) / \(TokenText.compact(usage.window))")
+        if let fill = usage.contextFill {
+            row("used", "\(Int((fill * 100).rounded()))%")
+        }
+        row("source", usage.contextIsMeasured ? "measured" : "estimated")
+        // What every request carries before the conversation starts. Named, because it is the part of
+        // that figure which no amount of tidying the conversation will move. Left out when the shell
+        // did not say, rather than drawn as `~0`.
+        if usage.overhead > 0 {
+            row("system + tools", "~\(TokenText.compact(usage.overhead))")
+        }
+        if usage.compactSoon {
+            Text("This conversation is close to the window: the next turn may summarize it.")
+                .font(.system(size: 10))
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

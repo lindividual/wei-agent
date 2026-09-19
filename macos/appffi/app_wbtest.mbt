@@ -204,10 +204,35 @@ test "history keeps one row per tool, with its output attached" {
     #|{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-08-23T06:26:19.662Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"bash","arguments":{"command":"ls"}}],"api":"a","provider":"p","model":"m","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":2}}
     #|{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-08-23T06:26:20.662Z","message":{"role":"toolResult","toolCallId":"call-1","toolName":"bash","content":[{"type":"text","text":"a.txt"}],"isError":false,"timestamp":3}}
   let rows = history_rows(@core.parse_session_file(text))
+  // **The question carries no parse, and that is the rule rather than an omission.** `blocks` is read
+  // by the host in exactly one place — `RootView`'s `case .reply` — and a question is drawn as
+  // `Text(row.text)`; a parse for it is bytes nobody reads (see `draws_markdown`, where the measurement
+  // is written down). The tool row is `null` for a different reason: it has no text to parse.
   inspect(
     rows.map(row => row.stringify()).join("\n"),
-    content="{\"kind\":\"user\",\"id\":\"h-1\",\"text\":\"list it\",\"complete\":true,\"blocks\":[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"list it\"}]}],\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false}\n{\"kind\":\"tool\",\"id\":\"h-2\",\"text\":\"\",\"complete\":true,\"blocks\":null,\"name\":\"bash\",\"detail\":\"ls\",\"output\":\"a.txt\",\"error\":false}",
+    content="{\"kind\":\"user\",\"id\":\"h-1\",\"text\":\"list it\",\"complete\":true,\"blocks\":null,\"name\":\"\",\"detail\":\"\",\"output\":\"\",\"error\":false}\n{\"kind\":\"tool\",\"id\":\"h-2\",\"text\":\"\",\"complete\":true,\"blocks\":null,\"name\":\"bash\",\"detail\":\"ls\",\"output\":\"a.txt\",\"error\":false}",
   )
+}
+
+///|
+/// The rule itself, at the one place it is decided: only the answer is drawn as markdown.
+///
+/// Pinned because it is a fact *two* sides have to agree about — the shell decides what to send and the
+/// host decides what to read — and a disagreement is silent in the cheap direction (a parse nobody
+/// reads) and invisible in the other until a row stops rendering. The measurement behind the rule is in
+/// `draws_markdown`.
+test "only the answer's row is drawn as markdown" {
+  assert_true(
+    blocks_of("reply", "**bold**").stringify().has_prefix("[{\"t\":\"p\""),
+  )
+  for kind in ["user", "thinking", "tool", "note"] {
+    assert_true(
+      blocks_of(kind, "**bold**") is Json::Null,
+      msg="a \{kind} row is drawn from its text, so it carries no parse",
+    )
+  }
+  // A row with nothing to parse is `null` whatever its kind: one rule for the host, not two.
+  assert_true(blocks_of("reply", "") is Json::Null)
 }
 
 ///|
@@ -337,6 +362,26 @@ test "settings carry the key source, the flags, the mode and the file" {
 }
 
 ///|
+/// A finished reasoning block crosses as text and **not** as a parse.
+///
+/// The largest single saving on this wire, and the one worth a test of its own: on a measured 30MB
+/// session reasoning was 1.6MB of the 4.05MB `history` event, and the host draws it as a three-line
+/// peek of `row.text`. Its parse was the most expensive thing the shell produced per session opened
+/// (29ms) and nothing read it.
+///
+/// Asserted through `draws_markdown` rather than through a rendered event, because the emit path is
+/// C and cannot be captured here; the pairing with the response shape is the test above.
+test "a reasoning block is not drawn as markdown" {
+  assert_true(draws_markdown("reply"))
+  for kind in ["thinking", "user", "tool", "note"] {
+    assert_true(
+      draws_markdown(kind) == false,
+      msg="\{kind} is drawn from its text",
+    )
+  }
+}
+
+///|
 /// A block's rendering crosses as the same parse the `history` event carries, from the same `md`
 /// package — and it names how much of it the host is expected to already have.
 ///
@@ -366,7 +411,7 @@ test "a block's rendering carries its parse and the index it starts at" {
   )
   // Nothing to parse is the one value the host treats as "draw the text instead". Asserted through
   // the JSON literal rather than the value's own printer, because it is the literal that crosses.
-  inspect(blocks_of("") is Json::Null, content="true")
+  inspect(blocks_of("reply", "") is Json::Null, content="true")
 }
 
 ///|
@@ -561,7 +606,13 @@ test "the images event says what is attached and whether it can be sent" {
 /// that does not exist, and a turn that has not happened, are both fields left out rather than zeroes.
 /// A host that decoded `cache_hit` as a number would print `0%` for a conversation with no prompt,
 /// which is a claim about the provider's cache rather than a fact.
-test "the usage event carries the totals, the prompt size and the last turn" {
+///
+/// The context block is asserted the same way round: a figure for the next request, where that figure
+/// came from, what part of it the reader cannot change, and whether the window is nearly full. The
+/// three ways those go wrong are all here — a figure reported as a measurement when it was a guess, a
+/// session with nothing in it reported as a context of the system prompt's size, and a window that is
+/// about to be compacted reported as nothing special.
+test "the usage event carries the totals, the context pressure and the last turn" {
   let total : @core.SessionUsage = {
     input: 1200,
     output: 340,
@@ -585,8 +636,15 @@ test "the usage event carries the totals, the prompt size and the last turn" {
     cost: 0.000928,
     present: true,
   }
+  let context : ContextFacts = {
+    tokens: 3000,
+    provider_measured: true,
+    overhead: 1300,
+    window: 128000,
+    compact_soon: false,
+  }
   let fields = match
-    usage_event("/store/4001.jsonl", total, 2000, 128000, last) {
+    usage_event("/store/4001.jsonl", total, 2000, context, last) {
     Object(fields) => fields
     _ => fail("the usage event is not an object")
   }
@@ -597,7 +655,18 @@ test "the usage event carries the totals, the prompt size and the last turn" {
   inspect(fields.get("turns").unwrap().stringify(), content="3")
   inspect(fields.get("total").unwrap().stringify(), content="2340")
   inspect(fields.get("prompt").unwrap().stringify(), content="2000")
+  // The number that decides when the conversation is summarized, and it is *larger* than the prompt
+  // size on purpose: the prompt is what the last request measured, and this is that plus what has
+  // been added since.
+  inspect(fields.get("context").unwrap().stringify(), content="3000")
+  inspect(
+    fields.get("context_source").unwrap().stringify(),
+    content="\"provider\"",
+  )
+  inspect(fields.get("overhead").unwrap().stringify(), content="1300")
   inspect(fields.get("window").unwrap().stringify(), content="128000")
+  inspect(fields.get("compact_soon").unwrap().stringify(), content="false")
+  inspect(fields.get("reasoning").unwrap().stringify(), content="60")
   // 800 of 2000 prompt tokens were cached.
   inspect(fields.get("cache_hit").unwrap().stringify(), content="\"40\"")
   // Cost is already formatted by `core`, because that is where the decimals decision lives.
@@ -623,7 +692,7 @@ test "the usage event carries the totals, the prompt size and the last turn" {
     replies: 0,
   }
   let bare = match
-    usage_event("/store/4001.jsonl", empty, 0, 128000, no_last_turn()) {
+    usage_event("/store/4001.jsonl", empty, 0, empty_context(), no_last_turn()) {
     Object(fields) => fields
     _ => fail("the usage event is not an object")
   }
@@ -632,7 +701,100 @@ test "the usage event carries the totals, the prompt size and the last turn" {
     bare.get("last_cost") is None,
     msg="a turn that never happened was priced",
   )
+  assert_true(
+    bare.get("last_cache_read") is None,
+    msg="a last turn that never happened was given cache readings",
+  )
   inspect(bare.get("prompt").unwrap().stringify(), content="0")
+  // And no context: a session that has asked nothing has not "used the system prompt", which is what
+  // a figure of `overhead` here would say.
+  inspect(bare.get("context").unwrap().stringify(), content="0")
+  inspect(
+    bare.get("context_source").unwrap().stringify(),
+    content="\"estimated\"",
+  )
+  inspect(bare.get("compact_soon").unwrap().stringify(), content="false")
+}
+
+///|
+/// A context with nothing in it, as `context_facts` builds one for an empty session.
+///
+/// Written out rather than derived from a session because the two properties under test are the ones
+/// an empty session exists to check: the figure is zero, and it is *not* a measurement.
+fn empty_context() -> ContextFacts {
+  {
+    tokens: 0,
+    provider_measured: false,
+    overhead: 1300,
+    window: 128000,
+    compact_soon: false,
+  }
+}
+
+///|
+/// A window that is nearly full says so, and the last turn's own cache and reasoning come with it.
+///
+/// Both are the figures a reader reaches for when one turn was much cheaper than another, and neither
+/// is derivable from the session totals: a turn whose prompt was already cached is one the totals show
+/// as expensive.
+test "a nearly full window and a cached last turn are both visible" {
+  let total : @core.SessionUsage = {
+    input: 100,
+    output: 20,
+    cache_read: 900,
+    cache_write: 0,
+    reasoning: 0,
+    total_tokens: 120,
+    cost: {
+      input: 0.000014,
+      output: 0.0000028,
+      cache_read: 0.00000042,
+      cache_write: 0.0,
+      total: 0.00001722,
+    },
+    replies: 1,
+  }
+  let last_usage : @core.Usage = {
+    input: 40,
+    output: 20,
+    cache_read: 900,
+    cache_write: 0,
+    reasoning: Some(11),
+    total_tokens: 60,
+    cost: {
+      input: 0.0000056,
+      output: 0.0000028,
+      cache_read: 0.00000042,
+      cache_write: 0.0,
+      total: 0.00000882,
+    },
+  }
+  let last : LastTurn = {
+    usage: last_usage,
+    model_calls: 1,
+    tool_calls: 0,
+    cost: 0.00000882,
+    present: true,
+  }
+  let tight : ContextFacts = {
+    tokens: 120000,
+    provider_measured: false,
+    overhead: 1300,
+    window: 128000,
+    compact_soon: true,
+  }
+  let fields = match
+    usage_event("/store/4001.jsonl", total, 119000, tight, last) {
+    Object(fields) => fields
+    _ => fail("the usage event is not an object")
+  }
+  inspect(fields.get("compact_soon").unwrap().stringify(), content="true")
+  inspect(
+    fields.get("context_source").unwrap().stringify(),
+    content="\"estimated\"",
+  )
+  inspect(fields.get("last_cache_read").unwrap().stringify(), content="900")
+  inspect(fields.get("last_reasoning").unwrap().stringify(), content="11")
 }
 
 ///|
@@ -1090,4 +1252,151 @@ test "the turn's end forgets its tool" {
   })
   clear_running_tool(open)
   assert_true(open.running_tool is None)
+}
+
+///|
+/// Paging a transcript: the rules the reader feels.
+///
+/// These are arithmetic over rows, so they are asserted without a session, a window or an emit — the
+/// same reason `page_of` is a pure function. The two that matter most are the two a reader would notice
+/// immediately: a page is **never empty** (a window that scrolls into nothing looks broken), and a page
+/// **never ends mid-turn** (the host's grouping, `WeiModel.turns(of:)`, describes a turn as "a question
+/// and everything after it", and half of one is a conversation that cannot be shown).
+
+///|
+/// Rows for a session of `turns` turns, each `fill` characters of answer.
+fn rows_of(turns : Int, fill? : Int = 10) -> Array[Json] {
+  let rows : Array[Json] = []
+  let mut n = 0
+  for turn in 0..<turns {
+    n += 1
+    rows.push(Json::object(Map([
+      ("kind", Json::string("user")),
+      ("id", Json::string("h-\{n}")),
+      ("text", Json::string("question \{turn}")),
+    ])))
+    n += 1
+    rows.push(Json::object(Map([
+      ("kind", Json::string("reply")),
+      ("id", Json::string("h-\{n}")),
+      ("text", Json::string("x".repeat(fill))),
+    ])))
+  }
+  rows
+}
+
+///|
+/// The ids of a page, in order.
+fn ids_of(rows : Array[Json]) -> Array[String] {
+  rows.map(fn(row) {
+    match row {
+      Json::Object(fields) =>
+        match fields.get("id") {
+          Some(Json::String(value)) => value
+          _ => ""
+        }
+      _ => ""
+    }
+  })
+}
+
+///|
+test "the first page is the newest turns and says what to ask for next" {
+  let (page, oldest, more) = page_of(rows_of(10), "", 3, 1_000_000)
+  // Three turns, newest last: ids 15..20, and the reader has more above.
+  assert_eq(ids_of(page), ["h-15", "h-16", "h-17", "h-18", "h-19", "h-20"])
+  assert_eq(oldest, "h-15")
+  assert_true(more)
+}
+
+///|
+/// The page before a cursor ends **exactly** where the cursor starts — no gap, no overlap — and that is
+/// the whole contract between the two sides.
+test "the page before a cursor ends where the cursor is" {
+  let rows = rows_of(10)
+  let (first, oldest, _) = page_of(rows, "", 3, 1_000_000)
+  let (second, older, _) = page_of(rows, oldest, 3, 1_000_000)
+  // The two pages are adjacent and do not overlap.
+  assert_eq(ids_of(second), ["h-9", "h-10", "h-11", "h-12", "h-13", "h-14"])
+  assert_eq(older, "h-9")
+  // Walking all the way up reaches the first row and then says there is nothing more.
+  let (third, third_oldest, more) = page_of(rows, older, 3, 1_000_000)
+  assert_eq(ids_of(third), ["h-3", "h-4", "h-5", "h-6", "h-7", "h-8"])
+  assert_eq(third_oldest, "h-3")
+  assert_true(more)
+  // The last page is the head of the session, and it says there is nothing before it.
+  let (fourth, fourth_oldest, none) = page_of(rows, third_oldest, 3, 1_000_000)
+  assert_eq(ids_of(fourth), ["h-1", "h-2"])
+  assert_eq(fourth_oldest, "h-1")
+  assert_true(none == false, msg="that was the first row, so there is no page before it")
+  assert_true(first.length() > 0)
+}
+
+///|
+/// **A page is never empty.** A budget of nothing still answers with the turn it is standing on, because
+/// a host that asked for more and got nothing stops asking — and the reader is left at the top of a
+/// conversation with no way further up.
+test "a page is never empty, however small the budget" {
+  // Four turns, three allowed, and a byte budget of one: the answer is the newest turn, whole.
+  let (page, oldest, more) = page_of(rows_of(4), "", 3, 1)
+  assert_eq(ids_of(page), ["h-7", "h-8"])
+  assert_eq(oldest, "h-7")
+  assert_true(more)
+  // And a session that *is* one page long is returned whole, budget or no budget: this is the path
+  // every ordinary session takes, and it must not be able to come back empty.
+  let (all, first, none) = page_of(rows_of(2), "", 6, 1)
+  assert_eq(ids_of(all), ["h-1", "h-2", "h-3", "h-4"])
+  assert_eq(first, "h-1")
+  assert_true(none == false)
+}
+
+///|
+/// **A page never ends mid-turn**: whatever the budget, the row it starts on is a `user` row — unless it
+/// starts at the beginning of the session, which is the one place a page can start on anything.
+test "a page always starts on a question" {
+  for cap in [1, 40, 100, 200, 400, 800] {
+    let (page, _, _) = page_of(rows_of(8, fill=200), "", 4, cap)
+    assert_true(page.length() > 0)
+    assert_eq(
+      row_kind(page[0]),
+      "user",
+      msg="a page starting mid-turn, with budget \{cap}",
+    )
+  }
+  // And the same walking up from a cursor.
+  let (first, oldest, _) = page_of(rows_of(8, fill=200), "", 2, 1_000_000)
+  let (second, _, _) = page_of(rows_of(8, fill=200), oldest, 4, 120)
+  assert_true(second.length() > 0)
+  assert_eq(row_kind(second[0]), "user")
+  assert_true(first.length() > 0)
+}
+
+///|
+/// A cursor this session does not have — a stale request, or a session rewritten under the host — is
+/// answered with the newest page rather than with nothing.
+test "an unknown cursor is answered with the newest page" {
+  let (page, oldest, more) = page_of(rows_of(5), "h-does-not-exist", 2, 1_000_000)
+  assert_eq(oldest, "h-7")
+  assert_true(more)
+  assert_eq(ids_of(page), ["h-7", "h-8", "h-9", "h-10"])
+}
+
+///|
+/// A session with nothing in it has no pages, and the answer says so rather than looking like a page
+/// that failed.
+test "an empty session has no pages" {
+  let (page, oldest, more) = page_of([], "", 6, 262144)
+  assert_true(page.is_empty())
+  assert_eq(oldest, "")
+  assert_true(more == false)
+}
+
+///|
+/// The page ends just before the cursor, so a host that has rows *after* the cursor keeps them. Asserted
+/// because the page is built backwards from the cursor, and "ends where the cursor is" is the property
+/// the host's prepend depends on.
+test "the cursor row itself is not in the page" {
+  let rows = rows_of(4)
+  let (page, _, _) = page_of(rows, "h-5", 6, 1_000_000)
+  assert_eq(ids_of(page), ["h-1", "h-2", "h-3", "h-4"])
 }

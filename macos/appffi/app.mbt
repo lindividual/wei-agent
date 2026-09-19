@@ -1009,16 +1009,117 @@ fn images_event(
 /// `prompt` is the size of the most recent request as the provider measured it, which is the honest
 /// answer to "how full is the context": it is what was actually sent, not an estimate of what would
 /// be. Before anything has been sent there is no measurement, and zero is what that means.
-fn say_usage(open : Open) -> Unit {
+///
+/// The other half of the context story comes with it now — what the *next* request would cost, and
+/// whether that is close enough to the window for compaction. See `ContextFacts`.
+async fn Shell::say_usage(self : Shell, open : Open) -> Unit {
+  let facts = self.context_facts(open)
   emit(
     usage_event(
       open.path,
       open.session.usage(),
       open.session.last_prompt_tokens(),
-      @core.model_spec_for(open.model_id).0.context_window,
+      facts,
       open.last_turn,
     ),
   )
+}
+
+///|
+/// What the next request would cost, and how sure that is.
+///
+/// Apart from the totals because it answers a different question, and the difference is the one that
+/// changes what happens next: the totals are what has been spent, and this is what is still
+/// available. `tokens` is `core`'s anchored figure (the last size the provider reported, plus what
+/// has been added since), and `source` says which of the two it leaned on — a host that prints an
+/// estimate as if it were a measurement would be lying about the only number that decides when the
+/// conversation is summarized.
+///
+/// `overhead` is carried separately rather than folded in, because "of which ~1,300 are the system
+/// prompt and the tool schemas" is the part a reader can do nothing about and therefore wants named
+/// rather than hidden in the total.
+///
+/// `compact_soon` is the same comparison the driver makes before it sends a request
+/// (`@core.should_compact` with the reserve for this window), asked here so that the window can warn
+/// *before* the turn that would summarize the conversation — which is the one moment this figure is
+/// worth a reader's attention.
+priv struct ContextFacts {
+  tokens : Int
+  provider_measured : Bool
+  overhead : Int
+  window : Int
+  compact_soon : Bool
+}
+
+///|
+/// The system prompt this session's next turn would send.
+///
+/// One definition, used by the turn that sends it and by the figure that prices it: a context
+/// estimate built from a *different* prompt than the one on the wire is an estimate of a request
+/// that never goes out, and the two would drift the first time either side changed.
+async fn Shell::system_prompt(
+  self : Shell,
+  open : Open,
+  tools : Array[@core.ToolDef],
+) -> String {
+  @core.build_system_prompt(open.cwd, tools, mode=self.settings.tool_mode, sections=[
+    self.instructions(open),
+  ])
+}
+
+///|
+/// The instructions this workspace contributes, if any.
+///
+/// Split out because building it reads `AGENTS.md` and that is the only part of the estimate that is
+/// I/O. Kept async rather than cached: a file the reader edits mid-session is a file the next turn
+/// picks up, and a cached copy would price a prompt that no longer exists.
+async fn Shell::instructions(self : Shell, open : Open) -> String {
+  @core.choose_instructions(
+    self.settings,
+    @platform.workspace_agents_md(open.cwd),
+  ).text
+}
+
+///|
+/// Where the session stands against the window its model has.
+///
+/// `tokens` is zero for a conversation with nothing in it yet, and that is the same convention
+/// `prompt` uses: a session that has asked nothing has no context to report, and a figure would be
+/// the system prompt's own size dressed up as the conversation's.
+async fn Shell::context_facts(self : Shell, open : Open) -> ContextFacts {
+  let window = @core.model_spec_for(open.model_id).0.context_window
+  let tools = @core.tools_for_mode(self.settings.tool_mode)
+  let overhead = @core.request_overhead_tokens(
+    self.system_prompt(open, tools),
+    tools,
+  )
+  let has_conversation = !open.session.context().messages.is_empty()
+  if !has_conversation {
+    return {
+      tokens: 0,
+      provider_measured: false,
+      overhead,
+      window,
+      compact_soon: false,
+    }
+  }
+  // The prepared context rather than the raw one: trimming is part of what the next request will
+  // carry, and a figure that ignored it would run ahead of the conversation it describes.
+  let pressure = @core.context_pressure(
+    open.session.prepared_context().messages,
+    overhead,
+  )
+  {
+    tokens: pressure.tokens,
+    provider_measured: pressure.source is @core.Provider,
+    overhead,
+    window,
+    compact_soon: @core.should_compact(
+      pressure.tokens,
+      window,
+      reserve_tokens=@core.CompactionSettings::for_window(window).reserve_tokens,
+    ),
+  }
 }
 
 ///|
@@ -1030,7 +1131,7 @@ fn usage_event(
   path : String,
   total : @core.SessionUsage,
   prompt : Int,
-  window : Int,
+  context : ContextFacts,
   last : LastTurn,
 ) -> Json {
   // Built as a list of pairs, because the shape is flat and the optional fields are the only
@@ -1070,8 +1171,45 @@ fn usage_event(
         repr=total.cache_write.to_string(),
       ),
     ),
+    // Session reasoning tokens. Absent from a provider that does not report them, so it stays zero
+    // rather than becoming a missing field: a total of nothing is zero, which is a fact, and the
+    // host draws it as nothing said rather than as nothing measured.
+    (
+      "reasoning",
+      Json::number(
+        total.reasoning.to_double(),
+        repr=total.reasoning.to_string(),
+      ),
+    ),
     ("prompt", Json::number(prompt.to_double(), repr=prompt.to_string())),
-    ("window", Json::number(window.to_double(), repr=window.to_string())),
+    // What the next request would carry, which is the prompt figure plus whatever has been added
+    // since it was measured. Zero for a conversation with nothing in it — see `context_facts`.
+    (
+      "context",
+      Json::number(context.tokens.to_double(), repr=context.tokens.to_string()),
+    ),
+    (
+      "context_source",
+      Json::string(
+        if context.provider_measured {
+          "provider"
+        } else {
+          "estimated"
+        },
+      ),
+    ),
+    (
+      "overhead",
+      Json::number(
+        context.overhead.to_double(),
+        repr=context.overhead.to_string(),
+      ),
+    ),
+    (
+      "window",
+      Json::number(context.window.to_double(), repr=context.window.to_string()),
+    ),
+    ("compact_soon", Json::boolean(context.compact_soon)),
     ("cost", Json::string(@core.format_cost(total.cost.total))),
     ("cost_input", Json::string(@core.format_cost(total.cost.input))),
     ("cost_output", Json::string(@core.format_cost(total.cost.output))),
@@ -1113,6 +1251,32 @@ fn usage_event(
         ),
       ),
     )
+    // The last turn's own cache and reasoning figures, which are what explain the two cases a reader
+    // notices: a turn that was cheap because its prompt was already cached, and a turn that was
+    // expensive without producing much text. Both are left out when they are nothing, the way the
+    // session's cache share is: a field that exists only to hold a zero is a field the host has to
+    // learn to ignore.
+    if last.usage.cache_read > 0 {
+      fields.push(
+        (
+          "last_cache_read",
+          Json::number(
+            last.usage.cache_read.to_double(),
+            repr=last.usage.cache_read.to_string(),
+          ),
+        ),
+      )
+    }
+    match last.usage.reasoning {
+      Some(reasoning) if reasoning > 0 =>
+        fields.push(
+          (
+            "last_reasoning",
+            Json::number(reasoning.to_double(), repr=reasoning.to_string()),
+          ),
+        )
+      _ => ()
+    }
     fields.push(
       (
         "last_input",
@@ -1287,7 +1451,12 @@ async fn Shell::run_turn(
   // being the newest thing that happened — a tool, the other kind of text, or the end of the turn —
   // which are exactly the moments the host stops appending to that row.
   let close_piece = () => {
-    say_blocks(path, piece_id, piece_text.to_string(), open.live)
+    // Only the kinds the host draws as markdown: see `draws_markdown`. A finished reasoning block
+    // still crosses as text — that is what the peek draws — and the parse it would have carried was
+    // the largest single thing on this wire.
+    if draws_markdown(piece_kind) {
+      say_blocks(path, piece_id, piece_text.to_string(), open.live)
+    }
     open.live = None
     piece_text.reset()
     piece_length = 0
@@ -1440,7 +1609,17 @@ async fn Shell::run_turn(
       // for — so the totals are re-sent. `last_turn` is deliberately not updated: a turn that did not
       // finish has no figures of its own to report, and describing half a turn as the last one would
       // be the one place this line lies.
-      say_usage(open)
+      self.say_usage(open)
+      // A turn that failed is one the reader can still carry on: the log keeps it open, so the work it
+      // did is in front of the model and `continue` re-sends the question it had been asked. The notice
+      // that asks the reader to choose goes out **now**, with the error, rather than at the next switch
+      // — a notice that arrives ten minutes later, when the reader has moved on, is a notice that
+      // arrives for no reason.
+      //
+      // `busy` is cleared by hand first: the line below answers "is anything running this turn", and
+      // the `defer` that would otherwise have cleared the flag has not run yet.
+      clear_busy(open)
+      say_session(open)
       return
     }
   }
@@ -1463,7 +1642,10 @@ async fn Shell::run_turn(
     finished.tool_calls,
     finished.usage.cost.total,
   )
-  say_usage(open)
+  self.say_usage(open)
+  // The turn is closed in the log, so the snapshot the host is drawing from is out of date — and it
+  // is out of date in the direction of a decision that no longer exists.
+  say_session(open)
 }
 
 ///|
@@ -1610,6 +1792,10 @@ fn command_of(line : String) -> Command {
     // its path cut off would have been billed for and answered. The empty argument reaches the same
     // handler as a bad one, so what the reader gets is the sentence that says what was missing.
     "/open" => Open("")
+    // The transcript's own paging: the id of the oldest row the host already has. A bare word is
+    // answered with the same "which argument is missing" sentence as every other path command, because
+    // a request to page that says nothing about where from is one the shell cannot guess at.
+    "/earlier" => Earlier("")
     "/delete" => Delete("")
     "/attach" => Attach("")
     "/attach-temp" => AttachTemp("")
@@ -1625,6 +1811,8 @@ fn command_of(line : String) -> Command {
         Model(line[7:].trim().to_owned())
       } else if line == "/model" {
         ReportModel
+      } else if line.has_prefix("/earlier ") {
+        Earlier(line[9:].trim().to_owned())
       } else if line.has_prefix("/open ") {
         Open(line[6:].trim().to_owned())
       } else if line.has_prefix("/delete ") {
@@ -1710,6 +1898,8 @@ priv enum Command {
   /// A new session in a directory the host chose.
   NewIn(String)
   Open(String)
+  /// The id of the oldest row the host has, so the page before it can be sent.
+  Earlier(String)
   Delete(String)
   ListSettings
   SaveKey(String)
@@ -1761,6 +1951,11 @@ async fn[X] Shell::start_turn(
   // looking at the window while a turn ran, and it looked exactly like the feature not existing.
   open.busy = true
   self.say_sessions()
+  // And the notice above this transcript goes with them. Starting a turn *is* the reader's answer to
+  // that notice — a prompt typed while it is on screen is a decision to move on — and the host has to
+  // hear it when it happens, or it draws a question that has already been answered, next to two
+  // buttons that cannot be pressed while this session runs.
+  say_session(open)
   group.spawn_bg(
     () => {
       open.turns.acquire()
@@ -1821,7 +2016,7 @@ async fn Shell::serve(self : Shell) -> Unit {
   // same situation: a conversation the reader is looking at and the window is not. The call also
   // carries what it has spent, which model it runs on and whether one can be sent a picture — every
   // snapshot the composer's own two lines and its model picker are drawn from.
-  say_open(self.shown())
+  self.say_open(self.shown())
   // The list goes out with the first breath rather than when the sidebar asks for it: the window is
   // drawn before this line arrives, and a sidebar that fills in a moment later is a sidebar the
   // reader watches arrive.
@@ -1896,11 +2091,16 @@ async fn Shell::serve(self : Shell) -> Unit {
                   self.start_turn(group, open, prompt, continuing=true)
                 // Nothing open: said rather than silently doing nothing, because the host offers
                 // this from a notice that its own copy of the session may be out of date about.
-                None =>
+                // The snapshot goes out with the sentence so that the stale notice cannot outlive
+                // the click: an error that leaves what it is about on the screen reads as a click
+                // that did nothing.
+                None => {
                   say_error("nothing to continue: that turn has already ended")
+                  say_session(open)
+                }
               }
             }
-          DismissTurn => if self.idle() { dismiss_turn(open) }
+          DismissTurn => if self.idle() { self.dismiss_turn(open) }
           ListSessions => self.say_sessions()
           // **Not gated on being idle**, and this is a fix rather than a loosening. The gate was written when
           // `create` replaced the one session the shell held, so starting another *was* destructive to a turn
@@ -1912,6 +2112,16 @@ async fn Shell::serve(self : Shell) -> Unit {
           // Not gated on being idle: showing another session disturbs no file, which is the
           // whole of what the gate was ever protecting.
           Open(path) => self.show(path)
+          // Not gated on being idle, and not about the session on screen either: paging is a read of
+          // the log the host is already drawing, it sends rows for *that* session, and refusing it
+          // while a turn runs would mean a reader cannot scroll back through a conversation that is
+          // still being written.
+          Earlier(before) =>
+            if before == "" {
+              say_error("earlier: no row id")
+            } else {
+              say_earlier(open.path, open.session, before)
+            }
           Delete(path) => if self.idle() { self.discard(path) }
           ListSettings => self.say_settings()
           SaveKey(key) => self.save_key(key)
@@ -1936,7 +2146,7 @@ async fn Shell::serve(self : Shell) -> Unit {
           // Cheap, and the honest answer to "is anything still moving": the popover that shows the
           // figures asks when it opens rather than trusting a line the reader may have read a turn
           // ago.
-          ReportUsage => say_usage(open)
+          ReportUsage => self.say_usage(open)
           ReportJobs => self.say_jobs_now()
           KillJob(id) => self.kill_job(id)
           ReportModel => say_status(open.path, model_report(open))
@@ -1997,6 +2207,12 @@ fn model_report(open : Open) -> String {
 ///|
 /// Start the shell, and say so if it could not start.
 async fn start() -> Unit {
+  // Before anything can run a command. The tools the agent spawns — `bash`, `script` — inherit this
+  // process's environment, and started from Finder that environment is launchd's, which carries no
+  // `PATH` beyond the system's: a reader's `moon` is invisible to the agent while working in their
+  // terminal. `platform/environment.mbt` has what is asked to fix it and why it is asked rather
+  // than guessed.
+  @platform.install_login_path()
   let shell = Shell::open() catch {
     err => {
       say_error("could not start: \{err}")

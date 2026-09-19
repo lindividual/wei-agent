@@ -323,7 +323,7 @@ async fn Shell::show(self : Shell, path : String) -> Unit {
       // rows to it that are not in the session this process is holding, and replaying the log would
       // replace them with less than the reader has already seen.
       self.display(open)
-      say_show(open)
+      self.say_show(open)
       self.say_sessions()
     }
     None => {
@@ -347,7 +347,7 @@ async fn Shell::show(self : Shell, path : String) -> Unit {
         loaded,
       )
       self.display(open)
-      say_open(open)
+      self.say_open(open)
       self.say_sessions()
     }
   }
@@ -359,28 +359,50 @@ async fn Shell::show(self : Shell, path : String) -> Unit {
 /// Sent on its own so that the host can stop showing one transcript before the next arrives. The two
 /// events are a pair, and the state between them — a window with no session on screen — is a state
 /// the host should be able to draw rather than avoid.
+/// Whether the reader is being asked to decide about a turn that never finished.
+///
+/// This predicate is the whole of the notice the host draws above a transcript, and it has **two**
+/// halves. The first is the log: a turn whose opening entry has no outcome is one that was left
+/// behind — the process died, or it failed, or it was stopped and never resumed. The second is this
+/// process: `turn_in_flight` is true for the whole time a turn *runs*, because the opening entry is
+/// written before any of the work happens, so the log half alone described a healthy turn as an
+/// interrupted one. That is a notice offering to continue a conversation that is being continued,
+/// with two buttons that cannot be pressed while it runs — drawn for the reader who switched away
+/// and came back to watch the turn they left behind working.
+///
+/// Named rather than written inline because it answers one question — *may the reader choose?* — and
+/// the host cannot answer it: the host has no log.
+fn interrupted_turn(open : Open) -> Bool {
+  open.session.turn_in_flight() && !open.busy
+}
+
+///|
+/// The session that is now open and what a reader needs to know about it: where its tools run, which
+/// model it calls, and whether there is a turn waiting on a decision.
+///
+/// Sent whenever that changes — a switch, a turn starting, a turn ending, a turn failing — because the
+/// host draws from this snapshot and has no other way to hear that it is out of date: a notice left on
+/// screen describes a decision that may already have been made.
 fn say_session(open : Open) -> Unit {
-  // A turn that is in the log without an outcome is one that was interrupted — the process died, or
-  // it was stopped and never resumed. The host draws it as a notice with two ways out, and this is
-  // where it learns that the state exists at all: nothing else on the wire says it.
-  let interrupted = open.session.turn_in_flight()
+  let interrupted = interrupted_turn(open)
+  // The question that turn was asked, read back from the log rather than retyped: continuing means
+  // carrying on with the same question, and the reader should be shown which one they are being
+  // offered. Empty when there is nothing to offer, so the pair cannot be read as "here is a choice,
+  // and here is what it is about" when there is no choice.
+  let prompt = if interrupted {
+    match open.session.in_flight_prompt() {
+      Some(question) => question
+      None => ""
+    }
+  } else {
+    ""
+  }
   emit(
     session_event(open.path, "session", [
       ("cwd", Json::string(open.cwd)),
       ("model", Json::string(@core.model_spec_for(open.model_id).0.label())),
       ("interrupted", Json::boolean(interrupted)),
-      // The question the interrupted turn was asked, read back from the log rather than retyped:
-      // continuing means carrying on with the same question, and the reader should be shown which
-      // one they are being offered.
-      (
-        "interrupted_prompt",
-        Json::string(
-          match open.session.in_flight_prompt() {
-            Some(prompt) => prompt
-            None => ""
-          },
-        ),
-      ),
+      ("interrupted_prompt", Json::string(prompt)),
     ]),
   )
 }
@@ -404,9 +426,9 @@ fn say_session(open : Open) -> Unit {
 /// same swap land on a transcript that already has them: what the host does with rows for a session it
 /// is not showing is file them under that session, so the switch brings them in with it. One render
 /// instead of two.
-fn say_open(open : Open) -> Unit {
+async fn Shell::say_open(self : Shell, open : Open) -> Unit {
   say_history(open.path, open.session)
-  say_show(open)
+  self.say_show(open)
 }
 
 ///|
@@ -415,23 +437,216 @@ fn say_open(open : Open) -> Unit {
 /// Everything but the history, which is what a re-show wants. The figures come along because a switch
 /// changes which session's numbers are on screen, the model it runs on, and therefore whether a picture
 /// can be attached to it at all — none of which the host can work out from the rows alone.
-fn say_show(open : Open) -> Unit {
+async fn Shell::say_show(self : Shell, open : Open) -> Unit {
   say_session(open)
-  say_usage(open)
+  self.say_usage(open)
   say_models(open)
   say_images(open)
 }
 
+// ── paging the history ─────────────────────────────────────────────────────
+//
+// A session's transcript is replayed in **pages**, newest first, and the reader gets more by scrolling
+// up. The reason is measured rather than aesthetic: one 19-turn session on this machine is 2.06MB of
+// rows, and a single `history` event carrying all of it cost the host 17ms of decoding on the main
+// thread and — much more — built a **32,000-point** scroll document, which is what makes landing at the
+// end of it take ~240ms (measured; the same rows with short text and a 4,300-point document cost 88ms,
+// so it is the height, not the count). A page keeps both numbers small, and the shell does not have to
+// read or parse less: it still holds the whole session so a turn can continue from it.
+//
+// The cursor is an **id**, not an offset: the host says "I have these rows, the oldest is `h-N`" and
+// the shell answers with the page that ends just before it. Ids are already unique within a session
+// (`h-N`, counted per session) and every row carries one, so a cursor needs no new fact — and it cannot
+// drift the way a count would if a turn appended rows while a page was in flight.
+
 ///|
-/// The conversation of a session, as rows the host can draw.
+/// The most turns one page holds.
+///
+/// Six, from the sizes measured on a real 19-turn session: the newest 6 turns were 320KB of 2.06MB
+/// (15%), and the newest 5 were 247KB. Together with `page_max_bytes` this keeps the first page around
+/// a tenth of a long session — and for the short sessions most people open, it is *everything*, so the
+/// feature does not engage at all.
+fn page_max_turns() -> Int {
+  6
+}
+
+///|
+/// How many bytes of rows one page may hold.
+///
+/// 256KB is the size that matters for the two costs above: at roughly 4KB of JSON per point of laid-out
+/// text for these sessions, a page of this size builds a document in the low thousands of points rather
+/// than the tens of thousands.
+fn page_max_bytes() -> Int {
+  262144
+}
+
+///|
+/// One page of a session's rows, and what the host needs to ask for the next one.
+///
+/// A pure function of rows and a cursor, so the rule can be asserted without a session, a window or an
+/// emit: `before` is the id of the oldest row the host already has (empty for the first page, which is
+/// the newest), and the answer is the rows that end just before it.
+///
+/// The budget is spent **newest first and never below one turn**, and a turn is a unit because that is
+/// what a reader scrolled to: a page that stopped mid-turn would leave the host holding half a
+/// conversation whose other half is one request away, which is a state the transcript's own grouping
+/// (`WeiModel.turns(of:)`) has no way to describe.
+pub fn page_of(
+  rows : Array[Json],
+  before : String,
+  max_turns : Int,
+  max_bytes : Int,
+) -> (Array[Json], String, Bool) {
+  // Where the host's oldest row is. An unknown cursor (empty, or an id this session does not have —
+  // a stale request, or a session that was rewritten under it) is answered with the newest page
+  // rather than with nothing: the host replaces what it has in that case, so the worst outcome is the
+  // reader's scroll position resetting, and the alternative is a window that never fills.
+  let end = if before == "" {
+    rows.length()
+  } else {
+    match index_of_id(rows, before) {
+      Some(index) => index
+      None => rows.length()
+    }
+  }
+  if end <= 0 {
+    return ([], "", false)
+  }
+  let mut start = end
+  let mut turns = 0
+  let mut bytes = 0
+  while start > 0 {
+    // **Work in turns, and the boundary falls on a question.** Walking row by row and stopping when
+    // the budget runs out puts the boundary wherever the last row happened to be — which is how the
+    // first version of this pulled a reply into a page whose own question was above the boundary, and
+    // left the host a page starting on an answer.
+    //
+    // A turn is `[its question .. the row before the next question)`. So the turn that ends at `start`
+    // begins at the nearest `user` row below it, and index 0 when there is none — a transcript whose
+    // head has no question in it (a resumed session, or one that was compacted) is still a boundary.
+    let mut open = start
+    while open > 0 && row_kind(rows[open - 1]) != "user" {
+      open -= 1
+    }
+    // The walk stopped one *past* the question — at the row after it, or at 0 when the transcript's
+    // head has no question in it (a resumed session, or a compacted one). Either way that is the
+    // boundary, and it is where a page is allowed to begin.
+    if open > 0 {
+      open -= 1
+    }
+    let mut size = 0
+    for index in open..<start {
+      size += rows[index].stringify().length() + 1
+    }
+    // The first turn is always taken — a page of no turns is not a page — and after that both budgets
+    // apply. Both are stated as "does this turn fit", never as "stop mid-turn".
+    if turns >= max_turns {
+      break
+    }
+    if turns > 0 && bytes + size > max_bytes {
+      break
+    }
+    start = open
+    bytes += size
+    turns += 1
+  }
+  let page : Array[Json] = []
+  for index in start..<end {
+    page.push(rows[index])
+  }
+  let oldest = if page.length() == 0 {
+    ""
+  } else {
+    page_row_id(page[0])
+  }
+  (page, oldest, start > 0)
+}
+
+///|
+/// The id of a page row, or the empty string for a row that is not an object with one.
+///
+/// Named apart from `app.mbt`'s `row_id(kind, turn, seq)` deliberately: that one *makes* a live row's
+/// name and this one *reads* a page row's, and the two are different questions that happen to collide
+/// on a word.
+fn page_row_id(row : Json) -> String {
+  match row {
+    Json::Object(fields) =>
+      match fields.get("id") {
+        Some(Json::String(value)) => value
+        _ => ""
+      }
+    _ => ""
+  }
+}
+
+///|
+/// The kind of a page row, or the empty string.
+fn row_kind(row : Json) -> String {
+  match row {
+    Json::Object(fields) =>
+      match fields.get("kind") {
+        Some(Json::String(value)) => value
+        _ => ""
+      }
+    _ => ""
+  }
+}
+
+///|
+/// Where a row with this id is.
+fn index_of_id(rows : Array[Json], id : String) -> Int? {
+  for i in 0..<rows.length() {
+    if page_row_id(rows[i]) == id {
+      return Some(i)
+    }
+  }
+  None
+}
+
+///|
+/// The fields both `history` and `earlier` carry: the rows, the id the next page starts before, and
+/// whether there is one.
+fn page_fields(page : (Array[Json], String, Bool)) -> Array[(String, Json)] {
+  let (rows, oldest, more) = page
+  [
+    ("rows", Json::array(rows)),
+    // Named for what it is rather than for what it does: the *oldest row in this page*, which is the
+    // id the host sends back to ask for what comes before it.
+    ("oldest", Json::string(oldest)),
+    ("has_more", Json::boolean(more)),
+  ]
+}
+
+///|
+/// The conversation of a session, as rows the host can draw — the newest page of it.
 ///
 /// One place, because two situations need it and they are the same situation: a switch, where the host
 /// is looking at the wrong session, and a startup on a resumed session, where it is looking at none.
 fn say_history(path : String, session : @core.Session) -> Unit {
   emit(
-    session_event(path, "history", [
-      ("rows", Json::array(history_rows(session))),
-    ]),
+    session_event(path, "history", page_fields(page_of(
+      history_rows(session),
+      "",
+      page_max_turns(),
+      page_max_bytes(),
+    ))),
+  )
+}
+
+///|
+/// The page before one the host already has.
+///
+/// A separate event from `history` because the host treats them differently — `history` *replaces* the
+/// transcript it names, and this one **prepends** to it. Sending `history` again would throw away live
+/// rows the shell has not written down yet, which is the same reason a re-show sends no history at all.
+fn say_earlier(path : String, session : @core.Session, before : String) -> Unit {
+  emit(
+    session_event(path, "earlier", page_fields(page_of(
+      history_rows(session),
+      before,
+      page_max_turns(),
+      page_max_bytes(),
+    ))),
   )
 }
 
@@ -511,7 +726,7 @@ async fn Shell::open_fresh(self : Shell, cwd : String) -> Unit {
   self.display(open)
   // The model is the log's answer for a session that has one, and a session nobody has run has no
   // log to answer — so it stays whatever was in force, which is what the reader last chose.
-  say_open(open)
+  self.say_open(open)
   self.say_sessions()
 }
 
@@ -663,12 +878,33 @@ priv struct Draft {
 }
 
 ///|
-/// One block of text as the host draws it: parsed markdown, or null when there is nothing to parse.
+/// Whether the host draws a row of this kind as markdown.
+///
+/// **One answer, because two sides have to agree about it.** The host reads `row.blocks` in exactly
+/// one place — `RootView`'s `case .reply` — and draws every other kind from its own fields: a question
+/// is `Text(row.text)`, reasoning is a three-line peek of `row.text`, a tool is its output, a note is a
+/// line. A parse sent for those rows is a parse nobody reads.
+///
+/// That is not a micro-optimisation, it was measured on a real 30MB session: the reasoning alone was
+/// **1.6MB of the 4.05MB `history` event** (68% of the rows by bytes), and parsing it cost the shell
+/// 29ms per session opened. It also made the host's decode of that event slower and, with it, the time
+/// a switch spends with nothing on screen.
+///
+/// The rule is stated as a function rather than as a comparison at each call site so that a row kind
+/// added later has one place to be considered — and the failure if it is forgotten is a parse the host
+/// ignores, not a row that does not render.
+fn draws_markdown(kind : String) -> Bool {
+  kind == "reply"
+}
+
+///|
+/// One block of text as the host draws it: parsed markdown, or null when there is nothing to parse —
+/// or when the row is one the host draws from its text alone (`draws_markdown`).
 ///
 /// Null rather than an empty array, because "this row has no markdown" and "this row's markdown is
 /// empty" are the same fact, and the host's rule is the simple one: parsed blocks or the text.
-fn blocks_of(text : String) -> Json {
-  if text == "" {
+fn blocks_of(kind : String, text : String) -> Json {
+  if text == "" || !draws_markdown(kind) {
     Json::null()
   } else {
     @md.blocks_json(text)
@@ -848,7 +1084,7 @@ fn history_rows(session : @core.Session) -> Array[Json] {
           // has no markdown parse of its own, and `AttributedString(markdown:)` — what the app used
           // before this — never sees a table and drops a fenced block's language. `null` for a row
           // with no text, so the host has one rule: blocks if they are there, plain text otherwise.
-          ("blocks", blocks_of(draft.text)),
+          ("blocks", blocks_of(draft.kind, draft.text)),
           ("name", Json::string(draft.name)),
           ("detail", Json::string(draft.detail)),
           ("output", Json::string(output)),
@@ -916,7 +1152,7 @@ async fn Shell::rename(self : Shell, path : String, name : String) -> Unit {
   // Only if the renamed session is the one on screen: renaming a conversation the reader is not
   // looking at must not replace what they are looking at.
   if path == self.current {
-    say_show(open)
+    self.say_show(open)
   }
   // The label cache is keyed by path *and* modification time, so appending invalidates it on its
   // own — but only once the file's mtime has moved. Re-read here rather than assumed, because a
@@ -955,13 +1191,14 @@ async fn Shell::restore(self : Shell, path : String) -> Unit {
 /// is announced again by every later reader, so deciding not to continue it has to be *recorded* to
 /// actually be a decision — otherwise the notice comes back, and the same question is asked a third
 /// time.
-async fn dismiss_turn(open : Open) -> Unit {
+async fn Shell::dismiss_turn(self : Shell, open : Open) -> Unit {
   if !open.session.turn_in_flight() {
-    say_error(
-      "nothing to dismiss: that turn has already ended",
-      session=open.path,
-    )
-    say_open(open)
+    // A status line rather than an error, because the reader asked for the turn not to be resumed and
+    // it is not: there is nothing left to resume. What was wrong is the *host's* copy, one event
+    // behind — so the snapshot is re-sent, or the click would leave on screen the very notice it was
+    // about. No history: nothing was appended, so it is the snapshot that can be stale and not the rows.
+    say_status(open.path, "nothing to dismiss: that turn has already ended")
+    self.say_show(open)
     return
   }
   let now = @env.now().reinterpret_as_int64()
@@ -976,5 +1213,5 @@ async fn dismiss_turn(open : Open) -> Unit {
   @platform.append_entry(open.path, entry)
   open.session = open.session.add_entries([entry])
   say_status(open.path, "closed the interrupted turn")
-  say_open(open)
+  self.say_open(open)
 }

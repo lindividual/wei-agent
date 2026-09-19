@@ -203,7 +203,7 @@ macos/make-app.sh release           # → macos/dist/wei Agent.app（约 3.7MB�
 行为和修复前一模一样。
 
 脚本做四件事：跑 `build-moonbit.sh`，`swift build -c release`，组装 bundle（可执行文件改名叫
-`wei`，写 `Info.plist`，生成图标），最后 `codesign --sign -`。
+`wei`，写 `Info.plist`，生成图标），最后签名（默认 `wei-dev`，见下一条）。
 
 几个决定：
 
@@ -212,9 +212,14 @@ macos/make-app.sh release           # → macos/dist/wei Agent.app（约 3.7MB�
 - **图标是程序画出来的**（`make-icon.swift`）。提交一个 `.icns` 等于提交一个谁都不能 review、
   谁都不能改的二进制；写成几行 CoreGraphics，改个颜色就是改一行。
 - **版本号读 `moon.mod`。** 打包脚本自带一个版本常量，就是一个没人记得改的数字。
-- **签名是 ad-hoc 的**（`codesign --sign -`），够本机跑，也够诚实地说明「别人从网上下载会被
-  Gatekeeper 挡住」。真要发布得换成 Developer ID 加公证；`WEI_BUNDLE_ID` 环境变量可以
-  覆盖 bundle id，因为 identifier 一旦变了，macOS 就会忘记哪个 App 对应哪个文档/窗口。
+- **签名用本机一张固定的自签身份**（`macos/make-identity.sh` → `wei-dev`），没有才退回 ad-hoc。
+  这不是为了 Gatekeeper —— 两种签法下载来的副本都会被挡住。是为了 **TCC**：macOS 把权限绑在 App
+  的 designated requirement 上，而 ad-hoc 的 requirement 里是 **cdhash**（每次构建都变），自签的
+  里面是**证书**（不变）。于是 ad-hoc 下每次重打包都等于换了个 App、权限要重问一遍；固定身份之后，
+  重建的 App 在 macOS 眼里还是同一个。机制与实测见 `docs/macos-pitfalls.md`。
+  `WEI_SIGN_IDENTITY` 覆盖身份名，`WEI_SIGN_IDENTITY=-` 强制 ad-hoc；`WEI_BUNDLE_ID` 覆盖
+  bundle id，因为 identifier 一旦变了，macOS 就会忘记哪个 App 对应哪个文档/窗口。
+  真要发布仍然得换成 Developer ID 加公证。
 
 **为什么必须打包，而不只是「方便」**：`.app` 是一个身份 —— 名字、图标、一个稳定不变的
 identifier，以及 `LSApplicationCategoryType` 这类让系统知道它是什么的东西。裸可执行文件在
@@ -600,13 +605,66 @@ rows」的处理本来就是**归档到那个会话名下**（`ShellClient.recei
 在**空转录**上直接返回 —— 也就是说旧顺序下它只有**一次机会，而那次机会必然落空**。rows 在前之后，
 同一句代码就有了可落的地方。这个配对在 `TranscriptRoutingTests` 里断言。
 
-**还欠着的**（按影响排序，都还没做）：
+#### 第二次量：一条事件的两半，各自贵在哪（真机、release、1353 行会话）
 
-1. **history 不分页**：3.7MB 一条事件、主线程 51ms 解码。web UI 有「load earlier」窗口，这里没有。
-   真正的解法是只发最近 N 轮 + 「还有 M 轮」的入口，那会改变一条长会话「屏幕上有什么」的语义，
-   要先定 UX。
-2. **解码在主 actor 上**：`Envelope.decode` 51ms 全在主线程。挪到 detached task 需要
-   `ShellEvent`/`Row`/`Block` 满足 `Sendable`；如果做了第 3 条（history 变小），这条大半会自然消失。
+白屏没有被第一次修复消掉 —— 顺序修掉的是**空帧**，而剩下的是**主线程被占住**（线程忙的时候什么都画不出来）。
+这次把一条 `history` 事件按「谁花的钱」拆开（一个临时探针在 `ShellClient.receive` 里逐阶段计时，
+跑完即删；探针本身要便宜，见下面的「量具的坑」）：
+
+| 阶段 | 修之前 | 修之后 |
+|---|---|---|
+| `trimmingCharacters` + `WireLog.elided`（**日志没开**时也在跑） | **101.0ms** | **0.0ms** |
+| `Envelope.decode`（1353 行，主 actor） | 58.3ms | **17.4ms** |
+| `Conversation.apply`（纯模型） | 0.0ms | 0.0ms |
+| 线上字节 | 4,050,741 | **2,330,593**（-42%） |
+
+两处改动：
+
+1. **`WireLog` 的两半都要进 `if WireLog.isOn`**（`ShellClient.receive`）。`WireLog.line` 自己有一道
+   guard，但**参数在调用前就算好了**：`trimmingCharacters` 会拷贝整行，`elided` 会扫一遍（找到附件
+   字段还会重写）。一条事件带整个会话时，这是**为一份没在写的日志付 101ms 主线程**。一个关掉的功能
+   在最贵的那条事件上花掉十分之一秒，是最贵的一种「关掉的功能」。
+2. **只给会被画成 markdown 的行发解析**（`draws_markdown`，`macos/appffi/sessions.mbt`）。宿主只在
+   **一处**读 `row.blocks`（`RootView` 的 `case .reply`）：提问是 `Text(row.text)`、思考是三行尾巴、
+   工具是输出、note 是一行。别的行带上解析 = 没人读的字节。同一条会话上量到：
+   reasoning 占了 4.05MB 里的 **1.6MB**（按字节 68%），而 shell 为它每次开会话花 29ms。live 路径
+   同一条规则（`close_piece`）。
+
+#### 还剩下的：那 240ms 是**视图**在造
+
+wire 两半修完之后，切换时最大的一次主线程阻塞仍在，而它不再是数据：
+
+| 会话 | 行数 | 视图数 | 文档高度 | 最大阻塞 |
+|---|---|---|---|---|
+| 薄（1353 行，文本截到 120 字） | 1353 | 63 | 4,354pt | **88ms** |
+| 真（1353 行，原文） | 1353 | 70 | 32,562pt | **175ms** |
+
+**同样的行数、几乎同样的视图数，差的是高度（4354 vs 32562pt）** —— 也就是「把视口落到一个三万点高的
+懒布局文档的末尾」这件事本身，而不是行数、也不是解码。试过 `.defaultScrollAnchor(.bottom, for: .initialOffset)`
+来让首帧就落在末尾：**168.6ms vs 174.7ms，在噪声里**，所以锚点不是杠杆，已回退（不留下一个量不出效果
+的改动）。
+
+**所以下一个杠杆是「让文档别那么高」，也就是窗口化**（只发最近 N 轮 + 「还有 M 轮」入口）——
+它同时是上面第 1 条的欠账，而且要改一条长会话「屏幕上有什么」的语义，**要先定 UX**。
+
+#### 量具的坑（这次的，值得记）
+
+- **`String(describing:)` 在这条路径上是 166ms**：探针一开始把 `"\(event)"` 当标签打进日志，
+  而那个 `event` 有 1353 行 —— 测的是量具，不是被测物。现在打的是 `String(line.prefix(48))`。
+- **`inkFraction` 那种「每 tick 把整个窗口渲进一张位图」的探针，自己就是 33ms/帧**：于是「切换之后
+  每帧都 33ms」看起来像应用的病，其实是量具的病。改成只在一头一尾量。
+- **debug 构建的 release 结论是不可信的**：上一轮 `parse_session_file(30MB)` 在 debug 下 320ms、
+  release 下 54ms（5 倍）。这次的数字全部来自 `swift build -c release`。
+- 这台机器**屏幕录制权限被拒**，所以「白屏」我仍然没有**看到像素**。这次的证据是「主线程被占住多长」
+  及其分解 —— 那是白屏的成因，不是白屏本身。
+
+**还欠着的**（按影响排序）：
+
+1. **history 不分页**（现在有了明确理由）：一条事件 2.33MB、主线程 17ms 解码，更贵的是它让转录变成
+   三万点高的文档、把切换推到 ~170ms。解法是只发最近 N 轮 + 「还有 M 轮」的入口；会改变长会话
+   「屏幕上有什么」的语义，**要先定 UX**。
+2. **解码最后那 17ms** 仍在主 actor 上。挪到 detached task 需要 `ShellEvent`/`Row`/`Block` 满足
+   `Sendable`；窗口化之后这条大半会自然消失。
 3. **`turns(of:)` 每次 body 都算**（release 0.14ms / 1353 行）和 **50ms 的命令轮询**：都量过，都小。
 
 ### 转录按「轮」折叠 —— 对齐 web UI
@@ -1055,6 +1113,11 @@ shell —— 它嗅字节、读完删掉。所以这个 sheet 完全不知道「
 里，窗口大小不参与 —— 小窗口画的和大窗口画的是同一张图，也不用在导出时重新布局。**1× 的墨是 2.5 个
 像素**，每条斜线都是阶梯，而看图的是一个没有屏幕的读者 —— 所以导出按 2× 渲染，得到 1280×840 的
 像素。
+
+**纸的圆角用转录画一张图的同一个半径**（`Wei.Radius.panel`，见 `Picture`）：读者画的形状，就是它
+变成图片之后被画成的形状 —— 直角卡片装在圆角 sheet 里、发出去又变成圆角卡片，是这个流程里唯一一处
+「画的」和「拿到的」不是一个东西。**笔迹不跟着这个形状裁**：发出去的是一张普通矩形，在屏幕上下刀会
+把一条画在角上的笔迹从眼里删掉、却留在文件里。
 
 **屏幕和 PNG 是同一个 `SketchCanvas` 的两次渲染**，不是两份画法：一份「箭头长什么样」的第二个实现，
 只会在发出去之后才暴露两边不一致。

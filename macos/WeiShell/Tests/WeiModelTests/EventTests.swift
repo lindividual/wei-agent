@@ -153,10 +153,10 @@ final class EventTests: XCTestCase {
         XCTAssertEqual(items[0].name, "shot.png")
     }
 
-    func testTheUsageEventCarriesTheTotalsThePromptAndTheLastTurn() throws {
+    func testTheUsageEventCarriesTheTotalsTheContextAndTheLastTurn() throws {
         let event = try XCTUnwrap(
             decode(
-                #"{"kind":"usage","turns":3,"total":2340,"input":1200,"output":340,"cache_read":800,"cache_write":0,"prompt":2000,"window":128000,"cost":"0.000928","cost_input":"0.000240","cost_output":"0.000680","cost_cache_read":"0.000008","cost_cache_write":"0.000000","cache_hit":"40","last_model_calls":2,"last_tool_calls":1,"last_total":1200,"last_input":900,"last_output":300,"last_cost":"0.000500"}"#
+                #"{"kind":"usage","turns":3,"total":2340,"input":1200,"output":340,"cache_read":800,"cache_write":0,"reasoning":60,"prompt":2000,"context":2400,"context_source":"provider","overhead":1300,"window":128000,"compact_soon":false,"cost":"0.000928","cost_input":"0.000240","cost_output":"0.000680","cost_cache_read":"0.000008","cost_cache_write":"0.000000","cache_hit":"40","last_model_calls":2,"last_tool_calls":1,"last_total":1200,"last_input":900,"last_output":300,"last_cache_read":800,"last_reasoning":45,"last_cost":"0.000500"}"#
             )
         )
         guard case let .usage(usage) = event else {
@@ -164,16 +164,66 @@ final class EventTests: XCTestCase {
         }
         XCTAssertEqual(usage.turns, 3)
         XCTAssertEqual(usage.total, 2340)
+        XCTAssertEqual(usage.reasoning, 60)
         XCTAssertEqual(usage.prompt, 2000)
+        XCTAssertEqual(usage.context, 2400)
+        XCTAssertEqual(usage.overhead, 1300)
         XCTAssertEqual(usage.window, 128_000)
+        XCTAssertFalse(usage.compactSoon)
         XCTAssertEqual(usage.cost, "0.000928")
         XCTAssertEqual(usage.cacheHit, "40")
+        XCTAssertTrue(usage.contextIsMeasured)
         let last = try XCTUnwrap(usage.last)
         XCTAssertEqual(last.modelCalls, 2)
         XCTAssertEqual(last.toolCalls, 1)
+        XCTAssertEqual(last.cacheRead, 800)
+        XCTAssertEqual(last.reasoning, 45)
         XCTAssertEqual(last.cost, "0.000500")
-        // 2000 of 128000, which is what the ring under the composer draws.
-        XCTAssertEqual(try XCTUnwrap(usage.contextFill), 2000.0 / 128_000.0, accuracy: 1e-9)
+        // The **next** request against the window, not the last one: 2400 of 128000, when the
+        // measurement behind it was 2000. The ring answers "how close is this conversation to being
+        // summarized", so it has to move with what has been appended since the last reply.
+        XCTAssertEqual(try XCTUnwrap(usage.contextFill), 2400.0 / 128_000.0, accuracy: 1e-9)
+    }
+
+    /// A payload from before the context fields existed still decodes, and says it is a guess.
+    ///
+    /// The version skew this file exists to catch: the shell and the window are built separately, and
+    /// a window that refused a usage event for a missing field would show no figures at all rather
+    /// than slightly old ones. The figure falls back to the measured prompt, which is the honest
+    /// answer available when the shell does not send a better one.
+    func testAnOlderUsagePayloadStillDecodes() throws {
+        let event = try XCTUnwrap(
+            decode(
+                #"{"kind":"usage","turns":1,"total":10,"input":10,"output":0,"cache_read":0,"cache_write":0,"prompt":10,"window":1000,"cost":"0.000000","cost_input":"0.000000","cost_output":"0.000000","cost_cache_read":"0.000000","cost_cache_write":"0.000000"}"#
+            )
+        )
+        guard case let .usage(usage) = event else {
+            return XCTFail("expected usage, got \(event)")
+        }
+        XCTAssertEqual(usage.context, 0)
+        XCTAssertEqual(usage.overhead, 0)
+        XCTAssertEqual(usage.reasoning, 0)
+        XCTAssertFalse(usage.compactSoon)
+        // The last request's own measured size rather than zero, and still a measurement: `prompt` is
+        // what the provider reported, which is why the fallback is worth having.
+        XCTAssertEqual(usage.contextFigure, 10)
+        XCTAssertTrue(usage.contextIsMeasured)
+        XCTAssertEqual(try XCTUnwrap(usage.contextFill), 10.0 / 1000.0, accuracy: 1e-9)
+    }
+
+    /// A window that is nearly full says so.
+    func testANearlyFullContextIsMarkedForCompaction() throws {
+        let event = try XCTUnwrap(
+            decode(
+                #"{"kind":"usage","turns":1,"total":0,"input":0,"output":0,"cache_read":0,"cache_write":0,"prompt":0,"context":120000,"context_source":"estimated","overhead":1300,"window":128000,"compact_soon":true,"cost":"0.000000","cost_input":"0.000000","cost_output":"0.000000","cost_cache_read":"0.000000","cost_cache_write":"0.000000"}"#
+            )
+        )
+        guard case let .usage(usage) = event else {
+            return XCTFail("expected usage, got \(event)")
+        }
+        XCTAssertTrue(usage.compactSoon)
+        XCTAssertFalse(usage.contextIsMeasured, "an estimate is not a measurement")
+        XCTAssertEqual(try XCTUnwrap(usage.contextFill), 120_000.0 / 128_000.0, accuracy: 1e-9)
     }
 
     /// A session with nothing in it says so by leaving fields out.

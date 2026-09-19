@@ -70,7 +70,15 @@ struct Sketchpad: View {
             .frame(width: Self.paper.width, height: Self.paper.height)
             // White whatever the appearance is. Paper is paper: the marks are made in black, and a
             // canvas that followed dark mode would be a hole in the ink rather than a place to draw.
-            .background(.white)
+            //
+            // Rounded at the radius the transcript rounds a picture with (`Picture`,
+            // `Wei.Radius.panel`), because those two should be one shape: a square card drawn inside a
+            // rounded sheet, and then shown again as a rounded card after sending, was the one place in
+            // this flow where the reader drew in something other than what they got back.
+            .background(
+                .white,
+                in: RoundedRectangle(cornerRadius: Wei.Radius.panel, style: .continuous)
+            )
             .contentShape(Rectangle())
             .gesture(drawing)
             // A crosshair over it, because the pointer is a pen here and not a pointer. `set()` rather
@@ -81,7 +89,16 @@ struct Sketchpad: View {
             }
             // A hairline, not the app's glass: this is a *document*, the one surface in the window that
             // stands in for a sheet of paper, and a material would make it read as another control.
-            .overlay(Rectangle().strokeBorder(Wei.Palette.separator, lineWidth: 1))
+            //
+            // The ink is deliberately **not** clipped to this shape, and the reason is the export: the
+            // picture that goes out is a plain rectangle, so a clip here would take a mark off the
+            // screen that is still in the file — a stroke drawn into a corner would come back as one
+            // the reader never saw. Unclipped, a mark is in the same place on both sides, and all the
+            // rounding hides is twelve points of white.
+            .overlay(
+                RoundedRectangle(cornerRadius: Wei.Radius.panel, style: .continuous)
+                    .strokeBorder(Wei.Palette.separator, lineWidth: 1)
+            )
             .accessibilityLabel("Sketch paper")
     }
 

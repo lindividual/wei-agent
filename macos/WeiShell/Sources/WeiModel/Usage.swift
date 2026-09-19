@@ -34,12 +34,22 @@ public struct Attachment: Equatable, Decodable, Identifiable {
 /// Apart from the session totals because it answers a different question: the totals are what this
 /// conversation has spent, and this is what the question just answered cost — which is the one a
 /// reader is deciding about when they are deciding whether to ask another.
+///
+/// The cache and reasoning figures are the two that explain a turn which surprises a reader: one that
+/// cost almost nothing because its prompt was already cached, and one that cost a lot while writing
+/// few words because it thought first. Both are the *last* turn's, not the session's, for the same
+/// reason the cost is: a session total tells you a conversation was like that, and this tells you the
+/// one you just paid for was.
 public struct TurnUsage: Equatable {
     public let modelCalls: Int
     public let toolCalls: Int
     public let total: Int
     public let input: Int
     public let output: Int
+    /// Prompt tokens that came from the provider's cache rather than being billed fresh.
+    public let cacheRead: Int
+    /// Thinking tokens, when the provider reports them at all.
+    public let reasoning: Int?
     /// Already formatted by the shell, which is where the decimals rule lives.
     public let cost: String
 
@@ -49,6 +59,8 @@ public struct TurnUsage: Equatable {
         total: Int,
         input: Int,
         output: Int,
+        cacheRead: Int = 0,
+        reasoning: Int? = nil,
         cost: String
     ) {
         self.modelCalls = modelCalls
@@ -56,6 +68,8 @@ public struct TurnUsage: Equatable {
         self.total = total
         self.input = input
         self.output = output
+        self.cacheRead = cacheRead
+        self.reasoning = reasoning
         self.cost = cost
     }
 }
@@ -75,11 +89,29 @@ public struct Usage: Equatable, Decodable {
     public let output: Int
     public let cacheRead: Int
     public let cacheWrite: Int
+    /// Thinking tokens for the whole session, when the provider reports them. Zero for one that does
+    /// not, which is a fact about the provider rather than about the conversation — the panel says so
+    /// by leaving the row out.
+    public let reasoning: Int
     /// The size of the most recent request, as the provider measured it. Zero before anything has
     /// been sent, which is what that means rather than a missing value.
     public let prompt: Int
+    /// What the **next** request would carry, as `core`'s anchored estimate: the last size the
+    /// provider reported plus everything appended since. This is the figure the compaction decision is
+    /// made on, so it is the one to show against the window — `prompt` is where the last request
+    /// landed, which is history rather than pressure.
+    public let context: Int
+    /// Whichever of the two `context` leaned on. `nil` only for a payload written before this field
+    /// existed, which is drawn as an estimate rather than as a measurement it cannot prove.
+    public let contextSource: String?
+    /// Tokens every request carries outside the conversation: the system prompt and the tool schemas.
+    /// Named separately because a reader can do nothing about it, and a context figure without it
+    /// looks like the mirror of the conversation when it is nothing of the kind.
+    public let overhead: Int
     /// The context window of the model this session runs on.
     public let window: Int
+    /// Whether this conversation is close enough to the window that the next turn could summarize it.
+    public let compactSoon: Bool
     public let cost: String
     public let costInput: String
     public let costOutput: String
@@ -92,9 +124,11 @@ public struct Usage: Equatable, Decodable {
     public let last: TurnUsage?
 
     private enum CodingKeys: String, CodingKey {
-        case turns, total, input, output, prompt, window, cost
+        case turns, total, input, output, prompt, window, cost, context, overhead, reasoning
         case cacheRead = "cache_read"
         case cacheWrite = "cache_write"
+        case contextSource = "context_source"
+        case compactSoon = "compact_soon"
         case costInput = "cost_input"
         case costOutput = "cost_output"
         case costCacheRead = "cost_cache_read"
@@ -105,6 +139,8 @@ public struct Usage: Equatable, Decodable {
         case lastTotal = "last_total"
         case lastInput = "last_input"
         case lastOutput = "last_output"
+        case lastCacheRead = "last_cache_read"
+        case lastReasoning = "last_reasoning"
         case lastCost = "last_cost"
     }
 
@@ -116,8 +152,13 @@ public struct Usage: Equatable, Decodable {
         output = try fields.decode(Int.self, forKey: .output)
         cacheRead = try fields.decode(Int.self, forKey: .cacheRead)
         cacheWrite = try fields.decode(Int.self, forKey: .cacheWrite)
+        reasoning = (try fields.decodeIfPresent(Int.self, forKey: .reasoning)) ?? 0
         prompt = try fields.decode(Int.self, forKey: .prompt)
+        context = (try fields.decodeIfPresent(Int.self, forKey: .context)) ?? 0
+        contextSource = try fields.decodeIfPresent(String.self, forKey: .contextSource)
+        overhead = (try fields.decodeIfPresent(Int.self, forKey: .overhead)) ?? 0
         window = try fields.decode(Int.self, forKey: .window)
+        compactSoon = (try fields.decodeIfPresent(Bool.self, forKey: .compactSoon)) ?? false
         cost = try fields.decode(String.self, forKey: .cost)
         costInput = try fields.decode(String.self, forKey: .costInput)
         costOutput = try fields.decode(String.self, forKey: .costOutput)
@@ -136,6 +177,10 @@ public struct Usage: Equatable, Decodable {
                 total: (try fields.decodeIfPresent(Int.self, forKey: .lastTotal)) ?? 0,
                 input: (try fields.decodeIfPresent(Int.self, forKey: .lastInput)) ?? 0,
                 output: (try fields.decodeIfPresent(Int.self, forKey: .lastOutput)) ?? 0,
+                // Absent means the turn read nothing from the cache, which is the same fact as zero
+                // — unlike `reasoning`, where absent means the provider does not report it at all.
+                cacheRead: (try fields.decodeIfPresent(Int.self, forKey: .lastCacheRead)) ?? 0,
+                reasoning: try fields.decodeIfPresent(Int.self, forKey: .lastReasoning),
                 cost: cost
             )
         } else {
@@ -145,9 +190,34 @@ public struct Usage: Equatable, Decodable {
 
     /// How full the context is, as a fraction of the window. `nil` before anything has been sent,
     /// because an empty bar and a bar at zero are two different claims.
+    ///
+    /// Measured on `contextFigure` rather than `prompt`, which is the difference between "what the
+    /// last request was" and "what the next one will be". The bar answers the second question, so it
+    /// is the second figure: a conversation that has grown 20k tokens since its last reply is nearer
+    /// the window than that reply's own size makes it look.
     public var contextFill: Double? {
-        guard prompt > 0, window > 0 else { return nil }
-        return min(1.0, Double(prompt) / Double(window))
+        guard contextFigure > 0, window > 0 else { return nil }
+        return min(1.0, Double(contextFigure) / Double(window))
+    }
+
+    /// The figure the ring and the panel draw: what the next request would carry.
+    ///
+    /// Falls back to `prompt` for a payload written before the shell sent a context figure — the last
+    /// request's own measured size. That is a worse answer to the question the ring asks, and a much
+    /// better one than zero: the shell and the window are built together, so the only way to meet this
+    /// is a window running against a shell older than it, and the right response to that is slightly
+    /// old figures rather than none.
+    public var contextFigure: Int { context > 0 ? context : prompt }
+
+    /// Whether the figure behind the ring rests on something the provider reported.
+    ///
+    /// True for an anchored estimate — its whole construction is "the last measured prompt plus what
+    /// was added" — and true for the fallback above, which *is* a measurement. False only when nothing
+    /// in this conversation has been measured at all, which is the one case where the figure is the
+    /// four-bytes-per-token heuristic and nothing else.
+    public var contextIsMeasured: Bool {
+        guard context > 0 else { return prompt > 0 }
+        return contextSource == "provider"
     }
 }
 

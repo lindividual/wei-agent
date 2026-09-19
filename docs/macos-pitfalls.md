@@ -7,7 +7,7 @@
 （只跑了 `swift build` 没重新打包，于是宿主打开了旧二进制，而构建是「成功」的）。散文挡不住手快，
 表格可以。
 
-分六组。每条都是这次开发中**实际撞到**的，不是预想的。
+分七组。每条都是开发中**实际撞到**的，不是预想的。
 
 **开发循环，从头到尾（这三条必须一起做）**：
 
@@ -86,7 +86,7 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | **语音听写：字一个个正确地上屏了，但永远没有"最终结果"，句子永远不会变成可发送的文本** | `DictationTranscriber` / `SpeechTranscriber` 的 `reportingOptions` 里**只给 `.volatileResults` 不会产生 final**：实测 3 秒的句子→12 个 partial、**0 个 final**；`finalize(through:)`、`finish(after:)`、`finalizeAndFinishThroughEndOfInput()` 都改变不了；把音频流 `finish()` 掉只会让结果序列以 `CancellationError` 结束。两个选项是两件不同的事：一个是"早点告诉我"，一个是"定下来" | 加上 **`.frequentFinalization`**。同一段音频、其它参数不变：`FINAL: 请帮我加一个语音输入的按钮`。而且它会**在说话中间就定稿**（句中的停顿就是边界），所以消费侧必须能处理"句子在还在听的时候结束"：定稿一句→继续听下一句，只有读者按停才结束会话 |
 | 看着麦克风按钮按下去，**开头一两秒说的话丢了** | 麦克风和模型是同时启动的：音频已经在流，而模型还在加载（实测：两个 run 各丢一次，一次丢句首的「请帮我」，一次丢整句） | **先 `prepareToAnalyze(in:)` 再开采**（实测：模型热时 ~0.24s）。这个"正在准备"得是读者**看得见**的状态（按钮变成 `Starting to listen…`），否则就是一个没有解释的延迟 |
 | 想知道一个语音模型装没装 | **没有报错**：`SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith:)` 直接返回 `nil`，而且这个语言在 `supportedLocales` 里是有的。看文件也会一样：`AVAudioFile` 跑同样的音频会报 `SFSpeechErrorDomain Code=5 "No common audio format among modules"`（这个错误名和真实原因没关系） | 用 `AssetInventory.status(forModules:)`（`.installed` / `.supported`…）+ 有没有 `assetInstallationRequest`。**支持 ≠ 装了**：实测本机 `zh_CN` 是 `.installed` 而 `en_US` 在 `DictationTranscriber` 下报 `.supported` + `fmt=16000Hz`（能用，也没报要下载），同一个 `en_US` 在 `SpeechTranscriber` 下 `bestFormat=NIL` —— 两个模型不是一回事，**用 `DictationTranscriber`**（系统听写用的就是它，有 `.shortForm` 提示和 `.punctuation`/`.emoji`） |
-| 用 `ad-hoc` 签名重新打包后，麦克风权限又要重问一遍 | TCC 认的是代码签名，而 `codesign --sign -` 每次重建都产生不同的 cdhash —— 实测：重打包后跑，日志里 `authorizationStatus` 是 0、按钮等 5.5 秒才拿到 3（就是那个弹框）；另一轮重打包后又没问（系统似乎也认了 bundle path/identifier） | 开发时预期"写完一次、后面偶尔再问一次"，别把 TCC 弹框当成 app 的问题。（真要稳定就得用同一张 Developer ID 签名） |
+| 用 `ad-hoc` 签名重新打包后，麦克风权限又要重问一遍 | TCC 认的是代码签名，而 `codesign --sign -` 每次重建都产生不同的 cdhash —— 实测：重打包后跑，日志里 `authorizationStatus` 是 0、按钮等 5.5 秒才拿到 3（就是那个弹框）；另一轮重打包后又没问（系统似乎也认了 bundle path/identifier） | **给本机一张固定的自签身份**：`macos/make-identity.sh`（已接进 `make-app.sh`）。权限绑的是 App 的 designated requirement，而 `codesign -d -r- <app>` 能把它打出来：ad-hoc 的里面是 **cdhash**（每次构建都变），自签的里面是 **证书**（不变）。实测两个不同的二进制、同一张身份签：cdhash 不同（`cbb5…` vs `de6f…`），requirement **逐字节相同** —— 所以「重打包 = 换了个 App」被消掉了。换身份那一次权限会重问一次，之后不再问。**别指望私有 SPI 绕过这一步**：实测 `SLPreflightPostEventAccess`（私有）和 `CGPreflightPostEventAccess`（公开）同为 `false`，绕开的是“目标应用拒不接受事件”，不是 TCC |
 
 ## 五、验证与自动化（这次最费时间的一块）
 
@@ -101,7 +101,7 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | `osascript` 里找不到输入框 | 表单里有两个 `AXTextField`（设置面板的搜索框、输入框），按顺序取会取错 | 按 **position.y** 取最靠下的那个 |
 | 启动后拿到的 PID 不对 | `( … & )` 拿到的是**子 shell** 的 PID，不是 app 的 | 子 shell 里用 `exec env … /path/to/wei`，再 `echo $!` |
 | `pkill -f "Macos/wei"` 把自己也匹配上了 | `-f` 匹配整条命令行，而你的 `bash -c` 里就写着这个字符串 | 用锚定：`pkill -9 -f "Macos/wei$"`。**这条我照着写了又踩了**：`pkill -9 -f "Macos/wei"` 没杀掉任何一个 app（用户那个进程活得好好的），因为模式先匹配上了**它自己所在的 `bash -c`**，命令根本没走到那一步。教训是锚定要落在**参数的位置**上，`$` 放在路径后面；光把模式写短不算锚定 |
-| 反复启动后测到的行为不对 | **多个实例在跑**，你连的是上一个 | 每次测完按 PID 确认存活；断言时带上 PID / 窗口标题 |
+| 反复启动后测到的行为不对 | **多个实例在跑**，你连的是上一个 | 每次测完按 PID 确认存活；断言时带上 PID / 窗口标题。顺带：两个实例**在同一个会话里各发一句**是会交错写进同一个 `.jsonl` 的 —— `Open.turns` 那把 mutex 只管**本进程内**；为什么先不修、以及真要修时最小的形状，见 [ADR-0009](adr/0009-multi-session-coordination.md) |
 | 按 PID 找窗口号 | 用户的 app 和你的 demo 同时跑时，按 owner 名选窗口会选到**用户那个**（两个进程 owner 都叫 `wei Agent`） | 按 `kCGWindowOwnerPID` 过滤 `CGWindowListCopyWindowInfo`，取 `layer == 0` 且有标题那个；`.optionAll` 是必须的（见第六节） |
 | 看不见 `Settings…` 菜单项；或者想切设置窗左边的某一项，AX 里翻不到 | 主菜单在**主线程忙的时候还会重建**（启动早期能看到的菜单项，几秒后又一次 `NSApp.mainMenu` 就变了）；而列表行的 `AXPress` 返回 **-25206**（不支持该动作） | 菜单项拿不准就不要猜选择器（`sendAction(showSettingsWindow:)` 返回 `true` 却什么都不做）：按 desc 找主窗左下角那个 `Settings` 按钮按下去。切换左栏那一项用**设 `kAXSelectedAttribute`**（不是 `AXPress`） |
 | 想把窗口改小，好看清滚动边缘效果 | `kAXSizeAttribute` 写入返回 **-25200**（不可设） | 改小不行就换成**内容长的那一项**（Skills 会列一长串技能）再滚；或者去 `/tmp` 写一个只含布局的壳子（第六节） |
@@ -135,6 +135,10 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | 编辑 app 正在写的 `WEI_DEBUG` 日志，看到 0 字节，以为「宿主根本没读流」 | 句柄是**启动时**开好的（`WireLog` 的 `static let handle`），app 起来之后再 `rm` 或 `> file`，写入就落到那个已经不在的 inode 上了 | 要清空就先确认那个 pid 已经不在了；或者干脆换个文件名重新起一个。同理：**先起 app 再 `rm`** 会得到「一切正常但日志是空的」 |
 
 | 想在**没有辅助功能 / 屏幕录制**权限的机器上验一个 SwiftUI 改动（新 sheet、画布） | `AXIsProcessTrusted()` 和 `CGPreflightScreenCaptureAccess()` 都是 `false` —— 而截图只是只读、驱动要 AX，于是「窗口里到底长什么样」这一步**根本到不了**，不是难，是没路 | 把改动切成**不依赖窗口**的两半去验：**算术**进单元测试（`SketchTests`：拖拽矩形的归一化、多小的拖拽不算一笔、零长度箭头的两支）；**产物**走一遍真边界 —— 生成出来的 PNG 直接喂 `wei-cli` 的 `/attach-temp`，看回的 `images` 事件里是不是 `image/png`、文件是不是被删掉了。窗口那一半没验就**明说没验**，别把「模型对、字节对」说成「功能对」 |
+
+| 线上有**一条**事件比别的重几个数量级，主线程卡一下 | 两件事都在这条路上，而且都不在「解码」里：① **日志没开时的日志开销** —— `WireLog.line` 自己有 guard，但**参数在调用前就算好了**（`trimmingCharacters` 拷贝整行、`elided` 扫描并在找到附件时重写），于是 `WEI_DEBUG` 未设置时也为一条 4MB 事件付 **101ms 主线程**；② shell 为**没人画的行**发解析（reasoning 占 1.6MB/4.05MB） | ① 参数的计算一起进 guard（`if WireLog.isOn { … }`）；② 让「谁会读这个字段」在**一处**决定（`draws_markdown`），发出方与消费方共用那一个答案 |
+| 探针报出来的数字比应用还大 | 量具自己贵，而且贵在看不见的地方：**`String(describing:)` 一个有 1353 行的事件 = 166ms**；**每 tick 把整个窗口渲进位图 = 33ms/帧**（于是「切换后每帧 33ms」看着像应用的病） | 探针要跟被测物同量级：标签用 `String(line.prefix(48))` 而不是 `"\(event)"`；昂贵的渲染只在一头一尾做，不要放进每帧的循环。**先把量具本身量一遍**再相信它 |
+| 一个「让首帧落在末尾」的 SwiftUI 旋钮看起来像是解药 | `.defaultScrollAnchor(.bottom, for: .initialOffset)` 在实测里 **168.6 vs 174.7ms**，落在噪声里 —— 因为那 240ms 不在锚点上，而在「懒布局文档有三万点高」这件事本身 | 量了没效果就**回退**，别留下一个量不出效果的改动；换杠杆（降低文档高度 = 窗口化） |
 
 ## 六、调试手法（正面清单，别丢）
 
@@ -177,6 +181,12 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
   —— 只打事件日志，两次都会看起来正常。
 - **`wei-cli` 是同一套 agent 的终端形态**：怀疑是 shell 侧还是宿主侧时，先在终端复现 —— 这次
   shell 侧一次就通过了，问题定位在宿主，省掉大量窗口里的瞎试。
+- **`ps eww` 看不到运行期的 `setenv`。** 它打的是内核在 `exec` 时记下的那份环境副本，之后进程里
+  改过的变量**看不见**。这一轮我差点据此把一次**已经成功**的修复判成失败：启动后 `ps eww <pid>`
+  里 PATH 还是原来那四项，而进程内 `getenv` 已经不是了。要读活的 `environ` 就得**在那个进程里**读，
+  或者让一个同父进程的子进程把它继承下去再看。这次的验法是一个二十行的探针：`wei_boot` +
+  后台线程 `wei_run`，睡 3 秒后打印 `getenv("PATH")` —— 走的是和 app **完全同一条** `start()` 路径，
+  所以它验的是真边界，不是一份复制的逻辑。
 - **假模型比真 API 好用**：一个几十行的 python SSE server（`/tmp` 里现写）能构造工具调用、思考流、
   用量字段，而且是确定的。真 API 既慢又花钱，还不一定能复现你要的那次形状。注意它有个坑：请求体
   可能是 chunked 编码的（`curl` 那种），只按 `Content-Length` 读会拿到空 body —— 我第一次就是这么
@@ -227,3 +237,27 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
   （设 `kAXSelectedAttribute` 切换设置面板左栏，行不支持 `AXPress`）、`axpress`（按主窗左下的
   `Settings` 按钮）、`leftedge <png> y0:y1:label...`（量某条横带里最靠左的深色像素，用来对左边缘）。
   它们都是十几行 Swift、`swiftc` 直接编，不用建工程。
+
+## 七、运行环境（从 Finder 启动 ≠ 从终端启动）
+
+app 被 Finder 启动时父进程是 `launchd`，而 `launchd` **不继承读者终端的环境**。这不是理论：
+`macos/README.md` 早就为 `DEEPSEEK_API_KEY` 记过同一件事（所以 key 有设置面板兜着）。`PATH` 是
+同一个根因的另一半，而且一直没兜 —— 于是它是一个「终端里好使、agent 里找不到」的 bug。
+
+| 症状 | 原因 | 修法 |
+|---|---|---|
+| 终端里 `moon`（或 homebrew 装的任何东西）好使，agent 的 `bash` / `script` 说找不到 —— 同一台机器、同一个读者 | 从 Finder 启动的 app 继承的是 `launchd` 的环境，而 **`launchd` 根本不设 `PATH`**（实测 `launchctl getenv PATH` 为空）；`/bin/bash` 于是回退到编译期默认值（`getconf PATH` → `/usr/bin:/bin:/usr/sbin:/sbin`）。实测那个正在跑的 app：`PATH=/usr/bin:/bin:/usr/sbin:/sbin`、`SHELL=/bin/zsh`、`HOME=/Users/lucas`。`~/.moon/bin` 不在里面 —— 而工具描述向模型承诺的正是「和读者的终端一样」 | 启动时**问一次登录 shell**：`"$SHELL" -l -i -c` 打印一个 marker 加 `$PATH`，把结果并进本进程环境，之后 spawn 的一切都继承。代码在 `platform/environment.mbt`，调用于 `macos/appffi/app.mbt` 的 `start()`。**为什么要 marker**：rc 文件会在 stdout 上说话 —— 本机 `~/.zshrc` 第 2 行那个 source 写坏了（`source ~/.gitrcPATH="…"`，本该是两行），报错里就带着一段 `PATH=` 字样（它在 stderr 上，但换个 rc 文件就可能在 stdout）；「取最后一个 `PATH=`」会取到它，只认「最后一个带 marker 的行」就没有这个歧义。实测 28ms |
+
+两个决定看起来可以更省事，但都别省：
+
+- **是 merge，不是替换。** 登录 shell 知道读者的工具在哪，`launchd` 知道系统把什么放上了 PATH，
+  两者**互不包含** —— 少了后面那份连 `/usr/bin` 都没了，agent 什么命令都跑不起来。
+  顺序是登录 shell 在前：读者的 PATH 顺序是读者排的，任何后置条目盖掉前置条目都等于把那个安排作废。
+- **特意没有顺手把 rc 文件里的其它变量也搬过来**（比如 `DEEPSEEK_API_KEY`）。那会把「跑一次读者的
+  启动脚本」扩大成「到处翻环境里的秘密」，而 key 已经有一个正当入口（设置面板）。`PATH` 不一样：
+  它本来就不是秘密，而缺了它模型拿到的是一句与自己承诺相反的报错。
+
+探针有失败的可能（rc 文件把 shell 结束掉、超时、`SHELL` 指向一个已经卸掉的东西），所以有一条兜底
+列表（`~/.moon/bin`、`~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin`）。兜底只**加**不删：
+进程原有的条目一条都不能丢，那是有测试钉住的。另外 `fish` 不参与探测 —— 它的 `$PATH` 是列表、
+用空格分隔，问它得到的是一个**错的**答案，比没有答案更糟。
