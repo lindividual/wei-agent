@@ -9,19 +9,6 @@
 ///   moon run cli -- "explain what a monad is in one sentence"
 
 ///|
-/// The DeepSeek key, from the environment or the settings file.
-async fn api_key(home : String) -> String? {
-  match @env.get_env_var("DEEPSEEK_API_KEY") {
-    Some(k) if k != "" => Some(k)
-    _ =>
-      match @platform.load_settings(home).saved_api_key {
-        key if key != "" => Some(key)
-        _ => None
-      }
-  }
-}
-
-///|
 fn print_usage(usage : @core.Usage) -> Unit {
   let reasoning = match usage.reasoning {
     Some(n) => n.to_string()
@@ -41,11 +28,11 @@ async fn main {
   } else {
     "Reply with exactly: ready"
   }
-  let home = match @env.get_env_var("HOME") {
+  let home = match @platform.home_dir() {
     Some(h) => h
     None => abort("HOME is not set")
   }
-  let key = match api_key(home) {
+  let key = match @platform.api_key(home) {
     Some(k) => k
     None =>
       abort(

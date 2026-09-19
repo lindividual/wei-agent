@@ -1,8 +1,8 @@
 import {
   "lindividual/wei/core",
+  "lindividual/wei/platform",
   "moonbitlang/async",
   "moonbitlang/async/fs",
-  "moonbitlang/core/env",
   "moonbitlang/core/json",
 }
 

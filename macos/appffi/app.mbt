@@ -543,9 +543,9 @@ priv struct World {
 /// The only part of starting that touches anything, and it is `async` because reading a session is.
 /// Everything it returns is a value, so all of starting is: gather, then assemble.
 async fn gather() -> World {
-  let home = match @env.get_env_var("HOME") {
-    Some(value) if value != "" => value
-    _ => raise Failure::Failure("HOME is not set")
+  let home = match @platform.home_dir() {
+    Some(value) => value
+    None => raise Failure::Failure("HOME is not set")
   }
   let cwd = @platform.current_dir()
   let settings = @platform.load_settings(home)

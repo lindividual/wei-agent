@@ -391,6 +391,21 @@ pub fn current_dir() -> String {
 }
 
 ///|
+/// The reader's home directory, or `None` when this process has not been told one.
+///
+/// `None` rather than a guess: the three callers here disagree about what to do about it — the two
+/// command-line front ends abort, the app raises — and that difference is theirs. What they must
+/// not disagree about is what counts as *absent*, which is what this answers, empty string
+/// included: `HOME=` in a launch environment is a home nobody meant, and reading it as `/` would
+/// put a session store next to the filesystem root.
+pub fn home_dir() -> String? {
+  match @env.get_env_var("HOME") {
+    Some(home) if home != "" => Some(home)
+    _ => None
+  }
+}
+
+///|
 /// Remove a file, silently.
 ///
 /// Silent because every caller is cleaning up after itself: a file it minted, a path it was told was

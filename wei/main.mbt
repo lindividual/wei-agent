@@ -6,19 +6,6 @@
 /// session log — rather than to be the finished program.
 
 ///|
-/// The DeepSeek key, from the environment or the key saved in the settings file.
-async fn api_key(home : String) -> String? {
-  match @env.get_env_var("DEEPSEEK_API_KEY") {
-    Some(key) if key != "" => Some(key)
-    _ =>
-      match @platform.load_settings(home).saved_api_key {
-        key if key != "" => Some(key)
-        _ => None
-      }
-  }
-}
-
-///|
 /// The prompt, and the mode to run it in.
 ///
 /// `--mode tools|code` is the only flag, because it is the one a reader wants a second run of: the
@@ -49,11 +36,11 @@ fn parse_args(argv : Array[String]) -> (String, @core.ToolMode?) {
 async fn main {
   let args = @env.args()
   let (prompt, flag_mode) = parse_args(args)
-  let home = match @env.get_env_var("HOME") {
+  let home = match @platform.home_dir() {
     Some(home) => home
     None => abort("HOME is not set")
   }
-  let key = match api_key(home) {
+  let key = match @platform.api_key(home) {
     Some(key) => key
     None =>
       abort(

@@ -39,6 +39,29 @@ pub async fn load_settings(home : String) -> @core.AppSettings {
 }
 
 ///|
+/// The DeepSeek key this process should send, or `None` when there is none to send.
+///
+/// The *choice* is `@core.choose_api_key`'s and is not restated here; what this adds is the reading
+/// of the two sources it decides between, so that a front end does not have to know the name of an
+/// environment variable to ask for a key. Two front ends had their own copy of that, and the day
+/// the precedence changes they would have gone on using the old one.
+///
+/// The file is opened only when the environment has nothing: the environment wins anyway, so a
+/// settings file that cannot be read must not be able to fail a run that never needed it.
+pub async fn api_key(home : String) -> String? {
+  let from_environment = match @env.get_env_var("DEEPSEEK_API_KEY") {
+    Some(key) => key
+    None => ""
+  }
+  let saved = if from_environment == "" {
+    load_settings(home).saved_api_key
+  } else {
+    ""
+  }
+  @core.choose_api_key(from_environment, saved).map(choice => choice.key)
+}
+
+///|
 /// Write the settings out.
 ///
 /// Written beside the real file and renamed over it, because a reader who opens the panel twice

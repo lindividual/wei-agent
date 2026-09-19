@@ -70,9 +70,9 @@ fn try_header(j : Json) -> @core.SessionHeader? {
 
 ///|
 async fn main {
-  let home = match @env.get_env_var("HOME") {
-    Some(h) if h != "" => h
-    _ => abort("HOME is not set")
+  let home = match @platform.home_dir() {
+    Some(h) => h
+    None => abort("HOME is not set")
   }
   let root = "\{home}/.wei/sessions"
   if !@fs.exists(root) {

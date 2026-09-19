@@ -61,3 +61,31 @@ async test "a corrupt settings file decodes to the empty settings" {
 test "the settings file sits beside the session store" {
   assert_eq(settings_path("/home/u"), "/home/u/.wei/settings.json")
 }
+
+///|
+/// The key a front end actually sends, read the way the front ends read it.
+///
+/// The precedence itself is `@core.choose_api_key`'s and is tested there; what this adds is the
+/// wiring — that the two sources are read from the places they are really kept, and that an empty
+/// variable is not a key. Two front ends used to hold a copy of this, so it is worth a test that
+/// pins the one copy down.
+async test "the key to send is the environment's, else the saved one" {
+  let home = settings_scratch()
+  @env.unset_env_var("DEEPSEEK_API_KEY")
+  // No variable and nothing saved: there is no key, and that is not the empty string.
+  assert_eq(api_key(home), None)
+
+  save_settings(home, @core.AppSettings::new().with_saved_api_key("sk-saved"))
+  assert_eq(api_key(home), Some("sk-saved"))
+
+  // The variable wins over the file, and it says so by value rather than by source: the source is
+  // what `@core.choose_api_key` reports to the panel.
+  @env.set_env_var("DEEPSEEK_API_KEY", "sk-env")
+  assert_eq(api_key(home), Some("sk-env"))
+
+  // Set to nothing is not set: an exported-but-empty variable is a machine that meant to have no
+  // key, and falling back to the file is what makes the panel's own key usable.
+  @env.set_env_var("DEEPSEEK_API_KEY", "")
+  assert_eq(api_key(home), Some("sk-saved"))
+  @env.unset_env_var("DEEPSEEK_API_KEY")
+}
