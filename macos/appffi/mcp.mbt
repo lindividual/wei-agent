@@ -40,6 +40,11 @@
 /// Idempotence is what lets this be called from two places — before a command, and after one that
 /// may have changed which session is on screen — without either having to know whether the other
 /// ran.
+///
+/// And the cache is the reason `mcp_reload` exists. A config a reader writes *mid-session* — the
+/// ordinary way a server gets added — would otherwise be invisible until the app was restarted, with
+/// the panel showing `not started yet` and no way to argue with it. That is a dead end, which is the
+/// one thing this shell has removed everywhere else, so the reader-asked path re-reads instead.
 async fn[X] Shell::mcp_ensure(
   self : Shell,
   group : @async.TaskGroup[X],
@@ -48,22 +53,57 @@ async fn[X] Shell::mcp_ensure(
   if self.mcp.get(cwd) is Some(_) {
     return
   }
+  self.mcp_reload(group, cwd)
+}
+
+///|
+/// Re-read this directory's config and bring up whatever is not already up.
+///
+/// One-way: a server that is running stays running, and a name that has been removed from the config
+/// keeps its connection until the process exits. That asymmetry is deliberate — this is the path a
+/// reader takes after *adding* something, and stopping a server another turn may be in the middle of
+/// talking to in order to honour a deletion is the more dangerous direction.
+///
+/// Idempotent in the sense that matters: called twice it starts nothing twice, because what is
+/// already connected is looked up by name rather than started again.
+async fn[X] Shell::mcp_reload(
+  self : Shell,
+  group : @async.TaskGroup[X],
+  cwd : String,
+) -> Unit {
   let entries = @platform.read_mcp_config(cwd, self.home)
-  let configs = @core.startable_servers(entries)
+  let existing = self.mcp_all(cwd)
+  let already : Array[String] = []
+  for session in existing {
+    already.push(session.server().name)
+  }
+  let fresh : Array[@core.McpConfig] = []
+  for config in @core.startable_servers(entries) {
+    if !already.contains(@core.config_name(config)) {
+      fresh.push(config)
+    }
+  }
   // Marked before the start, not after: `connect_mcp_servers` reads config files and spawns
-  // processes, and a re-entrant ensure during that window — a second turn starting while the first
-  // is still opening servers — would start every server twice.
-  self.mcp.set(cwd, [])
-  let (connected, failed) = @platform.connect_mcp_servers(group, configs, cwd)
-  self.mcp.set(cwd, connected)
-  // The entries this client cannot run at all are listed with the ones that were tried and failed,
-  // because to a reader they are the same thing: a server in their config that does not work. Only
-  // one of the two reasons is actionable, and the reason says which.
+  // processes, and a re-entrant call during that window — a second turn starting while the first is
+  // still opening servers — would start every server twice.
+  self.mcp.set(cwd, existing)
+  let (connected, failed) = @platform.connect_mcp_servers(group, fresh, cwd)
+  let all = existing.copy()
+  for session in connected {
+    all.push(session)
+  }
+  self.mcp.set(cwd, all)
+  for session in all {
+    already.push(session.server().name)
+  }
+  // The entries this client could not read a transport out of are listed with the ones that were
+  // tried and failed, because to a reader they are the same thing: a server in their config that does
+  // not work. Only one of the two reasons is actionable, and the reason says which.
   let not_up : Array[(String, String)] = []
   for entry in entries {
-    // Only `Unsupported` is a failure to record: the two real transports were tried, and whatever
-    // happened to them is in `failed` already.
     match entry {
+      // An `Unsupported` entry never became a connection, so its reason is the only thing there is
+      // to say. The two real transports were tried, and whatever happened is in `failed`.
       @core.Unsupported(name~, reason~) => not_up.push((name, reason))
       _ => ()
     }
@@ -71,7 +111,17 @@ async fn[X] Shell::mcp_ensure(
   for failure in failed {
     not_up.push(failure)
   }
-  self.mcp_failed.set(cwd, not_up)
+  // Anything that is up now has stopped being a failure — which is the whole point of reloading, so
+  // a row that says "could not start" does not outlive the fix. The paired loops are index-free on
+  // purpose: `for a, b in array` would bind the second name to the whole tuple.
+  let kept : Array[(String, String)] = []
+  for failure in not_up {
+    let (name, reason) = failure
+    if !already.contains(name) {
+      kept.push((name, reason))
+    }
+  }
+  self.mcp_failed.set(cwd, kept)
 }
 
 ///|
@@ -205,13 +255,19 @@ fn mcp_report_text(
 ///|
 /// What `/mcp` says: this directory's servers, and its configured ones that did not come up.
 ///
-/// The servers are already started by the time this runs — the command loop ensures them before it
-/// dispatches, and this is dispatched from there — so the answer is about this machine rather than
-/// about a cache: a reader who just fixed a server's command and types `/mcp` is told the truth.
+/// **The command re-reads the config, and that is its point.** A reader types this after writing a
+/// `.mcp.json` or fixing a command, and an answer served from the cache would tell them about a file
+/// that no longer exists — the one moment this command exists for is the moment after a change. So
+/// it reloads first, and what it reports is what is true now.
 ///
 /// A note rather than a status line, because this is a fact about the workspace and stays readable;
 /// the status line is one sentence that the next thing said overwrites.
-fn Shell::report_mcp(self : Shell, open : Open) -> Unit {
+async fn[X] Shell::report_mcp(
+  self : Shell,
+  group : @async.TaskGroup[X],
+  open : Open,
+) -> Unit {
+  self.mcp_reload(group, open.cwd)
   self.say_note(
     open.path,
     mcp_report_text(

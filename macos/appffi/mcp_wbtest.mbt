@@ -419,3 +419,96 @@ test "a switched-off name with no config behind it is still listed" {
   assert_eq(entries[0].enabled, false)
   assert_true(entries[0].note == "", msg="off on purpose is not a fault")
 }
+
+///|
+/// A config written after the directory was first looked at is picked up by `/mcp`.
+///
+/// **This is the dead end `/mcp`'s reload exists to remove.** A server is usually added by editing a
+/// file while the app is running, so a cache that only filled once would leave the reader with a row
+/// saying `not started yet` and no way to argue with it short of quitting. The command re-reads
+/// because the moment it exists for is the moment after a change.
+async test "a config written mid-session is picked up by the mcp command" {
+  let dir = mcp_scratch()
+  // First look, with no config at all: examined, and cached as empty.
+  let (shell, seen) = mcp_shell(dir, "{\"mcpServers\":{}}")
+  let open = shell.shown()
+  @async.with_task_group(group => {
+    shell.mcp_ensure(group, open.cwd)
+    assert_eq(shell.mcp_all(open.cwd).length(), 0)
+
+    // Now the reader writes one, exactly as they would: the server goes in beside the config.
+    let script = mcp_shell_server(dir)
+    @platform.write_text("\{dir}/.mcp.json", mcp_shell_config(script))
+    // The cache still says empty, which is the honest state of a directory nobody has re-read.
+    assert_eq(shell.mcp_all(open.cwd).length(), 0)
+
+    // `/mcp` is the way out. It reloads, so the answer it gives is about the file that is there now.
+    command(shell, "/mcp")
+    assert_eq(shell.mcp_all(open.cwd).length(), 1)
+    let lines = seen()
+    assert_true(lines.length() > 0)
+    let text = lines[lines.length() - 1].stringify()
+    assert_true(text.contains("echo"), msg=text)
+    assert_true(text.contains("say"), msg=text)
+    shell.mcp_dispose()
+  })
+}
+
+///|
+/// Reloading does not start a server that is already up.
+///
+/// The other half of idempotence. A second `connect` on a live server would leave a process nobody
+/// holds — two connections to one name, and only one of them ever closed — so the lookup by name is
+/// what makes the reload safe to run on every `/mcp`.
+async test "reloading a directory does not start anything twice" {
+  let dir = mcp_scratch()
+  let script = mcp_shell_server(dir)
+  let (shell, _seen) = mcp_shell(dir, mcp_shell_config(script))
+  let open = shell.shown()
+  @async.with_task_group(group => {
+    shell.mcp_reload(group, open.cwd)
+    assert_eq(shell.mcp_all(open.cwd).length(), 1)
+    shell.mcp_reload(group, open.cwd)
+    assert_eq(
+      shell.mcp_all(open.cwd).length(),
+      1,
+      msg="one name is one connection",
+    )
+    shell.mcp_dispose()
+  })
+}
+
+///|
+/// A server that failed and was then fixed stops being reported as failed.
+///
+/// The record has to be rebuilt on every reload, not appended to: a row that still says "could not
+/// start" after the reader fixed the command is worse than no row, because it sends them looking for
+/// a problem they have already solved.
+async test "a fixed server stops being reported as broken" {
+  let dir = mcp_scratch()
+  let (shell, _seen) = mcp_shell(
+    dir, "{\"mcpServers\":{\"echo\":{\"command\":\"/nonexistent/wei-test-binary\"}}}",
+  )
+  let open = shell.shown()
+  @async.with_task_group(group => {
+    shell.mcp_reload(group, open.cwd)
+    assert_eq(shell.mcp_failures(open.cwd).length(), 1)
+    // The reader fixes the command, and asks again. Only `echo`, so the one name is the one that
+    // changes state — `mcp_shell_config` writes a second, permanently broken server beside it.
+    let script = mcp_shell_server(dir)
+    @platform.write_text(
+      "\{dir}/.mcp.json",
+      "{\"mcpServers\":{\"echo\":{\"command\":\"python3\",\"args\":[\"" +
+      script +
+      "\"]}}}",
+    )
+    shell.mcp_reload(group, open.cwd)
+    assert_eq(
+      shell.mcp_failures(open.cwd).length(),
+      0,
+      msg="the failure is stale",
+    )
+    assert_eq(shell.mcp_all(open.cwd).length(), 1)
+    shell.mcp_dispose()
+  })
+}

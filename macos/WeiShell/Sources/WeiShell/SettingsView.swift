@@ -11,11 +11,11 @@ import WeiModel
 /// Terminal draws its settings this way, and so does Notes — which is the reference this whole window is
 /// aligned to, so the settings panel should not be the one place that disagrees with it.
 ///
-/// It was a `NavigationSplitView`: a list of five panes on the left, one pane's form on the right, 640 × 460.
+/// It was a `NavigationSplitView`: a list of panes on the left, one pane's form on the right, 640 × 460.
 /// Nothing was wrong with it — System Settings is a list too — but a list needs a column, and a column for
-/// five rows costs a fifth of the window *and* one click before the pane's own contents are on screen. Five
-/// panes of a few controls each fit across a titlebar; the reader sees what is here at a glance and reaches
-/// any of it in one click.
+/// a handful of rows costs a fifth of the window *and* one click before the pane's own contents are on
+/// screen. Half a dozen panes of a few controls each fit across a titlebar; the reader sees what is here at
+/// a glance and reaches any of it in one click.
 ///
 /// The test for what belongs in here is the one the web panel uses: **can a running process honour
 /// it?** A key, a tool mode, a skill switch, the fallback instructions and the turn limits are all
@@ -33,7 +33,7 @@ struct SettingsView: View {
     /// Which pane is showing.
     @State private var pane: Pane? = .key
 
-    /// What the five kinds are. Raw values are stable strings so that the selection can live in
+    /// What the kinds are. Raw values are stable strings so that the selection can live in
     /// `@State` — and so that a pane can be deep-linked later without a second vocabulary.
     ///
     /// Named `Pane` rather than `Section`: `SwiftUI.Section` is the thing each of these *draws*,
@@ -42,7 +42,7 @@ struct SettingsView: View {
     enum Pane: String, CaseIterable, Identifiable, Hashable {
         case key, tools, skills, mcp, instructions, limits
 
-        /// The same five panes as `SettingsPane`, which is the vocabulary the *window* uses when it
+        /// The same panes as `SettingsPane`, which is the vocabulary the *window* uses when it
         /// sends a reader here ("no API key — Open Settings"). One mapping, in one place, so that a
         /// pane added or renamed on this side is a compile error there rather than a string that
         /// quietly stops matching.
@@ -182,10 +182,10 @@ struct SettingsView: View {
 
     /// Where the file is, once, for the whole window.
     ///
-    /// It used to be a section at the bottom of *every* pane — five copies of one path, each taking a group's
-    /// worth of height to say a fact that belongs to the window rather than to the pane. One line at the foot
-    /// of the window says it wherever the reader is, which is also where a reader who has just changed
-    /// something looks to find out what was written.
+    /// It used to be a section at the bottom of *every* pane — one copy of the path per pane, each
+    /// taking a group's worth of height to say a fact that belongs to the window rather than to the
+    /// pane. One line at the foot of the window says it wherever the reader is, which is also where a
+    /// reader who has just changed something looks to find out what was written.
     private var settingsFile: some View {
         HStack(spacing: Wei.Space.cozy) {
             Text("Settings file")
@@ -552,8 +552,8 @@ struct SettingsView: View {
     /// Not an eternal spinner: the shell says what it is doing, and this says the same thing in the
     /// same words, with a way to ask again. A dead end is worse than a delay.
     ///
-    /// **Its own `Section`, because all five panes are built at once in a `TabView`** — a failed shell would
-    /// otherwise draw those three lines five times down one pane and hide the form's own rows behind them.
+    /// **Its own `Section`, because every pane is built at once in a `TabView`** — a failed shell would
+    /// otherwise draw those three lines once per pane and hide the form's own rows behind them.
     @ViewBuilder
     private var waiting: some View {
         Section {

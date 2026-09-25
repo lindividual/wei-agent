@@ -1354,7 +1354,7 @@ async fn[X] Shell::handle(
     // figures asks when it opens rather than trusting a line the reader may have read a turn
     // ago.
     ReportUsage => self.say_usage(open)
-    ReportMcp => self.report_mcp(open)
+    ReportMcp => self.report_mcp(group, open)
     ReportJobs => self.say_jobs_now()
     KillJob(id) => self.kill_job(id)
     ReportModel => self.say_status(open.path, model_report(open))

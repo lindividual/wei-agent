@@ -24,7 +24,7 @@ public enum ShellState: Equatable {
 
 /// A pane of the settings window, by the name on its tab.
 ///
-/// A second vocabulary for the same five panes, and deliberately so: this one exists so that a request
+/// A second vocabulary for the same panes, and deliberately so: this one exists so that a request
 /// made from the *window* ("the reader pressed a button about the key") can be answered by the
 /// settings *scene*, which is a different part of the view tree and shares nothing else with it. The
 /// two lists are joined in exactly one place — `SettingsView`'s mapping to its own `Pane` — so a pane

@@ -255,7 +255,10 @@ final class ShellLinkTests: XCTestCase {
         )
 
         // Switching to B is what makes the shell look: `mcp_ensure` runs at the top of every command,
-        // for the directory on screen. Then `/settings` is what re-reads the panel.
+        // for the directory on screen. But this project was *already* open earlier in this test, so its
+        // config was read before this file existed — which is exactly the state a reader is in when they
+        // add a server to a repository they already have open. `/mcp` is the way out, and the next two
+        // phases are that state and that way out, in order.
         client.newSession(in: projB)
         XCTAssertTrue(
             wait(for: { client.currentWorkspace == self.canonical(projB) }),
@@ -266,13 +269,37 @@ final class ShellLinkTests: XCTestCase {
             wait(for: { !(client.settings?.servers.isEmpty ?? true) }),
             "the shell never reported the MCP server: \(String(describing: client.settings?.servers))"
         )
+        // The row is there and honest about being unexamined — with a way out named, rather than a
+        // dead end: this is the row a reader sees the second after writing the file.
+        let stale = try XCTUnwrap(client.settings?.servers.first)
+        XCTAssertEqual(stale.name, "echo")
+        XCTAssertEqual(stale.transport, "stdio")
+        XCTAssertEqual(stale.description, "Says things back.")
+        XCTAssertTrue(stale.enabled)
+        XCTAssertEqual(stale.toolCount, 0)
+        XCTAssertTrue(stale.note.contains("not started yet"), stale.note)
+
+        // And the way out: `/mcp` re-reads the config, so what it reports is about the file that is
+        // there now. The answer is a labelled note in the transcript, which is also the only place a
+        // *failed* server's reason would be readable — the catalog deliberately names only what
+        // answered.
+        client.reportMcp()
+        XCTAssertTrue(
+            wait(for: { self.noteText(in: client)?.contains("echo") == true }),
+            "`/mcp` said nothing about the server"
+        )
+        let report = try XCTUnwrap(self.noteText(in: client))
+        XCTAssertTrue(report.contains("1 tool(s)"), report)
+
+        // The panel agrees, because it reads the same map: one tool, handshaked for real, and nothing
+        // left to explain. This is the assertion that the row is drawn from the shell's state and not
+        // from the config file.
+        client.refreshSettings()
+        XCTAssertTrue(
+            wait(for: { client.settings?.servers.first?.toolCount == 1 }),
+            "the panel still disagrees with the connection: \(String(describing: client.settings?.servers))"
+        )
         let server = try XCTUnwrap(client.settings?.servers.first)
-        XCTAssertEqual(server.name, "echo")
-        XCTAssertEqual(server.transport, "stdio")
-        XCTAssertEqual(server.description, "Says things back.")
-        XCTAssertTrue(server.enabled)
-        // One tool, handshaked for real: the count is the server's answer, not a guess from the config.
-        XCTAssertEqual(server.toolCount, 1)
         XCTAssertEqual(server.status, "1 tool")
         XCTAssertTrue(server.note.isEmpty, "a server that came up has nothing to explain: \(server.note)")
 
@@ -293,16 +320,6 @@ final class ShellLinkTests: XCTestCase {
             }),
             "switching it back on did not come back on the row"
         )
-
-        // And `/mcp` answers with the workspace's servers, as a labelled note in the transcript —
-        // which is the one place a *failed* server's reason would be readable.
-        client.reportMcp()
-        XCTAssertTrue(
-            wait(for: { self.noteText(in: client)?.contains("echo") == true }),
-            "`/mcp` said nothing about the server"
-        )
-        let report = try XCTUnwrap(self.noteText(in: client))
-        XCTAssertTrue(report.contains("1 tool(s)"), report)
 
         // Stops the agent thread rather than leaving it to the process exit: the runtime has an event
         // loop of its own, and a test process that ends with one still spinning is a test process
