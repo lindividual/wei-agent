@@ -34,6 +34,13 @@ pub(all) struct AgentContext {
   /// because the driver is what starts it, and because a record kept by the tool layer would be
   /// lost the moment the tool call returned.
   jobs : @core.JobStore
+  /// Live MCP servers, if any.
+  ///
+  /// The connections live here for the same reason the jobs do — the driver is what reaches them
+  /// — and they are held rather than looked up per call because a server is started once and asked
+  /// many times. They are **not** part of the tool set: the tools are reached through the single
+  /// `mcp` gateway, so this decides nothing about the request and only about where a call goes.
+  mcp : Array[@platform.McpSession]
 }
 
 ///|
@@ -56,6 +63,7 @@ pub fn AgentContext::new(
   system_prompt~ : String,
   tools~ : Array[@core.ToolDef],
   jobs? : @core.JobStore = @core.JobStore::new(),
+  mcp? : Array[@platform.McpSession] = [],
   model? : String = @core.default_model_id(),
   base_url? : String = "https://api.deepseek.com",
   pricing? : @core.Pricing = @core.default_model().pricing,
@@ -73,6 +81,7 @@ pub fn AgentContext::new(
     system_prompt,
     tools,
     jobs,
+    mcp,
   }
 }
 
@@ -1073,25 +1082,33 @@ async fn run_tools(
     // leave an aborted turn in the log.
     let output = @async.with_task_group(group => {
       let task = group.spawn(() => {
-        try
-          @platform.execute_tool(name, arguments, ctx.cwd, jobs=ctx.jobs, watcher={
-            // Carried into the result, so a command that leaves something running comes back with
-            // the id to collect it by rather than with the instruction to go and find one.
-            id: job_id,
-            started: pids => {
-              match job_id {
-                Some(id) => ctx.jobs.observe(id, pids, tail="")
-                None => ()
-              }
-            },
-            finished: outcome => {
-              match job_id {
-                Some(id) => @platform.note_execution(ctx.jobs, id, outcome)
-                None => ()
-              }
-            },
-          })
-        catch {
+        try {
+          // The gateway is routed here rather than in `execute_tool`, because what it does is
+          // reach a *connection* rather than the filesystem: `execute_tool`'s `match` is over the
+          // built-ins, and a session with no MCP servers never enters this branch. It is the same
+          // shape as every other tool otherwise — an answer, or an error the model can read.
+          if name == "mcp" {
+            @platform.call_mcp(ctx.mcp, arguments)
+          } else {
+            @platform.execute_tool(name, arguments, ctx.cwd, jobs=ctx.jobs, watcher={
+              // Carried into the result, so a command that leaves something running comes back
+              // with the id to collect it by rather than with the instruction to go and find one.
+              id: job_id,
+              started: pids => {
+                match job_id {
+                  Some(id) => ctx.jobs.observe(id, pids, tail="")
+                  None => ()
+                }
+              },
+              finished: outcome => {
+                match job_id {
+                  Some(id) => @platform.note_execution(ctx.jobs, id, outcome)
+                  None => ()
+                }
+              },
+            })
+          }
+        } catch {
           err =>
             // A tool that failed is an answer too, and for the same reason a cancelled one is:
             // the model is told what went wrong instead of the turn dying with an exception. A

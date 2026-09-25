@@ -2636,3 +2636,216 @@ async test "a turn with no level is recorded as off and sent as disabled" {
     assert_eq(session.context().thinking_level, Some("off"))
   })
 }
+
+// ── MCP through the gateway ────────────────────────────────────────────────
+
+///|
+/// A fake MCP server that echoes, so the driver test can reach a real child process.
+///
+/// Python because what is under test is the *routing* — model calls `mcp`, the driver hands it to a
+/// connection, the connection's answer goes back to the model — and not a server. The script is
+/// written per test for the reason `scratch` exists: the tests run concurrently.
+fn mcp_echo_server_source() -> String {
+  let source =
+    #|import sys, json
+    #|
+    #|def send(p):
+    #|    sys.stdout.write(json.dumps(p) + "\n")
+    #|    sys.stdout.flush()
+    #|
+    #|for line in sys.stdin:
+    #|    line = line.strip()
+    #|    if not line:
+    #|        continue
+    #|    msg = json.loads(line)
+    #|    m = msg.get("method")
+    #|    if m == "initialize":
+    #|        send({"jsonrpc": "2.0", "id": msg.get("id"), "result": {
+    #|            "protocolVersion": "2024-11-05",
+    #|            "capabilities": {"tools": {}},
+    #|            "serverInfo": {"name": "echo", "version": "1"}}})
+    #|    elif m == "tools/list":
+    #|        send({"jsonrpc": "2.0", "id": msg.get("id"), "result": {"tools": [
+    #|            {"name": "say", "description": "Say it back.",
+    #|             "inputSchema": {"type": "object",
+    #|                             "properties": {"text": {"type": "string"}},
+    #|                             "required": ["text"]}}]}})
+    #|    elif m == "tools/call":
+    #|        args = (msg.get("params") or {}).get("arguments") or {}
+    #|        send({"jsonrpc": "2.0", "id": msg.get("id"),
+    #|              "result": {"content": [{"type": "text",
+    #|                                      "text": "server said: " + str(args.get("text"))}]}})
+    #|
+  source
+}
+
+///|
+async fn write_mcp_echo_server(dir : String) -> String {
+  let relative = "\{dir}/echo_server.py"
+  @platform.write_text(relative, mcp_echo_server_source())
+  // Absolute, because the server is started with the session's cwd: a real config's `command`
+  // points at an absolute path or a bare name on `PATH`, and a relative one would be resolved
+  // against whatever directory the session happens to be in.
+  @fs.realpath(relative)
+}
+
+///|
+fn mcp_config_for(name : String, script : String) -> @core.McpConfig {
+  Stdio({
+    name,
+    command: "python3",
+    args: [script],
+    env: [],
+    description: "Says things back.",
+  })
+}
+
+///|
+/// Every `ToolResult` in the log, in order, as strings.
+fn tool_results(session : @core.Session) -> Array[String] {
+  let out : Array[String] = []
+  for entry in session.context_entries() {
+    match entry.kind {
+      @core.Message(message~) =>
+        match message {
+          @core.ToolResult(result) => {
+            let text = StringBuilder()
+            for block in result.content {
+              match block {
+                @core.Text(value) => text.write_string(value)
+                _ => ()
+              }
+            }
+            out.push(text.to_string())
+          }
+          _ => ()
+        }
+      _ => ()
+    }
+  }
+  out
+}
+
+///|
+/// A turning point: the model asks the gateway for a server's tools, then calls one, and the
+/// server's answer reaches the model.
+///
+/// This is the whole path in one test, and it is the reason the gateway is worth having: the model
+/// sees only `mcp` in its schema, the driver routes by the name, the platform layer talks to a real
+/// child process, and the result comes back as ordinary tool content. Nothing in between is
+/// simulated.
+async test "a turn reaches a server's tool through the gateway" {
+  let dir = scratch("mcp-gateway")
+  let script = write_mcp_echo_server(dir)
+  let seen : Array[String] = []
+  @async.with_task_group(group => {
+    // The server is started the way the shell starts one: at session open, before the turn.
+    let connection = match
+      @platform.start_mcp_session(group, mcp_config_for("echo", script), dir) {
+      Ok(connection) => connection
+      Err(reason) => fail("the server should have started: \{reason}")
+    }
+    let responses : Array[String] = [
+      // 1. Ask what the server has.
+      tool_call_sse("mcp", "{\\\"server\\\":\\\"echo\\\"}"),
+      // 2. Call the tool, with the arguments nested under `arguments`.
+      tool_call_sse(
+        "mcp", "{\\\"server\\\":\\\"echo\\\",\\\"tool\\\":\\\"say\\\",\\\"arguments\\\":{\\\"text\\\":\\\"hi\\\"}}",
+      ),
+      text_sse("done"),
+    ]
+    with_fake_model(responses, seen, async fn(base_url) {
+      let path = "\{dir}/session.jsonl"
+      let header : @core.SessionHeader = {
+        id: "test",
+        timestamp: @core.format_iso_utc(FIXED_TIME),
+        cwd: dir,
+        parent_session: None,
+        version: Some(3),
+      }
+      @platform.create_session(path, header)
+      // The tool set the turn is given: the built-ins plus the gateway, because the platform has a
+      // connection to offer. Without the gateway in `tools`, `has_tool` would refuse the call — and
+      // that refusal is what the next test checks.
+      let tools = @platform.tools_with_mcp(@core.builtin_tools(), [connection])
+      let ctx = @agent.AgentContext::new(
+        session=@core.Session::new(header, []),
+        session_path=path,
+        cwd=dir,
+        api_key="fixture-key",
+        system_prompt=@core.build_system_prompt(
+          dir,
+          tools,
+          servers=@platform.mcp_catalogs([connection]),
+        ),
+        tools~,
+        base_url~,
+        mcp=[connection],
+      )
+      let result = @agent.run_turn(ctx, "say hi on echo", FIXED_TIME)
+      assert_eq(result.model_calls, 3)
+      assert_eq(result.tool_calls, 2)
+      assert_eq(result.replies, ["done"])
+      // The catalog reached the model, so it could know the server exists at all.
+      assert_true(seen[0].contains("## MCP servers"), msg=seen[0])
+      assert_true(seen[0].contains("echo"), msg=seen[0])
+      // And the description it asked for, with the schema, reached it before the call did.
+      assert_true(seen[1].contains("Say it back."), msg=seen[1])
+      assert_true(seen[1].contains("\"required\""), msg=seen[1])
+      // The call's result: the server's own words, as ordinary tool content.
+      assert_true(seen[2].contains("server said: hi"), msg=seen[2])
+
+      let results = tool_results(logged(path))
+      assert_eq(results.length(), 2)
+      assert_true(results[0].contains("Say it back."), msg=results[0])
+      assert_eq(results[1], "server said: hi")
+    })
+    connection.close()
+  })
+}
+
+///|
+/// The gateway is only in the request when a server is up, and a call to it with no server is told
+/// what there is rather than quietly running something.
+async test "with no servers the gateway is not declared and the call is refused" {
+  let dir = scratch("mcp-none")
+  let seen : Array[String] = []
+  // No connections, so `tools_with_mcp` adds nothing and this is the plain built-in set.
+  let tools = @platform.tools_with_mcp(@core.builtin_tools(), [])
+  assert_false(@core.has_tool(tools, "mcp"))
+  with_fake_model(
+    [tool_call_sse("mcp", "{\\\"server\\\":\\\"echo\\\"}"), text_sse("done")],
+    seen,
+    async fn(base_url) {
+      let path = "\{dir}/session.jsonl"
+      let header : @core.SessionHeader = {
+        id: "test",
+        timestamp: @core.format_iso_utc(FIXED_TIME),
+        cwd: dir,
+        parent_session: None,
+        version: Some(3),
+      }
+      @platform.create_session(path, header)
+      let ctx = @agent.AgentContext::new(
+        session=@core.Session::new(header, []),
+        session_path=path,
+        cwd=dir,
+        api_key="fixture-key",
+        system_prompt=@core.build_system_prompt(dir, tools),
+        tools~,
+        base_url~,
+      )
+      let result = @agent.run_turn(ctx, "use echo", FIXED_TIME)
+      // A refused call is not a call that ran: the refusal is written where a result would have
+      // been, and the count that says how many tools *executed* stays zero. That difference is the
+      // point of enforcing the mode here rather than trusting the schema.
+      assert_eq(result.tool_calls, 0)
+      let results = tool_results(logged(path))
+      assert_eq(results.length(), 1)
+      assert_true(results[0].has_prefix("Refused:"), msg=results[0])
+      assert_true(results[0].contains("`mcp`"), msg=results[0])
+      // The request never carried the gateway, so the model was told there is no such tool.
+      assert_false(seen[0].contains("\"name\":\"mcp\""), msg=seen[0])
+    },
+  )
+}

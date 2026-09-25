@@ -40,7 +40,7 @@ struct SettingsView: View {
     /// and a nested type with that name shadows it inside this file — every `Section("API Key")`
     /// then refers to the enum and stops being a view.
     enum Pane: String, CaseIterable, Identifiable, Hashable {
-        case key, tools, skills, instructions, limits
+        case key, tools, skills, mcp, instructions, limits
 
         /// The same five panes as `SettingsPane`, which is the vocabulary the *window* uses when it
         /// sends a reader here ("no API key — Open Settings"). One mapping, in one place, so that a
@@ -51,6 +51,7 @@ struct SettingsView: View {
             case .key: self = .key
             case .tools: self = .tools
             case .skills: self = .skills
+            case .mcp: self = .mcp
             case .instructions: self = .instructions
             case .limits: self = .limits
             }
@@ -63,6 +64,7 @@ struct SettingsView: View {
             case .key: return "API Key"
             case .tools: return "Tools"
             case .skills: return "Skills"
+            case .mcp: return "MCP"
             case .instructions: return "Instructions"
             case .limits: return "Turn Limits"
             }
@@ -73,6 +75,7 @@ struct SettingsView: View {
             case .key: return "key"
             case .tools: return "wrench.and.screwdriver"
             case .skills: return "sparkles"
+            case .mcp: return "plug"
             case .instructions: return "text.document"
             case .limits: return "gauge.with.dots.needle.33percent"
             }
@@ -136,6 +139,7 @@ struct SettingsView: View {
         case .key: keySection(settings)
         case .tools: toolsSection(settings)
         case .skills: skillsSection(settings)
+        case .mcp: mcpSection(settings)
         case .instructions: instructionsSection(settings)
         case .limits: limitsSection(settings)
         }
@@ -248,6 +252,70 @@ struct SettingsView: View {
         Binding<String>(
             get: { settings.mode },
             set: { client.setMode($0) }
+        )
+    }
+
+    // ── mcp ───────────────────────────────────────────────────────────────
+
+    @ViewBuilder
+    private func mcpSection(_ settings: ShellSettings) -> some View {
+        rebuild {
+            if settings.servers.isEmpty {
+                Section("MCP Servers") {
+                    Text("No MCP servers configured. A server is a `.mcp.json` in the working directory, or `~/.wei/mcp.json`.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Section {
+                    ForEach(settings.servers) { server in
+                        Toggle(isOn: serverBinding(server)) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(server.name)
+                                if !server.description.isEmpty {
+                                    Text(server.description)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                                // The transport, how much it offers, and — the part that matters — why
+                                // it is not up. A server that failed to start is a row with a reason,
+                                // because a configured name that silently does nothing is the one
+                                // outcome worse than an error message.
+                                HStack(spacing: 6) {
+                                    if !server.transport.isEmpty {
+                                        Text(server.transport)
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Text(server.status)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(server.enabled && !server.note.isEmpty ? Color.orange : Color.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                }
+                            }
+                        }
+                        .toggleStyle(.switch)
+                    }
+                } header: {
+                    Text("MCP Servers")
+                } footer: {
+                    Text("Switches apply to the next turn. A switched-off server's tools are not offered to the model and cannot be reached.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    /// A server's switch asks the shell to toggle it, and redraws from whatever the shell then says
+    /// — the same arrangement `skillBinding` uses, and for the same reason: the shell is the one that
+    /// knows whether the toggle was `on` or `off`.
+    private func serverBinding(_ server: ServerEntry) -> Binding<Bool> {
+        Binding(
+            get: { server.enabled },
+            set: { _ in client.toggleServer(server.name) }
         )
     }
 

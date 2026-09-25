@@ -28,6 +28,8 @@ pub fn build_system_prompt(
   instructions? : String = "",
   /// Every skill this turn may use. Empty renders no catalog, not an empty one.
   skills? : Array[Skill] = [],
+  /// The MCP servers this turn can reach. Empty renders no section, for the same reason.
+  servers? : Array[McpServer] = [],
   /// Tools that earlier calls in this conversation used and this turn does not carry.
   stale_tools? : Array[String] = [],
 ) -> String {
@@ -50,6 +52,9 @@ pub fn build_system_prompt(
     text in [
       instructions,
       skill_catalog_prompt(skills),
+      // After the skills: both are catalogs of things read on demand, and the one whose bodies are
+      // reached through a tool this turn carries goes second, next to the mention of that tool.
+      mcp_catalog_prompt(servers),
       tool_change_prompt(stale_tools, tools),
     ] {
     if text != "" {

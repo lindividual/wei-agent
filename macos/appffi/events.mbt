@@ -966,6 +966,10 @@ async fn Shell::system_prompt(
     // the prompt said which ones existed. Discovery and the setting are both per directory and
     // cached, so this adds no I/O to the turn.
     skills=self.enabled_skills(open.cwd),
+    // The servers this turn can reach, named so the model knows to ask. Read from the same map the
+    // tool set is built from — `mcp_tools` and this are one decision seen from two sides, which is
+    // why both read `mcp_here` rather than each walking its own path to the same answer.
+    servers=self.mcp_servers(open.cwd),
     // Empty unless this conversation already ran with a tool the current mode does not have. The
     // setting can change mid-session, and without this the model would keep reaching for a tool
     // that is no longer declared.
@@ -994,7 +998,12 @@ async fn Shell::instructions(self : Shell, open : Open) -> String {
 /// the system prompt's own size dressed up as the conversation's.
 async fn Shell::context_facts(self : Shell, open : Open) -> ContextFacts {
   let window = @core.model_spec_for(open.model_id).0.context_window
-  let tools = @core.tools_for_mode(self.settings.tool_mode)
+  // The tool set the next turn would carry, gateway included. It has to be built the same way
+  // `start_turn` builds it, or the figure on the bar would be about a request nobody sends.
+  let tools = self.mcp_tools(
+    open.cwd,
+    @core.tools_for_mode(self.settings.tool_mode),
+  )
   let overhead = @core.request_overhead_tokens(
     self.system_prompt(open, tools),
     tools,

@@ -215,7 +215,10 @@ async fn Shell::run_turn(
   // recorded choice mean anything. Its pricing and window come from the same catalog entry, so a
   // turn cannot be billed at one model's rates while calling another.
   let spec = @core.model_spec_for(open.model_id).0
-  let tools = @core.tools_for_mode(mode)
+  // The servers are already up: the command loop ensures them before dispatching, and this turn is
+  // dispatched from there. Built here anyway from the same map, so that what the request carries and
+  // what the prompt names come from one place.
+  let tools = self.mcp_tools(open.cwd, @core.tools_for_mode(mode))
   let context = @agent.AgentContext::new(
     session=open.session,
     session_path=path,
@@ -231,6 +234,7 @@ async fn Shell::run_turn(
     pricing=spec.pricing,
     context_window=spec.context_window,
     jobs=self.jobs,
+    mcp=self.mcp_here(open.cwd),
   )
   // The two things that change while the turn runs: which block the deltas belong to, and which
   // row a tool report belongs to. Both are ids rather than nodes — the host holds the nodes, and

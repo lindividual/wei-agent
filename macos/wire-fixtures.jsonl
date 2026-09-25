@@ -6,7 +6,7 @@
 {"kind":"sessions","workspaces":[{"cwd":"/tmp","label":"tmp","current":true,"sessions":[{"path":"/store/s.jsonl","id":"s1","label":"wire fixture","modified":1756000000000,"current":true,"running":false}]}]}
 {"kind":"deleted","session":"/store/s.jsonl","path":"/store/s.jsonl","label":"the reader's name","restorable":true}
 {"kind":"blocks","session":"/store/s.jsonl","id":"reply-1-1","from":0,"parsed":24,"blocks":[{"t":"h","level":2,"spans":[{"t":"text","text":"Heading"}]},{"t":"p","spans":[{"t":"text","text":"with "},{"t":"code","text":"code"}]}]}
-{"kind":"settings","key":"environment","env":true,"saved":false,"mode":"code","path":"/tmp/settings.json","skills":[],"instructions":"Run the tests with moon test.","instructions_source":"saved","limits":{"rounds":{"value":"200","source":"default"},"cost":{"value":"1","source":"default"},"seconds":{"value":"1800","source":"default"}}}
+{"kind":"settings","key":"environment","env":true,"saved":false,"mode":"code","path":"/tmp/settings.json","skills":[],"servers":[],"instructions":"Run the tests with moon test.","instructions_source":"saved","limits":{"rounds":{"value":"200","source":"default"},"cost":{"value":"1","source":"default"},"seconds":{"value":"1800","source":"default"}}}
 {"kind":"user","session":"/store/s.jsonl","text":"what is this?","continued":false,"images":[]}
 {"kind":"reply","session":"/store/s.jsonl","id":"reply-1","delta":"hello"}
 {"kind":"thinking","session":"/store/s.jsonl","id":"think-1","delta":"let me think"}

@@ -33,6 +33,14 @@ final class ShellLinkTests: XCTestCase {
         return condition()
     }
 
+    /// The text of the last `note` row in the transcript, or `nil` when there is none.
+    ///
+    /// The MCP report and a compaction summary are both notes, so this reads the rows the client
+    /// already decoded rather than reaching into the wire.
+    private func noteText(in client: ShellClient) -> String? {
+        client.conversation.rows.last(where: { $0.kind == .note })?.text
+    }
+
     /// The form the shell speaks: POSIX `realpath`, because that is literally what the shell calls
     /// (`@platform.canonical_dir` → `@fs.realpath`).
     ///
@@ -47,7 +55,7 @@ final class ShellLinkTests: XCTestCase {
         return String(cString: resolved)
     }
 
-    func testAShellThatWasStartedIsHeardFrom() {
+    func testAShellThatWasStartedIsHeardFrom() throws {
         // A store of this test's own: the real one belongs to whoever is running the tests, and a test
         // that writes into it is a test that can delete their conversations.
         let root = NSTemporaryDirectory() + "wei-shell-link-\(UUID().uuidString)"
@@ -202,6 +210,99 @@ final class ShellLinkTests: XCTestCase {
             wait(for: { client.thinking.current == "off" }),
             "off is a level like any other: \(client.thinking.current)"
         )
+
+        // ── MCP, which is a config file, a child process and a panel row ─────────────────────────
+        //
+        // The whole path in one place, and every link of it is real: the `.mcp.json` is written by this
+        // test into a project before the shell has looked at it, the server is a `python3` child the
+        // shell spawns and handshakes with, and the row that comes back crosses the C boundary as a
+        // field. Nothing here would have been caught by a unit test at one layer — the panel is drawn
+        // from a file that a *different* layer read.
+        let serverScript = root + "-mcp-server.py"
+        // A hand-written server rather than an installed one: what is under test is the shell's own
+        // half — the config it reads, the process it starts, the handshake it performs and the row it
+        // draws — and a real server would make this a test of somebody else's release schedule. It
+        // answers exactly one tool so that the tool count on the row has something to be wrong about.
+        let serverSource = """
+        import sys, json
+        def send(p):
+            sys.stdout.write(json.dumps(p) + "\\n")
+            sys.stdout.flush()
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            msg = json.loads(line)
+            m = msg.get("method")
+            if m == "initialize":
+                send({"jsonrpc": "2.0", "id": msg.get("id"), "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "echo", "version": "1"}}})
+            elif m == "tools/list":
+                send({"jsonrpc": "2.0", "id": msg.get("id"), "result": {"tools": [
+                    {"name": "say", "description": "Say it back.",
+                     "inputSchema": {"type": "object"}}]}})
+        """
+        let config = """
+        {"mcpServers":{"echo":{"command":"python3","args":["\(serverScript)"],"description":"Says things back."}}}
+        """
+        try? serverSource.write(
+            toFile: serverScript, atomically: true, encoding: .utf8
+        )
+        try? config.write(
+            toFile: projB + "/.mcp.json", atomically: true, encoding: .utf8
+        )
+
+        // Switching to B is what makes the shell look: `mcp_ensure` runs at the top of every command,
+        // for the directory on screen. Then `/settings` is what re-reads the panel.
+        client.newSession(in: projB)
+        XCTAssertTrue(
+            wait(for: { client.currentWorkspace == self.canonical(projB) }),
+            "the session did not move to the project with the config"
+        )
+        client.refreshSettings()
+        XCTAssertTrue(
+            wait(for: { !(client.settings?.servers.isEmpty ?? true) }),
+            "the shell never reported the MCP server: \(String(describing: client.settings?.servers))"
+        )
+        let server = try XCTUnwrap(client.settings?.servers.first)
+        XCTAssertEqual(server.name, "echo")
+        XCTAssertEqual(server.transport, "stdio")
+        XCTAssertEqual(server.description, "Says things back.")
+        XCTAssertTrue(server.enabled)
+        // One tool, handshaked for real: the count is the server's answer, not a guess from the config.
+        XCTAssertEqual(server.toolCount, 1)
+        XCTAssertEqual(server.status, "1 tool")
+        XCTAssertTrue(server.note.isEmpty, "a server that came up has nothing to explain: \(server.note)")
+
+        // The switch is a command, and the row follows it. The process stays up — see `mcp_ensure`
+        // for why that is deliberate — so what changes is what a turn may reach, which the panel
+        // reports as `off`.
+        client.toggleServer("echo")
+        XCTAssertTrue(
+            wait(for: {
+                client.settings?.servers.first(where: { $0.name == "echo" })?.enabled == false
+            }),
+            "the switch did not come back on the row"
+        )
+        client.toggleServer("echo")
+        XCTAssertTrue(
+            wait(for: {
+                client.settings?.servers.first(where: { $0.name == "echo" })?.enabled == true
+            }),
+            "switching it back on did not come back on the row"
+        )
+
+        // And `/mcp` answers with the workspace's servers, as a labelled note in the transcript —
+        // which is the one place a *failed* server's reason would be readable.
+        client.reportMcp()
+        XCTAssertTrue(
+            wait(for: { self.noteText(in: client)?.contains("echo") == true }),
+            "`/mcp` said nothing about the server"
+        )
+        let report = try XCTUnwrap(self.noteText(in: client))
+        XCTAssertTrue(report.contains("1 tool(s)"), report)
 
         // Stops the agent thread rather than leaving it to the process exit: the runtime has an event
         // loop of its own, and a test process that ends with one still spinning is a test process

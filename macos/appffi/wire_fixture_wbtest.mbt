@@ -106,6 +106,7 @@ fn wire_examples() -> Array[(String, Json)] raise {
         @core.ToolMode::Code,
         "/tmp/settings.json",
         [],
+        [],
         { text: "Run the tests with moon test.", source: @core.Saved, },
         {
           max_rounds: { value: 200.0, source: @core.Default, },

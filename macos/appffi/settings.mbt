@@ -82,6 +82,21 @@ async fn Shell::say_settings(self : Shell) -> Unit {
       ),
     )
   }
+  let servers : Array[Json] = []
+  for entry in self.server_entries(cwd) {
+    servers.push(
+      Json::object(
+        Map([
+          ("name", Json::string(entry.name)),
+          ("transport", Json::string(entry.transport)),
+          ("description", Json::string(entry.description)),
+          ("tool_count", Json::number(entry.tool_count.to_double())),
+          ("enabled", Json::boolean(entry.enabled)),
+          ("note", Json::string(entry.note)),
+        ]),
+      ),
+    )
+  }
   self.emit(
     settings_event(
       key_source_name(resolve_key(self.settings)),
@@ -90,10 +105,41 @@ async fn Shell::say_settings(self : Shell) -> Unit {
       self.settings.tool_mode,
       @platform.settings_path(self.home),
       skills,
+      servers,
       instructions,
       limits,
     ),
   )
+}
+
+///|
+/// Switch one MCP server on or off for the next turn.
+///
+/// The status sentence carries the *state after*, read back from the settings value rather than
+/// assumed, because `with_server_enabled` is where "was this name already off" is decided — the same
+/// arrangement `toggle_skill` uses, and for the same reason: two places deciding one thing is how a
+/// message comes to describe a state that never happened.
+async fn Shell::toggle_server(self : Shell, name : String) -> Unit {
+  let trimmed = name.trim().to_owned()
+  if trimmed == "" {
+    return
+  }
+  let updated = @core.AppSettings::with_server_enabled(
+    self.settings,
+    trimmed,
+    !self.settings.server_enabled(trimmed),
+  )
+  @platform.save_settings(self.home, updated)
+  self.settings = updated
+  self.say_status(
+    self.current,
+    if updated.server_enabled(trimmed) {
+      "mcp \{trimmed}: on — the next turn can reach it"
+    } else {
+      "mcp \{trimmed}: off — the next turn cannot"
+    },
+  )
+  self.say_settings()
 }
 
 ///|
@@ -111,6 +157,7 @@ fn settings_event(
   mode : @core.ToolMode,
   path : String,
   skills : Array[Json],
+  servers : Array[Json],
   instructions : @core.Instructions,
   limits : @core.Limits,
 ) -> Json {
@@ -126,6 +173,10 @@ fn settings_event(
     // fallback for everything the panel does not offer yet.
     ("path", Json::string(path)),
     ("skills", Json::array(skills)),
+    // The MCP servers this workspace has, switched on or off, with a reason when one is not up.
+    // Read from the same map the turn's tool set is built from, so the panel and the request cannot
+    // disagree about which servers a turn can reach.
+    ("servers", Json::array(servers)),
     ("instructions", Json::string(instructions.text)),
     (
       "instructions_source",

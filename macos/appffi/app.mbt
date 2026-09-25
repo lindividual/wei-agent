@@ -303,6 +303,20 @@ priv struct Shell {
   /// result is a real answer, and re-scanning for it on every use would put a directory walk in the
   /// path of every prompt.
   skills : Map[String, Array[@core.Skill]]
+  /// Live MCP servers per working directory, started when a session in that directory is shown.
+  ///
+  /// Keyed by directory for the same reason the skills are: a server is a fact about a *project*,
+  /// and two sessions open in two repositories must each reach their own. Held rather than started
+  /// per turn because a server is a process — starting one per turn would pay startup latency in the
+  /// middle of every question and lose whatever state the server keeps.
+  ///
+  /// A directory missing from the map means "not started yet", and an empty array means "started,
+  /// and there are none" — the same distinction `skills` draws, and for the same reason: a directory
+  /// with no `.mcp.json` must not be re-read on every turn.
+  mcp : Map[String, Array[@platform.McpSession]]
+  /// The servers that did not come up, per directory, with why. What `/mcp` shows and the catalog
+  /// deliberately does not — see `mcp_ensure`.
+  mcp_failed : Map[String, Array[(String, String)]]
   /// Where this shell's facts go.
   ///
   /// **The seam**, and the reason it is a value rather than the C function it used to be called
@@ -744,6 +758,8 @@ fn Shell::of(world : World, out? : (Json) -> Unit = emit) -> Shell {
     saved_jobs: "",
     sent_jobs: "",
     skills: Map([]),
+    mcp: Map([]),
+    mcp_failed: Map([]),
     // The wire, unless somebody hands in a different one. See `Shell::emit`.
     out,
   }
@@ -794,6 +810,10 @@ fn command_of(line : String) -> Command {
     "/attach-clear" => ClearAttachments
     "/usage" => ReportUsage
     "/jobs" => ReportJobs
+    // A word rather than a panel, for now: the reason a server did not come up is the one fact about
+    // MCP the reader cannot get any other way — the catalog deliberately names only what answered, so
+    // a config that is wrong is otherwise invisible.
+    "/mcp" => ReportMcp
     // A word without its argument is *not* a prompt. Every one of these was a fall-through once, which
     // meant a mistyped or truncated command was sent to the model as a question — a path command with
     // its path cut off would have been billed for and answered. The empty argument reaches the same
@@ -899,6 +919,10 @@ fn command_of(line : String) -> Command {
         }
       } else if line.has_prefix("/skill ") {
         ToggleSkill(line[7:].trim().to_owned())
+      } else if line.has_prefix("/mcp ") {
+        // A name, where bare `/mcp` is the report. The two are one word apart and mean different
+        // things, which is why the space is the whole distinction — as it is for `/skill`.
+        ToggleServer(line[5:].trim().to_owned())
       } else if line.has_prefix("/instructions ") {
         // Everything after the word, newlines included: this is a text a reader typed, and the
         // settings file is where its shape is kept.
@@ -976,6 +1000,8 @@ priv enum Command {
   Detach(String)
   ClearAttachments
   ReportUsage
+  /// Which MCP servers this working directory has, and which of its configured ones did not come up.
+  ReportMcp
   /// Carry on the turn that is open in the log, using the prompt it was already asked.
   ContinueTurn
   /// Close that turn without resuming it.
@@ -989,6 +1015,8 @@ priv enum Command {
   ReportJobs
   KillJob(String)
   ToggleSkill(String)
+  /// An MCP server, by name: switch it on or off for the next turn.
+  ToggleServer(String)
   SetInstructions(String)
   SetLimits(String, String, String)
 }
@@ -1111,7 +1139,7 @@ priv enum Gate {
 /// commands that would decide something *about* that turn.
 ///
 /// **Exhaustive on purpose.** A new command has to be classified here before it compiles, which is
-/// the point: the answer for the other thirty-four is `Allowed`, and the reason is one of three —
+/// the point: the answer for the other thirty-five is `Allowed`, and the reason is one of three —
 /// they name a target of their own (`Delete`, `Rename`, `WorkspaceDelete` all carry a path, so the
 /// question "is the session on screen busy" is not the question they are asking); they disturb no
 /// file (`Open`, `NewIn`, `NewSession`, `Fork`); or they are about the turn rather than about the
@@ -1154,6 +1182,7 @@ fn gate(command : Command, busy : Bool) -> Gate {
     | SetPinned(_, _)
     | Restore(_)
     | ToggleSkill(_)
+    | ToggleServer(_)
     | SetInstructions(_)
     | SetLimits(_, _, _)
     | Attach(_)
@@ -1162,6 +1191,7 @@ fn gate(command : Command, busy : Bool) -> Gate {
     | ClearAttachments
     | ReportUsage
     | ReportJobs
+    | ReportMcp
     | KillJob(_) => Allowed
   }
 }
@@ -1205,6 +1235,18 @@ async fn[X] Shell::handle(
       return Going
     }
     Allowed => ()
+  }
+  // This directory's servers, if this is the first command since the session was shown. Idempotent
+  // and cheap — a map lookup after the first time — so it stands here rather than in each command
+  // that might need them: a switch, a question, and the tick that reports the context figure all go
+  // through this function, and all three are answered by the same map. See `mcp_ensure` for why it
+  // is here rather than inside the turn alone: the figure and the request have to agree.
+  //
+  // Not on the way out: `Quit` is about to close everything, and starting a server to shut it down
+  // a moment later is work nobody asked for.
+  match command {
+    Quit => ()
+    _ => self.mcp_ensure(group, open.cwd)
   }
   match command {
     Prompt(text) =>
@@ -1298,6 +1340,7 @@ async fn[X] Shell::handle(
     SetPinned(path, pinned) => self.set_pinned(path, pinned)
     Restore(path) => self.restore(path)
     ToggleSkill(name) => self.toggle_skill(name)
+    ToggleServer(name) => self.toggle_server(name)
     SetInstructions(text) => self.set_instructions(text)
     SetLimits(rounds, cost, seconds) => self.set_limits(rounds, cost, seconds)
     // Attachments are not gated on being idle: they belong to the prompt that has not been
@@ -1311,6 +1354,7 @@ async fn[X] Shell::handle(
     // figures asks when it opens rather than trusting a line the reader may have read a turn
     // ago.
     ReportUsage => self.say_usage(open)
+    ReportMcp => self.report_mcp(open)
     ReportJobs => self.say_jobs_now()
     KillJob(id) => self.kill_job(id)
     ReportModel => self.say_status(open.path, model_report(open))
@@ -1351,9 +1395,19 @@ async fn[X] Shell::handle(
       for each in self.opens {
         each.aborting.val = true
       }
+      // And every MCP server, for the same reason one step further out: a child process that
+      // outlived this window would be one nobody can see or stop, since this window is the only
+      // interface there is for stopping one.
+      self.mcp_dispose()
       return Quit
     }
   }
+  // A command may have changed which session is on screen — `Show`, `NewSession`, `NewIn`, `Fork` —
+  // and a server is a fact about that session's directory rather than about the one that was showing
+  // when the command arrived. Ensured here, after the command, so the *next* figure and the next
+  // turn have it; the ensure at the top of this function is what made this command's own turn and
+  // `/usage` correct, and it ran against the directory that was current when the command arrived.
+  self.mcp_ensure(group, self.shown().cwd)
   Going
 }
 

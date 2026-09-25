@@ -30,6 +30,10 @@ public struct ShellSettings: Equatable, Decodable {
     /// that only showed what is on would have nothing to click to turn something off, and a skill
     /// switched off before it was uninstalled is a setting a reader could no longer see to undo.
     public let skills: [SkillEntry]
+    /// Every MCP server this workspace configures, switched on or off. Configured rather than
+    /// reachable: an entry the shell could not start is listed too, with the reason, because "I
+    /// wrote it down and nothing happens" is the case this list exists to answer.
+    public let servers: [ServerEntry]
     /// The fallback instructions in force — what a turn appends in a workspace with no `AGENTS.md`.
     public let instructions: String
     /// `file`, `saved` or `none`. Shown beside the text, because the two disagreeing is exactly the
@@ -40,7 +44,7 @@ public struct ShellSettings: Equatable, Decodable {
     public let limits: Limits
 
     private enum CodingKeys: String, CodingKey {
-        case key, env, saved, mode, path, skills, instructions, limits
+        case key, env, saved, mode, path, skills, servers, instructions, limits
         case instructionsSource = "instructions_source"
     }
 
@@ -77,6 +81,55 @@ public struct SkillEntry: Equatable, Decodable, Identifiable {
         self.description = description
         self.path = path
         self.enabled = enabled
+    }
+}
+
+/// One line of the MCP servers list.
+///
+/// Wider than a skill's, because the questions are different: a skill is either there or not, and a
+/// server can be configured, switched off, up, or broken — and a reader needs to tell those apart to
+/// know whether the switch is the thing standing in their way.
+public struct ServerEntry: Equatable, Decodable, Identifiable {
+    public let name: String
+    /// `stdio` or `http`, or empty for an entry the shell could not read a transport out of.
+    public let transport: String
+    /// One line from the config, when it has one.
+    public let description: String
+    /// How many tools it offers. Zero for one that is not up, and for one that is up with nothing.
+    public let toolCount: Int
+    public let enabled: Bool
+    /// Why it is not running, when that is something the reader can act on. Empty when it is up, and
+    /// empty when it is off on purpose — a switch that is off is not a fault.
+    public let note: String
+
+    public var id: String { name }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, transport, description, enabled, note
+        case toolCount = "tool_count"
+    }
+
+    /// A one-line summary of what this row can actually do right now, for the panel's secondary text.
+    public var status: String {
+        if !enabled { return "off" }
+        if !note.isEmpty { return note }
+        return toolCount == 1 ? "1 tool" : "\(toolCount) tools"
+    }
+
+    public init(
+        name: String,
+        transport: String,
+        description: String,
+        toolCount: Int,
+        enabled: Bool,
+        note: String
+    ) {
+        self.name = name
+        self.transport = transport
+        self.description = description
+        self.toolCount = toolCount
+        self.enabled = enabled
+        self.note = note
     }
 }
 

@@ -30,6 +30,12 @@ pub(all) struct AppSettings {
   /// Skill names switched off. Names rather than paths, so a setting survives a skill being
   /// reinstalled elsewhere, and so a name that no longer exists is harmless rather than broken.
   disabled_skills : Array[String]
+  /// MCP server names switched off, by the same rule as the skills: a name survives a config being
+  /// edited, and a name that no longer exists is harmless rather than broken.
+  ///
+  /// A server rather than a tool, because that is the unit a reader trusts in: they decide whether to
+  /// hand an agent a GitHub token, not whether to hand it `create_issue` and not `list_repos`.
+  disabled_servers : Array[String]
   /// The instructions a workspace gets when it has no `AGENTS.md` of its own, or empty for none.
   ///
   /// A fallback rather than an addition: a repository's own file is the more specific authority on
@@ -58,6 +64,7 @@ pub fn AppSettings::new() -> AppSettings {
   {
     saved_api_key: "",
     disabled_skills: [],
+    disabled_servers: [],
     agents_md: "",
     max_rounds: None,
     max_cost: None,
@@ -107,12 +114,40 @@ pub fn AppSettings::with_skill_enabled(
   {
     saved_api_key: self.saved_api_key,
     disabled_skills: out,
+    disabled_servers: self.disabled_servers,
     agents_md: self.agents_md,
     max_rounds: self.max_rounds,
     max_cost: self.max_cost,
     max_seconds: self.max_seconds,
     tool_mode: self.tool_mode,
   }
+}
+
+///|
+/// Whether a configured MCP server should reach a turn.
+pub fn AppSettings::server_enabled(self : AppSettings, name : String) -> Bool {
+  !self.disabled_servers.contains(name)
+}
+
+///|
+/// A copy with one MCP server switched on or off. The same rule as `with_skill_enabled`, for the
+/// same reason: a copy, never a mutation of an array the caller still holds.
+pub fn AppSettings::with_server_enabled(
+  self : AppSettings,
+  name : String,
+  enabled : Bool,
+) -> AppSettings {
+  let out : Array[String] = []
+  for existing in self.disabled_servers {
+    if existing != name {
+      out.push(existing)
+    }
+  }
+  if !enabled {
+    out.push(name)
+  }
+  out.sort_by((a, b) => compare_names(a, b))
+  { ..self, disabled_servers: out, }
 }
 
 ///|
@@ -125,6 +160,7 @@ pub fn AppSettings::with_saved_api_key(
   {
     saved_api_key: key.trim().to_owned(),
     disabled_skills: self.disabled_skills,
+    disabled_servers: self.disabled_servers,
     agents_md: self.agents_md,
     max_rounds: self.max_rounds,
     max_cost: self.max_cost,
@@ -147,6 +183,7 @@ pub fn AppSettings::with_agents_md(
   {
     saved_api_key: self.saved_api_key,
     disabled_skills: self.disabled_skills,
+    disabled_servers: self.disabled_servers,
     agents_md: text.trim().to_owned(),
     max_rounds: self.max_rounds,
     max_cost: self.max_cost,
@@ -170,6 +207,7 @@ pub fn AppSettings::with_limits(
   {
     saved_api_key: self.saved_api_key,
     disabled_skills: self.disabled_skills,
+    disabled_servers: self.disabled_servers,
     agents_md: self.agents_md,
     max_rounds,
     max_cost,
@@ -463,15 +501,26 @@ pub fn choose_instructions(
 /// A cleared limit is written as `null` rather than omitted and not as `0`: the three states are
 /// "no opinion", "explicitly off" and a number, and a file that spelled the first two the same way
 /// would lose which one the reader meant.
+
+///|
+/// A switch list as JSON. Shared by the skills and the servers for the reason the decoder is: two
+/// spellings of the same list would be two things to keep in step.
+fn encode_name_list(names : Array[String]) -> Json {
+  let ordered = names.copy()
+  ordered.sort_by((a, b) => compare_names(a, b))
+  let out : Array[Json] = []
+  for name in ordered {
+    out.push(Json::string(name))
+  }
+  Json::array(out)
+}
+
+///|
 pub fn encode_app_settings(settings : AppSettings) -> String {
-  let ordered = settings.disabled_skills.copy()
   // `compare_names` rather than `sort`, which would order strings by length first and put
   // "beta" before "alpha".
-  ordered.sort_by((a, b) => compare_names(a, b))
-  let disabled : Array[Json] = []
-  for name in ordered {
-    disabled.push(Json::string(name))
-  }
+  let disabled = encode_name_list(settings.disabled_skills)
+  let disabled_servers = encode_name_list(settings.disabled_servers)
   let rounds : Json = match settings.max_rounds {
     Some(value) => Json::number(value.to_double())
     None => Json::null()
@@ -487,7 +536,8 @@ pub fn encode_app_settings(settings : AppSettings) -> String {
   Json::object(
     Map([
       ("saved_api_key", Json::string(settings.saved_api_key)),
-      ("disabled_skills", Json::array(disabled)),
+      ("disabled_skills", disabled),
+      ("disabled_servers", disabled_servers),
       ("agents_md", Json::string(settings.agents_md)),
       ("max_rounds", rounds),
       ("max_cost", cost),
@@ -514,21 +564,8 @@ pub fn decode_app_settings(text : String) -> AppSettings {
     Some(String(key)) => key
     _ => ""
   }
-  let disabled_skills : Array[String] = []
-  match settings_field(parsed, "disabled_skills") {
-    Some(Array(items)) =>
-      for item in items {
-        match item {
-          String(name) =>
-            if name != "" && !disabled_skills.contains(name) {
-              disabled_skills.push(name)
-            }
-          _ => ()
-        }
-      }
-    _ => ()
-  }
-  disabled_skills.sort_by((a, b) => compare_names(a, b))
+  let disabled_skills = decode_name_list(parsed, "disabled_skills")
+  let disabled_servers = decode_name_list(parsed, "disabled_servers")
   // A limit that is not a non-negative number is read as "no opinion" rather than as a bound. The
   // file is hand-editable, and the alternative — accepting `-5` and passing it to a guard that
   // treats `> 0` as "on" — would turn a typo into a silently disabled bound.
@@ -560,12 +597,37 @@ pub fn decode_app_settings(text : String) -> AppSettings {
   {
     saved_api_key,
     disabled_skills,
+    disabled_servers,
     agents_md,
     max_rounds,
     max_cost,
     max_seconds,
     tool_mode,
   }
+}
+
+///|
+/// A list of names from a settings field: strings only, blanks and duplicates dropped, sorted.
+///
+/// One reader for both switch lists, because they are the same problem — a hand-edited file may hold
+/// anything — and two readers would be two answers the day one of them was fixed.
+fn decode_name_list(settings : Json, key : String) -> Array[String] {
+  let out : Array[String] = []
+  match settings_field(settings, key) {
+    Some(Array(items)) =>
+      for item in items {
+        match item {
+          String(name) =>
+            if name != "" && !out.contains(name) {
+              out.push(name)
+            }
+          _ => ()
+        }
+      }
+    _ => ()
+  }
+  out.sort_by((a, b) => compare_names(a, b))
+  out
 }
 
 ///|

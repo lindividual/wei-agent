@@ -30,7 +30,7 @@ public enum ShellState: Equatable {
 /// two lists are joined in exactly one place — `SettingsView`'s mapping to its own `Pane` — so a pane
 /// renamed there has one switch to update rather than a string somewhere that quietly stops matching.
 public enum SettingsPane: String, Equatable, Sendable {
-    case key, tools, skills, instructions, limits
+    case key, tools, skills, mcp, instructions, limits
 }
 
 /// A conversation that just left the store.
@@ -573,6 +573,21 @@ public final class ShellClient: ObservableObject {
     public func toggleSkill(_ name: String) {
         guard !name.isEmpty else { return }
         tell("/skill \(name)")
+    }
+
+    /// Switch one MCP server on or off. The bare `/mcp` is the report, so the name is what makes
+    /// this the other command — the same one-word distinction `/skill` draws.
+    public func toggleServer(_ name: String) {
+        guard !name.isEmpty else { return }
+        tell("/mcp \(name)")
+    }
+
+    /// Ask what MCP servers this workspace has, and why any of them are not up.
+    ///
+    /// The answer arrives as a `note` row rather than as a settings field, because it is a fact about
+    /// the conversation the reader asked for — the same shape `/skill` answers with.
+    public func reportMcp() {
+        tell("/mcp")
     }
 
     /// Save the fallback instructions, or clear them with an empty string.

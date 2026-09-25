@@ -278,9 +278,10 @@ final class SettingsTests: XCTestCase {
     /// can honour, and the file they live in.
     ///
     /// The two skills are deliberately one of each: a skill with a file behind it and one whose file
-    /// is gone, which is the row that exists only so its switch can be undone.
+    /// is gone, which is the row that exists only so its switch can be undone. The two servers are the
+    /// same idea: one up with tools, one configured and broken — the row that exists to say why.
     private let settingsLine = #"""
-    {"kind":"settings","key":"environment","env":true,"saved":true,"mode":"code","path":"/Users/me/.wei/settings.json","skills":[{"name":"moonbit","description":"How to build and test this project","path":"/Users/me/.wei/skills/moonbit/SKILL.md","enabled":true},{"name":"gone","description":"","path":"","enabled":false}],"instructions":"Run the tests with moon test.","instructions_source":"saved","limits":{"rounds":{"value":"200","source":"default"},"cost":{"value":"0.05","source":"saved"},"seconds":{"value":"1800","source":"flag"}}}
+    {"kind":"settings","key":"environment","env":true,"saved":true,"mode":"code","path":"/Users/me/.wei/settings.json","skills":[{"name":"moonbit","description":"How to build and test this project","path":"/Users/me/.wei/skills/moonbit/SKILL.md","enabled":true},{"name":"gone","description":"","path":"","enabled":false}],"servers":[{"name":"github","transport":"stdio","description":"Issues and pull requests.","tool_count":3,"enabled":true,"note":""},{"name":"remote","transport":"http","description":"","tool_count":0,"enabled":false,"note":""}],"instructions":"Run the tests with moon test.","instructions_source":"saved","limits":{"rounds":{"value":"200","source":"default"},"cost":{"value":"0.05","source":"saved"},"seconds":{"value":"1800","source":"flag"}}}
     """#
 
     func testSettingsNameTheKeySourceAndTheMode() throws {
@@ -301,6 +302,18 @@ final class SettingsTests: XCTestCase {
         XCTAssertTrue(settings.skills[0].enabled)
         XCTAssertFalse(settings.skills[1].enabled)
         XCTAssertTrue(settings.skills[1].path.isEmpty)
+        // The MCP servers, which the panel draws the same way: a name, whether it is on, and what it
+        // can actually do right now.
+        XCTAssertEqual(settings.servers.map(\.name), ["github", "remote"])
+        XCTAssertEqual(settings.servers[0].transport, "stdio")
+        XCTAssertEqual(settings.servers[0].toolCount, 3)
+        XCTAssertEqual(settings.servers[0].status, "3 tools")
+        XCTAssertTrue(settings.servers[0].enabled)
+        XCTAssertTrue(settings.servers[0].note.isEmpty)
+        // A switched-off server says so, and does not say anything about being broken: a switch a
+        // reader flipped is not a fault.
+        XCTAssertFalse(settings.servers[1].enabled)
+        XCTAssertEqual(settings.servers[1].status, "off")
         // The instructions and where they came from: the two disagreeing is the case the panel has to
         // explain, and it cannot explain what it was not told.
         XCTAssertEqual(settings.instructions, "Run the tests with moon test.")
@@ -316,7 +329,7 @@ final class SettingsTests: XCTestCase {
     /// A machine with nothing saved and nothing in the environment: the state the panel exists to get
     /// a person out of, and the one that has to be legible rather than empty.
     func testNoKeyIsAStateAndNotAnAbsence() throws {
-        let line = #"{"kind":"settings","key":"none","env":false,"saved":false,"mode":"tools","path":"/tmp/settings.json","skills":[],"instructions":"","instructions_source":"none","limits":{"rounds":{"value":"200","source":"default"},"cost":{"value":"1","source":"default"},"seconds":{"value":"1800","source":"default"}}}"#
+        let line = #"{"kind":"settings","key":"none","env":false,"saved":false,"mode":"tools","path":"/tmp/settings.json","skills":[],"servers":[],"instructions":"","instructions_source":"none","limits":{"rounds":{"value":"200","source":"default"},"cost":{"value":"1","source":"default"},"seconds":{"value":"1800","source":"default"}}}"#
         let event = try XCTUnwrap(ShellEvent.decode(line: line))
         guard case let .settings(settings) = event else {
             return XCTFail("expected settings, got \(event)")

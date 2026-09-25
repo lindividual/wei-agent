@@ -15,6 +15,7 @@ test "a round trip preserves the key, the names and the limits" {
   let settings : AppSettings = {
     saved_api_key: "sk-from-the-panel",
     disabled_skills: ["alpha", "beta"],
+    disabled_servers: ["github"],
     agents_md: "Prefer small diffs.",
     max_rounds: Some(40),
     max_cost: Some(0.25),
@@ -336,4 +337,51 @@ test "nothing set is not a choice" {
   // An empty string is absence, not a key: a caller that read a file with nothing in it can hand
   // one over, and treating it as a value would send `Bearer ` to the model.
   assert_true(choose_api_key("", "") is None)
+}
+
+///|
+/// A server switch round-trips, and behaves like a skill switch in the three ways that matter: two
+/// switches on one value do not tread on each other, turning one off twice is idempotent, and an
+/// unknown name is harmless.
+test "a server switch is a copy, and survives a round trip" {
+  let base = AppSettings::new()
+  let off_github = base.with_server_enabled("github", false)
+  let off_both = off_github.with_server_enabled("linear", false)
+  assert_eq(off_both.disabled_servers, ["github", "linear"])
+  // The original is untouched: an array the caller still holds must not have been mutated.
+  assert_eq(base.disabled_servers, [])
+  assert_eq(off_github.disabled_servers, ["github"])
+  // Turning one back on removes just that name, and turning an unknown one on is not an error.
+  let back = off_both.with_server_enabled("github", true)
+  assert_eq(back.disabled_servers, ["linear"])
+  assert_eq(back.with_server_enabled("nobody", true).disabled_servers, [
+    "linear",
+  ])
+  // Sorted, so two settings that mean the same thing are the same bytes on disk.
+  let unsorted = base
+    .with_server_enabled("zeta", false)
+    .with_server_enabled("alpha", false)
+  assert_eq(unsorted.disabled_servers, ["alpha", "zeta"])
+  // And the file is where it survives: encode then decode is the value again.
+  assert_eq(decode_app_settings(encode_app_settings(off_both)), off_both)
+}
+
+///|
+/// The two switch lists are independent: they are decoded by one reader and written by one writer,
+/// and a change made for one must not move the other.
+test "the skill switches and the server switches do not tread on each other" {
+  let settings = AppSettings::new()
+    .with_skill_enabled("moonbit", false)
+    .with_server_enabled("github", false)
+  assert_eq(settings.disabled_skills, ["moonbit"])
+  assert_eq(settings.disabled_servers, ["github"])
+  assert_true(settings.skill_enabled("moonbit") == false)
+  assert_true(settings.server_enabled("github") == false)
+  // A name that is off in one list is not off in the other, even when the two are spelled the same.
+  let same_name = AppSettings::new()
+    .with_skill_enabled("github", false)
+    .with_server_enabled("github", false)
+    .with_server_enabled("github", true)
+  assert_false(same_name.skill_enabled("github"))
+  assert_true(same_name.server_enabled("github"))
 }

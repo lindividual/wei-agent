@@ -757,6 +757,7 @@ test "settings carry the key source, the flags, the mode and the file" {
     @core.ToolMode::Code,
     "/Users/me/.wei/settings.json",
     [],
+    [],
     { text: "Run the tests with moon test.", source: @core.Saved, },
     {
       max_rounds: { value: 200.0, source: @core.Default, },
@@ -766,7 +767,7 @@ test "settings carry the key source, the flags, the mode and the file" {
   )
   inspect(
     json.stringify(),
-    content="{\"kind\":\"settings\",\"key\":\"environment\",\"env\":true,\"saved\":true,\"mode\":\"code\",\"path\":\"/Users/me/.wei/settings.json\",\"skills\":[],\"instructions\":\"Run the tests with moon test.\",\"instructions_source\":\"saved\",\"limits\":{\"rounds\":{\"value\":\"200\",\"source\":\"default\"},\"cost\":{\"value\":\"0.05\",\"source\":\"saved\"},\"seconds\":{\"value\":\"1800\",\"source\":\"flag\"}}}",
+    content="{\"kind\":\"settings\",\"key\":\"environment\",\"env\":true,\"saved\":true,\"mode\":\"code\",\"path\":\"/Users/me/.wei/settings.json\",\"skills\":[],\"servers\":[],\"instructions\":\"Run the tests with moon test.\",\"instructions_source\":\"saved\",\"limits\":{\"rounds\":{\"value\":\"200\",\"source\":\"default\"},\"cost\":{\"value\":\"0.05\",\"source\":\"saved\"},\"seconds\":{\"value\":\"1800\",\"source\":\"flag\"}}}",
   )
 }
 
