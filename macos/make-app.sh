@@ -50,6 +50,22 @@ VERSION="${VERSION:-0.0.0}"
 # document or a saved window belongs to.
 BUNDLE_ID="${WEI_BUNDLE_ID:-io.github.lindividual.wei-agent}"
 
+# Where a running copy looks for its updates, and the key it will only accept one from. Both are baked
+# into every copy ever shipped and neither can be corrected afterwards:
+#
+#   * `SUFeedURL` is the feed. A v1 that names a dead one can never *find* an update, and an appcast
+#     has no redirect to fix the address later — the only repair is a version that people already have.
+#   * `SUPublicEDKey` is the only key Sparkle accepts a new version from. Sparkle supports *rotating*
+#     this key, but refuses to remove one an older version carried, so a v1 shipped without it would
+#     leave code signing carrying updates forever — with a self-signed certificate that no future
+#     Developer ID could replace.
+#
+# The private half is in the login keychain, made by `generate_keys` from Sparkle's release archive. It
+# must be backed up and put in CI before the first release: a lost private key is a product that can no
+# longer update itself. `macos/README.md` has the three commands.
+FEED_URL="${WEI_FEED_URL:-https://lindividual.github.io/wei-agent/appcast.xml}"
+PUBLIC_ED_KEY="${WEI_PUBLIC_ED_KEY:-+XfuETMrsXvRQg53m5qotmg2nqWP5dOXjg0bpBuDSb4=}"
+
 echo "==> MoonBit side ($PROFILE)"
 "$MACOS/build-moonbit.sh" "$PROFILE"
 
@@ -88,8 +104,24 @@ fi
 
 echo "==> bundle"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BINARY" "$APP/Contents/MacOS/$EXECUTABLE"
+
+# Sparkle is a *dynamic* framework, so the copy in the bundle is the one that runs, and the executable
+# has to be told where to find it. SwiftPM links it as `@rpath/Sparkle.framework/Versions/B/Sparkle` and
+# leaves one rpath behind — `@loader_path`, which resolves to `Contents/MacOS` and is where the
+# framework is not. The rpath is added here rather than in Package.swift because `Contents/Frameworks`
+# is a fact about the bundle, and the package is not the thing that knows the bundle's shape.
+#
+# Measured, not assumed: without this the app links, packages, and then dies in dyld on first launch.
+cp -R "$BIN_DIR/Sparkle.framework" "$APP/Contents/Frameworks/"
+EXEC="$APP/Contents/MacOS/$EXECUTABLE"
+if ! otool -l "$EXEC" | grep -A2 LC_RPATH | grep -q "@executable_path/../Frameworks"; then
+  install_name_tool -add_rpath "@executable_path/../Frameworks" "$EXEC"
+fi
+# Sparkle's own tools, kept out of the shipped app: `generate_appcast` and `sign_update` belong to the
+# machine that makes a release, not to the machine that installs one.
+rm -rf "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/bin" 2>/dev/null || true
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -114,8 +146,24 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>$VERSION</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
+  <!-- Sparkle 2. Read from here by the updater, and baked into every copy ever shipped: see the
+       comment beside FEED_URL above for why neither of these can be corrected after v1. -->
+  <key>SUFeedURL</key>
+  <string>$FEED_URL</string>
+  <key>SUPublicEDKey</key>
+  <string>$PUBLIC_ED_KEY</string>
+  <!-- Check on a schedule rather than asking on first launch: the same answer is wanted every time,
+       and an update prompt is only useful before the reader has started something. -->
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
+  <!-- Saying 14.0 here while the Swift package requires 26.0 is the one failure with no upside:
+       LaunchServices would let the app start on 14, dyld would then fail on a 26.0 symbol, and the
+       reader — who has just been taught to work around Gatekeeper — gets a crash report. The number
+       has to be the real one, and the real one is the platforms: line in macos/WeiShell/Package.swift.
+       (No backticks in this heredoc: it is unquoted so that the values above expand, which means the
+       shell would read them as command substitution.) -->
   <key>LSMinimumSystemVersion</key>
-  <string>14.0</string>
+  <string>26.0</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key>
@@ -166,6 +214,25 @@ if [ "$SIGN_IDENTITY" != "-" ] &&
   SIGN_IDENTITY="-"
 fi
 echo "==> sign ($SIGN_IDENTITY)"
+# Inside out, and each one named rather than reached by `--deep`. There are four pieces of nested code
+# in Sparkle — `Installer.xpc`, `Downloader.xpc`, `Updater.app` and the framework itself — and a single
+# `codesign` on the app does not seal them; `--deep` is the flag that hides a second binary somebody
+# forgot to sign, which is the failure this project already refuses to use `--deep` for. Signing
+# outward is also the only order that works: signing a container over an unsigned child invalidates it.
+#
+# Re-signing Sparkle's own components with this identity is deliberate. They arrive signed by Sparkle's
+# Developer ID, and a release whose app and whose updater disagree about who signed them is a release
+# that stops updating the day the identity becomes one Apple issued. Their entitlements are empty
+# (checked: `codesign -d --entitlements -` on all three prints an empty dict), so re-signing drops
+# nothing.
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+for nested in \
+  "$SPARKLE/Versions/B/XPCServices/Downloader.xpc" \
+  "$SPARKLE/Versions/B/XPCServices/Installer.xpc" \
+  "$SPARKLE/Versions/B/Updater.app"; do
+  [ -e "$nested" ] && codesign --force --sign "$SIGN_IDENTITY" "$nested"
+done
+[ -e "$SPARKLE" ] && codesign --force --sign "$SIGN_IDENTITY" "$SPARKLE"
 codesign --force --sign "$SIGN_IDENTITY" "$APP"
 
 echo

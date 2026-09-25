@@ -247,38 +247,6 @@ async test "a job without kept output says so rather than reading a stale file" 
 }
 
 ///|
-/// The pruner leaves a live job's output alone and removes an old one.
-///
-/// Bounded by age rather than cleared, because the directory is the machine's and a second server
-/// starting up must not delete the first one's live job output. The two cases are told apart by when
-/// the file was last written, so that is what this checks.
-async test "old job output is pruned, recent output is kept" {
-  let dir = tree_dir()
-  @platform.make_dirs(dir)
-  let fresh = "\{dir}/job-\{@core.new_entry_id()}.out"
-  let stale = "\{dir}/job-\{@core.new_entry_id()}.out"
-  @platform.write_text(fresh, "still being waited on")
-  @platform.write_text(stale, "from a run that is over")
-  // The only way to make a file old without waiting a day. `mtime` is read back from the file
-  // system, so the check is about the ages the pruner sees, not about a mock.
-  ignore(
-    @process.collect_output("/usr/bin/touch", ["-t", "202001010000", stale]),
-  )
-  let now = @env.now().reinterpret_as_int64()
-  @platform.clear_job_outputs(now)
-  assert_true(
-    @platform.path_exists(fresh),
-    msg="a recent output file was deleted",
-  )
-  assert_false(@platform.path_exists(stale), msg="an old output file was kept")
-  try @fs.remove(fresh) catch {
-    _ => ()
-  } noraise {
-    _ => ()
-  }
-}
-
-///|
 /// The race the `call_open` flag exists for, end to end.
 ///
 /// A backgrounded command's shell exits within milliseconds while the tool call that started it is

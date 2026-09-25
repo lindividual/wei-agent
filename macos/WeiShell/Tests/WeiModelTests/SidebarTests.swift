@@ -346,31 +346,31 @@ final class SettingsTests: XCTestCase {
 /// package bounds: the shell parses with cmark, the host draws from this shape, and neither can rename
 /// a field without the other's build failing.
 ///
-/// These are the cases `AttributedString(markdown:)` — what the app used before `md/` existed — gets
-/// wrong, which is why the parse crosses as data rather than as source.
+/// These are the shapes a host cannot work out for itself: a table's alignments, a fence's language,
+/// which is why the parse crosses as data rather than as source.
 final class BlockTests: XCTestCase {
     private func decode(_ line: String) -> ShellEvent? {
         ShellEvent.decode(line: line)
     }
 
-    /// The three shapes a native markdown implementation gets wrong, and the one it has no answer for.
+    /// The shapes a host reading only the *source* could not recover, and the one it has no answer for.
     func testTheFourShapesThatMadeThisNecessary() throws {
         // A fence keeps its language, which is what a host uses to pick a highlight or at least a label.
         let code = try XCTUnwrap(
             decode(#"{"kind":"blocks","id":"reply-1","blocks":[{"t":"code","lang":"moonbit","text":"fn main {}"}]}"#)
         )
-        guard case let .blocks(_, blocks, _) = code else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, blocks, _, _) = code else { return XCTFail("expected blocks") }
         guard case let .code(lang, text) = blocks[0] else { return XCTFail("expected a fence") }
         XCTAssertEqual(lang, "moonbit")
         XCTAssertEqual(text, "fn main {}")
 
-        // A table, with its alignments — a thing `AttributedString` does not parse at all.
+        // A table, with its alignments — the fact a table carries that its cells do not.
         let table = try XCTUnwrap(
             decode(
                 #"{"kind":"blocks","id":"reply-2","blocks":[{"t":"table","header":[[{"t":"text","text":"a"}],[{"t":"text","text":"b"}]],"rows":[[[{"t":"text","text":"1"}],[{"t":"text","text":"2"}]]],"align":["left","right"]}]}"#
             )
         )
-        guard case let .blocks(_, tableBlocks, _) = table else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, tableBlocks, _, _) = table else { return XCTFail("expected blocks") }
         guard case let .table(header, rows, align) = tableBlocks[0] else {
             return XCTFail("expected a table")
         }
@@ -382,7 +382,7 @@ final class BlockTests: XCTestCase {
         let heading = try XCTUnwrap(
             decode(#"{"kind":"blocks","id":"reply-3","blocks":[{"t":"h","level":3,"spans":[{"t":"text","text":"Title"}]}]}"#)
         )
-        guard case let .blocks(_, headings, _) = heading else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, headings, _, _) = heading else { return XCTFail("expected blocks") }
         guard case let .heading(level, spans) = headings[0] else { return XCTFail("expected a heading") }
         XCTAssertEqual(level, 3)
         XCTAssertEqual(spans, [.text("Title")])
@@ -394,7 +394,7 @@ final class BlockTests: XCTestCase {
                 #"{"kind":"blocks","id":"reply-4","blocks":[{"t":"ul","items":[[{"t":"p","spans":[{"t":"text","text":"one"}]}],[{"t":"p","spans":[{"t":"text","text":"two"}]},{"t":"ul","items":[[{"t":"p","spans":[{"t":"text","text":"nested"}]}]]}]]}]}"#
             )
         )
-        guard case let .blocks(_, lists, _) = list else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, lists, _, _) = list else { return XCTFail("expected blocks") }
         guard case let .bullets(items) = lists[0] else { return XCTFail("expected a list") }
         XCTAssertEqual(items.count, 2)
         XCTAssertEqual(items[1].count, 2, "the nested list belongs to the second item")
@@ -411,7 +411,7 @@ final class BlockTests: XCTestCase {
                 #"{"kind":"blocks","id":"reply-5","blocks":[{"t":"p","spans":[{"t":"text","text":"a "},{"t":"strong","spans":[{"t":"em","spans":[{"t":"text","text":"both"}]}]},{"t":"code","text":"x"},{"t":"link","url":"https://x.y","spans":[{"t":"text","text":"here"}]}]}]}"#
             )
         )
-        guard case let .blocks(_, blocks, _) = event else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, blocks, _, _) = event else { return XCTFail("expected blocks") }
         guard case let .paragraph(spans) = blocks[0] else { return XCTFail("expected a paragraph") }
         XCTAssertEqual(spans.count, 4)
         XCTAssertEqual(spans[0], .text("a "))
@@ -431,7 +431,7 @@ final class BlockTests: XCTestCase {
                 #"{"kind":"blocks","id":"reply-6","blocks":[{"t":"p","spans":[{"t":"image","url":"/tmp/shot.png","alt":"a chart"}]}]}"#
             )
         )
-        guard case let .blocks(_, blocks, _) = event else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, blocks, _, _) = event else { return XCTFail("expected blocks") }
         guard case let .paragraph(spans) = blocks[0] else { return XCTFail("expected a paragraph") }
         XCTAssertEqual(spans, [.image(url: "/tmp/shot.png", alt: "a chart")])
     }
@@ -446,7 +446,10 @@ final class BlockTests: XCTestCase {
             .blocks(
                 id: "reply-1",
                 blocks: [.table(header: [[.text("a")], [.text("b")]], rows: [], align: [.left, .right])],
-                from: 0
+                from: 0,
+                // The whole of it: the text ends with the table's last row, so there is no block left
+                // being written. A frame that stopped short of it is the case below.
+                parsed: conversation.rows[0].text.utf16.count
             )
         )
         XCTAssertNotNil(conversation.rows[0].blocks)
@@ -454,7 +457,7 @@ final class BlockTests: XCTestCase {
 
         // A parse for a row that is not here is dropped rather than appended: it describes text that
         // this conversation does not have.
-        conversation.apply(.blocks(id: "reply-99", blocks: [.rule], from: 0))
+        conversation.apply(.blocks(id: "reply-99", blocks: [.rule], from: 0, parsed: 0))
         XCTAssertEqual(conversation.rows.count, 1)
     }
 
@@ -490,12 +493,13 @@ final class BlockTests: XCTestCase {
     func testALiveFrameNamesWhereItsBlocksStart() throws {
         let event = try XCTUnwrap(
             decode(
-                #"{"kind":"blocks","id":"reply-1-1","from":2,"blocks":[{"t":"p","spans":[{"t":"text","text":"more"}]}]}"#
+                #"{"kind":"blocks","id":"reply-1-1","from":2,"parsed":11,"blocks":[{"t":"p","spans":[{"t":"text","text":"more"}]}]}"#
             )
         )
-        guard case let .blocks(id, blocks, from) = event else { return XCTFail("expected blocks") }
+        guard case let .blocks(id, blocks, from, parsed) = event else { return XCTFail("expected blocks") }
         XCTAssertEqual(id, "reply-1-1")
         XCTAssertEqual(from, 2)
+        XCTAssertEqual(parsed, 11)
         XCTAssertEqual(blocks.count, 1)
     }
 
@@ -507,16 +511,54 @@ final class BlockTests: XCTestCase {
                 #"{"kind":"blocks","id":"reply-1","blocks":[{"t":"hr"}]}"#
             )
         )
-        guard case let .blocks(_, _, from) = event else { return XCTFail("expected blocks") }
+        guard case let .blocks(_, _, from, parsed) = event else { return XCTFail("expected blocks") }
         XCTAssertEqual(from, 0)
+        // And a shell that predates `parsed` meant that its blocks were the whole row — which is what
+        // `blocksCoverEverything` reads as, so nothing is drawn twice and nothing is hidden.
+        XCTAssertEqual(parsed, Row.blocksCoverEverything)
+    }
+
+    /// The split between what the shell parsed and what is still being written.
+    ///
+    /// This is the whole of "renders while it streams": a boundary in the middle of a row is what gives
+    /// the reader blocks above it and text below, rather than a blank row until the block ends.
+    func testTheTextAfterTheBoundaryIsWhatIsStillBeingWritten() {
+        let text = "one\n\ntwo"
+        XCTAssertEqual(unparsedTail(text: text, parsed: 5), "two")
+        // The whole row is parsed: nothing is left over, which is every finished block.
+        XCTAssertEqual(unparsedTail(text: text, parsed: text.utf16.count), "")
+        XCTAssertEqual(unparsedTail(text: text, parsed: Row.blocksCoverEverything), "")
+        // `0` is not a boundary — a boundary is the far side of a newline — and the shell never sends
+        // it. Read as "nothing is parsed yet" it would draw the whole row as text under the blocks that
+        // cover it, so it is read as "no boundary": nothing is left over.
+        XCTAssertEqual(unparsedTail(text: text, parsed: 0), "")
+        // The blank line the boundary sits on is how the markdown was written, not a gap the reader
+        // asked for, so it is not drawn — and a row that is nothing but that blank line has no tail.
+        XCTAssertEqual(unparsedTail(text: "one\n\ntwo\n\n", parsed: 5), "two")
+        XCTAssertEqual(unparsedTail(text: "one\n\n", parsed: 5), "")
+    }
+
+    /// A row with an emoji above the boundary: the shell counts code units, so the host has to.
+    ///
+    /// The case worth its own test is the one where the two units disagree. Read as a *character*
+    /// offset the same number lands inside the paragraph below — and for a boundary that fell one unit
+    /// earlier it would land inside the emoji's surrogate pair, which in Swift is not a wrong glyph but
+    /// a crash.
+    func testTheBoundaryIsCountedInTheSameUnitsTheShellCountedIn() {
+        let text = "😀\n\ntail"
+        XCTAssertEqual(text.count, 7, "characters")
+        XCTAssertEqual(text.utf16.count, 8, "code units, which is what `String::length` counts")
+        // 4 is the boundary `md.safe_boundary` returns for this row: the newline of the blank line.
+        XCTAssertEqual(unparsedTail(text: text, parsed: 4), "tail")
+        XCTAssertEqual(String(text.dropFirst(4)), "ail", "the same number, read as characters")
     }
 
     /// The head the host already has and the tail it is just being sent are **one document** again.
     func testALiveFrameIsAppendedToTheBlocksAlreadyHeld() {
         var conversation = Conversation()
         conversation.apply(.reply(id: "reply-1-1", delta: "one\n\ntwo"))
-        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("one")], from: 0))
-        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("two")], from: 1))
+        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("one")], from: 0, parsed: 3))
+        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("two")], from: 1, parsed: 8))
         XCTAssertEqual(conversation.rows[0].blocks, [paragraph("one"), paragraph("two")])
     }
 
@@ -525,12 +567,13 @@ final class BlockTests: XCTestCase {
     func testALiveFrameCanReplaceTheBlockItNames() {
         var conversation = Conversation()
         conversation.apply(.reply(id: "reply-1-1", delta: "| a |"))
-        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("| a |")], from: 0))
+        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("| a |")], from: 0, parsed: 5))
         conversation.apply(
             .blocks(
                 id: "reply-1-1",
                 blocks: [.table(header: [[.text("a")]], rows: [[[.text("1")]]], align: [.left])],
-                from: 0
+                from: 0,
+                parsed: 5
             )
         )
         guard case .table? = conversation.rows[0].blocks?[0] else {
@@ -543,8 +586,49 @@ final class BlockTests: XCTestCase {
     func testATailWithoutAHeadIsDropped() {
         var conversation = Conversation()
         conversation.apply(.reply(id: "reply-1-1", delta: "two"))
-        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("two")], from: 3))
+        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("two")], from: 3, parsed: 3))
         XCTAssertNil(conversation.rows[0].blocks)
+    }
+
+    /// The boundary moves with each frame, and it is what decides how much of the row is drawn as text.
+    func testALiveFrameSaysHowFarItsBlocksReach() {
+        var conversation = Conversation()
+        let source = "one\n\ntwo"
+        conversation.apply(.reply(id: "reply-1-1", delta: source))
+        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("one")], from: 0, parsed: 5))
+        XCTAssertEqual(tail(of: conversation), "two", "the block still being written is drawn from the text")
+        // The block ends: the shell parses the whole row, so the boundary is the whole of it and there
+        // is nothing left to draw as text.
+        conversation.apply(
+            .blocks(
+                id: "reply-1-1",
+                blocks: [paragraph("two")],
+                from: 1,
+                parsed: source.utf16.count
+            )
+        )
+        XCTAssertEqual(conversation.rows[0].blocks?.count, 2)
+        XCTAssertEqual(tail(of: conversation), "")
+    }
+
+    /// A frame that does not line up does not move the boundary either.
+    ///
+    /// Advancing it on a frame the host dropped would hide the words between the blocks it holds and the
+    /// boundary the shell now claims — a paragraph silently missing, which is worse than drawing it as
+    /// text for one more frame.
+    func testADroppedFrameDoesNotMoveTheBoundary() {
+        var conversation = Conversation()
+        conversation.apply(.reply(id: "reply-1-1", delta: "one\n\ntwo\n\nthree"))
+        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("one")], from: 0, parsed: 5))
+        conversation.apply(.blocks(id: "reply-1-1", blocks: [paragraph("three")], from: 2, parsed: 14))
+        XCTAssertEqual(conversation.rows[0].parsed, 5, "a dropped frame moved the boundary")
+        XCTAssertEqual(conversation.rows[0].blocks?.count, 1, "a dropped frame added blocks")
+    }
+
+    /// The tail of the one row a test built, as the view splits it.
+    private func tail(of conversation: Conversation) -> String {
+        let row = conversation.rows[0]
+        return unparsedTail(text: row.text, parsed: row.parsed)
     }
 
     /// The text that was arriving is over the moment a tool is asked for, not the moment it answers.

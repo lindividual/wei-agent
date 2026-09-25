@@ -292,6 +292,44 @@ async fn logged(path : String) -> @core.Session {
 }
 
 ///|
+/// Whether the log still holds a tool call on its path that no result answers.
+///
+/// **A test-local helper, deliberately.** `core` used to export exactly this question as
+/// `needs_repair`, and nothing in production ever called it — the repair that runs asks a *stronger*
+/// question ("is every result next to the call it answers?"), which is why a transcript where every
+/// call had a result and they were all in the wrong place found nothing to fix while every request came
+/// back `HTTP 400`. That stronger case has its own test (`an answer in the wrong place is moved to its
+/// call`); this one is what the assertions below mean when they say "the log still has an unanswered
+/// call", so it lives here rather than as a second public predicate beside the real one.
+fn has_unanswered_call(session : @core.Session) -> Bool {
+  let answered : Map[String, Unit] = Map([])
+  let calls : Array[String] = []
+  for entry in session.context_entries() {
+    match entry.kind {
+      @core.Message(message~) =>
+        match message {
+          @core.ToolResult(result) => answered.set(result.tool_call_id, ())
+          @core.Assistant(assistant) =>
+            for block in assistant.content {
+              match block {
+                @core.ToolCall(id~, ..) => calls.push(id)
+                _ => ()
+              }
+            }
+          _ => ()
+        }
+      _ => ()
+    }
+  }
+  for id in calls {
+    if answered.get(id) is None {
+      return true
+    }
+  }
+  false
+}
+
+///|
 /// A turn that uses a tool: the model asks, the tool runs, the result goes back, and
 /// the answer that follows is the one the user sees.
 ///
@@ -564,7 +602,7 @@ async test "a model that never settles is stopped by the round limit" {
     assert_eq(result.tool_calls, 3)
     // The log stays balanced: the last thing written is the result of the last tool
     // call, so a resumed session does not need repairing.
-    assert_false(result.session.needs_repair())
+    assert_false(result.session |> has_unanswered_call)
   })
 }
 
@@ -1418,8 +1456,6 @@ async test "a turn that finishes normally records that it finished" {
     assert_eq(session.last_turn_ending(), Some(@core.Completed))
     // The turn is closed, so it is not in flight any more.
     assert_false(session.turn_in_flight())
-    // And an ordinary ending is not an interruption, which is what keeps the status line quiet.
-    assert_false(@core.TurnEnding::Completed.is_interruption())
   })
 }
 
@@ -1453,9 +1489,9 @@ async test "a truncated answer is recorded as such" {
 ///|
 /// A turn that opens and never closes is one that was interrupted, and the log says so.
 ///
-/// This is the durable half of crash recovery. `needs_repair` covers the case where an assistant
-/// message asked for tools and no result answered them; it cannot see a turn killed between two
-/// completions, because such a turn leaves the conversation perfectly balanced. The open turn is
+/// This is the durable half of crash recovery. A check for calls nobody answered covers the case
+/// where an assistant message asked for tools and no result came back; it cannot see a turn killed
+/// between two completions, because such a turn leaves the conversation perfectly balanced. The open turn is
 /// what makes both cases visible, and it is written before any work happens precisely so that a
 /// kill at any moment leaves it behind.
 test "an open turn with no outcome is in flight" {
@@ -1818,7 +1854,7 @@ async test "an unanswered tool call is closed before the next request" {
     // And the log says so, so that the next process to open the session sends the same thing.
     let session = logged(ctx.session_path)
     assert_false(
-      session.needs_repair(),
+      has_unanswered_call(session),
       msg="the log still has an unanswered call",
     )
     let kinds : Array[String] = []
@@ -1887,7 +1923,7 @@ async test "a gap left by a stop is closed by the turn after it" {
     // written. This is what the reader's next prompt used to run into.
     let left = logged(ctx.session_path)
     assert_true(
-      left.needs_repair(),
+      has_unanswered_call(left),
       msg="the stop did not leave the unanswered call this test is about",
     )
 
@@ -1907,7 +1943,7 @@ async test "a gap left by a stop is closed by the turn after it" {
         seen2[0].contains("\"role\":\"tool\""),
         msg="the repaired request has no tool result: \{seen2[0]}",
       )
-      assert_false(logged(ctx2.session_path).needs_repair())
+      assert_false(has_unanswered_call(logged(ctx2.session_path)))
     })
   })
 }
@@ -2019,7 +2055,7 @@ async test "a prompt after a failure leaves one open turn, not two" {
       fail("starts=\{starts} outcomes=\{outcomes}\{trace}")
     }
     assert_false(log.turn_in_flight())
-    assert_false(log.needs_repair())
+    assert_false(has_unanswered_call(log))
   })
 }
 
@@ -2182,7 +2218,7 @@ async test "an interrupted call is answered where it was asked" {
       texts.contains("carry on"),
       msg="the reader's messages are not all on the path",
     )
-    assert_false(log.needs_repair())
+    assert_false(has_unanswered_call(log))
     assert_false(log.turn_in_flight())
   })
 }
@@ -2303,7 +2339,7 @@ async test "an answer in the wrong place is moved to its call" {
 
   // A repair that only asked "which calls have no result" would leave this session alone, which is
   // exactly what happened in the app.
-  assert_false(logged(path).needs_repair())
+  assert_false(has_unanswered_call(logged(path)))
 
   let seen : Array[String] = []
   with_fake_model([text_sse("done")], seen, async fn(base_url) {
@@ -2436,7 +2472,7 @@ async test "opening a session repairs it but leaves the interrupted turn open" {
     FIXED_TIME,
   )
   // The gap is closed…
-  assert_false(opened.needs_repair(), msg="the call was not answered")
+  assert_false(has_unanswered_call(opened), msg="the call was not answered")
   // …and the turn is still open, so whoever draws the session can still offer to continue it.
   assert_true(
     opened.turn_in_flight(),

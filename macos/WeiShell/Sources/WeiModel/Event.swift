@@ -103,13 +103,19 @@ public enum ShellEvent: Decodable, Equatable {
     /// have been carried out. The shell says which one happened, and this is what decides whether there
     /// is anything to put back.
     case deleted(path: String, label: String, restorable: Bool)
-    /// A block's rendering: the blocks at `from` onwards.
+    /// A block's rendering: the blocks at `from` onwards, covering the first `parsed` code units of
+    /// the row's text.
     ///
-    /// `from` is how many leading blocks the host already holds. A block that is still arriving is
-    /// re-rendered as it grows, and the part of it that has finished is not sent twice — which is
-    /// what makes rendering an answer while it arrives affordable. `0` means "the whole block", and
-    /// it is what every finished block sends.
-    case blocks(id: String, blocks: [Block], from: Int)
+    /// `from` is how many leading blocks the host already holds, so the part of the block that has
+    /// finished is not sent twice — which is what makes rendering an answer while it arrives
+    /// affordable. `0` means "the whole document", and it is what a block that has stopped growing
+    /// sends.
+    ///
+    /// `parsed` is where those blocks stop: the end of the last line that cannot change again. What
+    /// follows it in `text` is the one block still being written, and the host draws that itself, from
+    /// the deltas it has. The two fields are the two halves of the same fact — where the parse starts
+    /// in what the host holds, and how far into the text it reaches (`WeiModel`'s `unparsedTail`).
+    case blocks(id: String, blocks: [Block], from: Int, parsed: Int)
     /// What the settings panel draws. Re-sent whenever one of these facts changes, so the panel never
     /// has to guess about the key in use after saving one.
     case settings(ShellSettings)
@@ -162,16 +168,30 @@ public enum ShellEvent: Decodable, Equatable {
     /// The turn is over. `text` is empty when it finished normally.
     case end(text: String, calls: Int, tools: Int, cost: String)
     /// Something went wrong, said plainly.
-    case error(text: String)
+    ///
+    /// `endsTurn` says whether the turn that was running is over because of this — and which errors do that
+    /// is the **shell's** answer, not the host's, because the host cannot tell the two apart from the text.
+    /// They look the same, and they are not: a turn failing ends the turn, while a `kill` that could not
+    /// find its job, a settings save that could not write, or the jobs file that could not be recorded
+    /// happen *beside* a turn that is still running.
+    ///
+    /// This was a real bug, and the shape of it is worth keeping: the host used to treat every error as the
+    /// end of a turn, so a message about a jobs file — written on a two-second timer, while a long turn was
+    /// going — took the Stop button away. The reader could no longer stop the thing that was running, and
+    /// the only way out was to wait for it. Clearing on every error was a guess; this is the fact.
+    ///
+    /// Absent means false, the same rule every field that arrived after its first reader follows.
+    case error(text: String, endsTurn: Bool)
 
     private enum CodingKeys: String, CodingKey {
         case kind, session, model, cwd, key, text, id, delta
         case name, detail, done, output, calls, tools, cost
-        case path, rows, workspaces, env, saved, mode, blocks, from, items, images
+        case path, rows, workspaces, env, saved, mode, blocks, from, parsed, items, images
         case label, restorable, outcome
         case oldest
         case has_more
         case isError = "error"
+        case endsTurn
         case canSend = "can_send"
         case interrupted, continued
         case interruptedPrompt = "interrupted_prompt"
@@ -262,12 +282,18 @@ public enum ShellEvent: Decodable, Equatable {
         case "usage":
             self = .usage(try Usage(from: decoder))
         case "blocks":
-            self = .blocks(
-                id: try fields.decode(String.self, forKey: .id),
-                blocks: try fields.decode([Block].self, forKey: .blocks),
-                // Absent from any shell older than the field, and those send a block whole.
-                from: try fields.decodeIfPresent(Int.self, forKey: .from) ?? 0
-            )
+            // Hoisted into locals for the reason the `history` case above gives: this decoder is at the
+            // edge of what the type checker will work through in one expression, and four `try`s in one
+            // initializer crosses it.
+            let id = try fields.decode(String.self, forKey: .id)
+            let blocks = try fields.decode([Block].self, forKey: .blocks)
+            // Absent from any shell older than the field, and those send a block whole.
+            let from = try fields.decodeIfPresent(Int.self, forKey: .from) ?? 0
+            // And absent for the same reason: a shell that predates it meant that its blocks were the
+            // whole row, which is what an omitted boundary has to keep meaning here.
+            let parsed = try fields.decodeIfPresent(Int.self, forKey: .parsed)
+                ?? Row.blocksCoverEverything
+            self = .blocks(id: id, blocks: blocks, from: from, parsed: parsed)
         case "reply":
             self = .reply(
                 id: try fields.decode(String.self, forKey: .id),
@@ -304,7 +330,10 @@ public enum ShellEvent: Decodable, Equatable {
                 cost: try fields.decode(String.self, forKey: .cost)
             )
         case "error":
-            self = .error(text: try fields.decode(String.self, forKey: .text))
+            self = .error(
+                text: try fields.decode(String.self, forKey: .text),
+                endsTurn: try fields.decodeIfPresent(Bool.self, forKey: .endsTurn) ?? false
+            )
         default:
             // A newer MoonBit side, an older app. Refused rather than guessed at: an event the
             // host cannot name is one whose effect it cannot predict, and drawing half of it would

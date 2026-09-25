@@ -145,18 +145,6 @@ test "path follows the leaf to the root" {
   assert_eq(path[2].id, "c")
 }
 
-///|
-/// Pointing the leaf at an earlier entry truncates the conversation without
-/// touching the log — this is what branching is.
-test "path_to an earlier entry truncates" {
-  let session = chain(["a", "b", "c"])
-  let path = session.path_to(Some("b"))
-  assert_eq(path.length(), 2)
-  assert_eq(path[1].id, "b")
-  // An explicit `None` leaf is empty, which is how a fresh session starts.
-  assert_eq(session.path_to(None).length(), 0)
-}
-
 // ── Context derivation ─────────────────────────────────────────────────────
 
 ///|
@@ -350,5 +338,4 @@ test "a cyclic parent chain terminates instead of looping forever" {
   let path = session.path()
   // Both entries are reachable, and the walk stops at the repeat rather than going round again.
   assert_eq(path.length(), 2)
-  assert_eq(session.needs_repair(), false)
 }

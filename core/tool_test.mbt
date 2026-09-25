@@ -8,7 +8,13 @@
 test "tool declarations match the recorded ones" {
   for entry in upstream_tool_fixtures {
     let (name, upstream_name, description, parameters_text) = entry
-    let tool = match builtin_tool(name) {
+    let mut found : ToolDef? = None
+    for t in builtin_tools() {
+      if t.name == name {
+        found = Some(t)
+      }
+    }
+    let tool = match found {
       Some(t) => t
       None => fail("missing tool: \{name}")
     }

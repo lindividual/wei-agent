@@ -120,16 +120,6 @@ pub fn Job::age_ms(self : Job, now : Int64) -> Int64 {
 }
 
 ///|
-/// The one-line listing dsh's `job_list` prints: `<id> [<kind>] <status> — <label>`.
-///
-/// Same shape on purpose: it is what a reader (and, if we ever give the model the tool, the
-/// model) already knows how to read.
-pub fn Job::list_line(self : Job) -> String {
-  let detail = if self.detail == "" { "" } else { " (\{self.detail})" }
-  "\{self.id} [\{self.kind}] \{self.status.to_string()}\{detail} — \{self.label}"
-}
-
-///|
 /// The jobs of a session.
 ///
 /// A store rather than a single slot: the point of the feature is that one session can have

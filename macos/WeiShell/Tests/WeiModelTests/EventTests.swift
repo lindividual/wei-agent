@@ -68,10 +68,42 @@ final class EventTests: XCTestCase {
             )
         )
         XCTAssertEqual(envelope.session, "")
-        guard case let .error(text) = envelope.event else {
+        guard case let .error(text, endsTurn) = envelope.event else {
             return XCTFail("expected error, got \(envelope.event)")
         }
         XCTAssertEqual(text, "no session at /nope.jsonl")
+        // And a line with no `endsTurn` — which is every error a shell older than the field sent — is read
+        // as "the turn is still running" rather than as the end of one. That is what keeps an old shell's
+        // error from putting Stop away: see `ShellEvent.error`.
+        XCTAssertFalse(endsTurn)
+    }
+
+    /// The one error that *is* the end of a turn, and the flag the host draws Stop from.
+    ///
+    /// The bug this pins: the host cleared `running` on **every** error, so a jobs file that could not be
+    /// recorded — written on a two-second timer — took the Stop button away from a reader whose turn was
+    /// still going, and the only way out was to wait. The shell knows which errors end a turn and the host
+    /// cannot, so the flag travels.
+    func testOnlyTheErrorsThatEndATurnSaySo() throws {
+        let ends = try XCTUnwrap(
+            Envelope.decode(
+                line: #"{"kind":"error","session":"/store/b.jsonl","text":"the turn failed: boom","endsTurn":true}"#
+            )
+        )
+        guard case let .error(_, endsTurn) = ends.event else {
+            return XCTFail("expected error, got \(ends.event)")
+        }
+        XCTAssertTrue(endsTurn)
+
+        let beside = try XCTUnwrap(
+            Envelope.decode(
+                line: #"{"kind":"error","session":"/store/b.jsonl","text":"could not record background jobs","endsTurn":false}"#
+            )
+        )
+        guard case let .error(_, besideTurn) = beside.event else {
+            return XCTFail("expected error, got \(beside.event)")
+        }
+        XCTAssertFalse(besideTurn)
     }
 
     /// A turn that ended in **another** conversation, as a kind of its own.

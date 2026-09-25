@@ -178,9 +178,17 @@ test "a status and an error carry one field, and name the session that sent them
     status_event("/tmp/s.jsonl", "thinking…").stringify(),
     content="{\"kind\":\"status\",\"session\":\"/tmp/s.jsonl\",\"text\":\"thinking…\"}",
   )
+  // `endsTurn` rides along and defaults to false: it is not one of the two fields the host *reads out*
+  // (kind and text), it is the answer to "does this error mean the turn is over", and almost no error
+  // does. A turn failing says so — see the case below.
   inspect(
     error_event("", "a path that does not exist").stringify(),
-    content="{\"kind\":\"error\",\"session\":\"\",\"text\":\"a path that does not exist\"}",
+    content="{\"kind\":\"error\",\"session\":\"\",\"text\":\"a path that does not exist\",\"endsTurn\":false}",
+  )
+  // The one error that does end a turn, and the field the host draws Stop from.
+  inspect(
+    error_event("/tmp/s.jsonl", "the turn failed: boom", ends_turn=true).stringify(),
+    content="{\"kind\":\"error\",\"session\":\"/tmp/s.jsonl\",\"text\":\"the turn failed: boom\",\"endsTurn\":true}",
   )
 }
 
@@ -354,6 +362,23 @@ test "a session's id is the last part of its file name" {
   // A file that is not named the way upstream names them still gets an id rather than a crash.
   assert_eq(short_id("/tmp/plain.jsonl"), "plain")
   assert_eq(short_id("/tmp/nothing"), "nothing")
+}
+
+///|
+/// The whole transcript as rows, for a test.
+///
+/// **Here rather than in `sessions.mbt` because nothing in the app builds every row any more**: an event
+/// sends one page, and `History::page` builds only the rows in it. This is the naive twin the small
+/// session tests want — "what would the whole replay look like" — and it lives with its readers instead
+/// of in the shipped build, where the compiler was right to point out that nothing called it. The
+/// whitebox files of one package share a scope, which is what lets `skills_wbtest.mbt` use it too.
+fn history_rows(session : @core.Session) -> Array[Json] {
+  let history = history_of(session)
+  let rows : Array[Json] = []
+  for index in 0..<history.length() {
+    rows.push(history.row(index))
+  }
+  rows
 }
 
 ///|
@@ -769,25 +794,30 @@ test "a reasoning block is not drawn as markdown" {
 /// A block's rendering crosses as the same parse the `history` event carries, from the same `md`
 /// package — and it names how much of it the host is expected to already have.
 ///
-/// The `from` field is what makes rendering an answer while it arrives possible: a block that is still
-/// growing is re-sent as the part that changed, so the part the reader has already read is never sent
-/// twice. `0` means the whole block, which is what a block that has stopped growing always sends.
+/// The two fields are what make rendering an answer while it arrives possible between them. `from` is
+/// where the parse the host already has picks up, so the part of it that has not changed is never sent
+/// twice; `parsed` is where those blocks stop, so the host can draw the block still being written from
+/// the deltas it already has. `0` means the whole block, which is what a block that has stopped growing
+/// always sends — and it sends `parsed` as the whole of its text, because then there is no block left
+/// being written.
 test "a block's rendering carries its parse and the index it starts at" {
   // Through the real producer, which parses the source rather than being handed a pre-built
   // `blocks_json` — the parse and the `from` come from the same place in `say_blocks`.
+  let source = "## Heading\n\nwith `code`\n"
   let json = blocks_event(
     "/tmp/s.jsonl",
     "reply-2",
     0,
-    @md.parse("## Heading\n\nwith `code`\n"),
+    source.length(),
+    @md.parse(source),
   )
   inspect(
     json.stringify(),
-    content="{\"kind\":\"blocks\",\"session\":\"/tmp/s.jsonl\",\"id\":\"reply-2\",\"from\":0,\"blocks\":[{\"t\":\"h\",\"level\":2,\"spans\":[{\"t\":\"text\",\"text\":\"Heading\"}]},{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"with \"},{\"t\":\"code\",\"text\":\"code\"}]}]}",
+    content="{\"kind\":\"blocks\",\"session\":\"/tmp/s.jsonl\",\"id\":\"reply-2\",\"from\":0,\"parsed\":24,\"blocks\":[{\"t\":\"h\",\"level\":2,\"spans\":[{\"t\":\"text\",\"text\":\"Heading\"}]},{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"with \"},{\"t\":\"code\",\"text\":\"code\"}]}]}",
   )
   // The three shapes the host branches on: a table, a fence with a language, and the null a row with
-  // no text carries. All three are cases `AttributedString(markdown:)` gets wrong, which is why the
-  // parse crosses as data rather than as source.
+  // no text carries. All three are things a host drawing the *text* cannot know — a table's
+  // alignments, a fence's language — which is why the parse crosses as data.
   inspect(
     @md.blocks_json("| a | b |\n|:--|--:|\n| 1 | 2 |\n").stringify(),
     content="[{\"t\":\"table\",\"header\":[[{\"t\":\"text\",\"text\":\"a\"}],[{\"t\":\"text\",\"text\":\"b\"}]],\"rows\":[[[{\"t\":\"text\",\"text\":\"1\"}],[{\"t\":\"text\",\"text\":\"2\"}]]],\"align\":[\"left\",\"right\"]}]",
@@ -819,10 +849,11 @@ test "a live frame carries the blocks that finished, not the one being written" 
   let frame = live_frame(state, "one\n\ntwo", 9, 1000).unwrap()
   inspect(
     blocks_frame_event("/tmp/s.jsonl", frame).stringify(),
-    content="{\"kind\":\"blocks\",\"session\":\"/tmp/s.jsonl\",\"id\":\"reply-1-1\",\"from\":0,\"blocks\":[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"one\"}]}]}",
+    content="{\"kind\":\"blocks\",\"session\":\"/tmp/s.jsonl\",\"id\":\"reply-1-1\",\"from\":0,\"parsed\":5,\"blocks\":[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"one\"}]}]}",
   )
   // The open paragraph is not in the frame: it is already on the host's screen as text, and sending
-  // it would be a frame that redraws it. The frame also recorded what it has sent.
+  // it would be a frame that redraws it. Where it starts is in the frame (`parsed`), because the host
+  // is drawing both halves — the blocks up to that boundary, and the text after it.
   inspect(state.sent.length().to_string(), content="1")
 }
 
@@ -835,7 +866,7 @@ test "a later live frame starts where the last one ended" {
   let frame = live_frame(state, "one\n\ntwo\n\nthree", 17, 1200).unwrap()
   inspect(
     blocks_frame_event("/tmp/s.jsonl", frame).stringify(),
-    content="{\"kind\":\"blocks\",\"session\":\"/tmp/s.jsonl\",\"id\":\"reply-1-1\",\"from\":1,\"blocks\":[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"two\"}]}]}",
+    content="{\"kind\":\"blocks\",\"session\":\"/tmp/s.jsonl\",\"id\":\"reply-1-1\",\"from\":1,\"parsed\":10,\"blocks\":[{\"t\":\"p\",\"spans\":[{\"t\":\"text\",\"text\":\"two\"}]}]}",
   )
 }
 
@@ -918,6 +949,7 @@ test "replaying the frames of a block gives back the block" {
   held = applied(held, {
     id: "reply-9-1",
     from,
+    parsed: source.length(),
     blocks: whole[from:].to_owned(),
   })
   inspect(held == whole, content="true")
@@ -1880,6 +1912,164 @@ test "the page before a cursor ends where the cursor is" {
     msg="that was the first row, so there is no page before it",
   )
   assert_true(first.length() > 0)
+}
+
+///|
+/// A session of `turns` turns as a real `@core.Session`, so a test can walk pages of a transcript the
+/// **shell** built rather than of rows a test made up.
+///
+/// Built as JSON objects rather than as hand-written text: the shape a log has to have — every `timestamp`
+/// at both levels, an answer with its `usage`, a parent chain running straight down — is exactly what a
+/// string literal gets wrong silently. `docs/macos-pitfalls.md` has the scar: a hand-written entry that
+/// differs by one field reads as "the store is empty".
+fn long_session(turns : Int) -> @core.Session {
+  let lines : Array[Json] = []
+  lines.push(
+    Json::object(
+      Map([
+        ("type", Json::string("session")),
+        ("version", Json::number(3.0)),
+        ("id", Json::string("s")),
+        ("timestamp", Json::string("2026-01-01T00:00:00.000Z")),
+        ("cwd", Json::string("/tmp")),
+      ]),
+    ),
+  )
+  let usage : Json = Json::object(
+    Map([
+      ("input", Json::number(1.0)),
+      ("output", Json::number(1.0)),
+      ("cacheRead", Json::number(0.0)),
+      ("cacheWrite", Json::number(0.0)),
+      ("reasoning", Json::number(1.0)),
+      ("totalTokens", Json::number(2.0)),
+      (
+        "cost",
+        Json::object(
+          Map([
+            ("input", Json::number(0.0)),
+            ("output", Json::number(0.0)),
+            ("cacheRead", Json::number(0.0)),
+            ("cacheWrite", Json::number(0.0)),
+            ("total", Json::number(0.0)),
+          ]),
+        ),
+      ),
+    ]),
+  )
+  let mut parent : Json = Json::null()
+  for turn in 0..<turns {
+    let user = "u\{turn}"
+    let answer = "a\{turn}"
+    lines.push(
+      entry("message", user, parent, [
+        ("message", message("user", [text_block("question \{turn}")])),
+      ]),
+    )
+    lines.push(
+      entry("message", answer, Json::string(user), [
+        ("message", assistant_message([text_block("answer \{turn}")], usage)),
+      ]),
+    )
+    parent = Json::string(answer)
+  }
+  let text = lines.map(fn(line) { line.stringify() }).join("\n") + "\n"
+  try @core.parse_session_file(text) catch {
+    _ => abort("the generated session did not parse")
+  } noraise {
+    session => session
+  }
+}
+
+///|
+fn entry(
+  kind : String,
+  id : String,
+  parent : Json,
+  extra : Array[(String, Json)],
+) -> Json {
+  let fields : Array[(String, Json)] = [
+    ("type", Json::string(kind)),
+    ("id", Json::string(id)),
+    ("parentId", parent),
+    ("timestamp", Json::string("2026-01-01T00:00:00.000Z")),
+  ]
+  for pair in extra {
+    fields.push(pair)
+  }
+  Json::object(Map(fields))
+}
+
+///|
+fn text_block(text : String) -> Json {
+  Json::object(
+    Map([("type", Json::string("text")), ("text", Json::string(text))]),
+  )
+}
+
+///|
+fn message(role : String, content : Array[Json]) -> Json {
+  Json::object(
+    Map([
+      ("role", Json::string(role)),
+      ("content", Json::array(content)),
+      ("timestamp", Json::number(1.0)),
+    ]),
+  )
+}
+
+///|
+fn assistant_message(content : Array[Json], usage : Json) -> Json {
+  Json::object(
+    Map([
+      ("role", Json::string("assistant")),
+      ("content", Json::array(content)),
+      ("api", Json::string("openai-completions")),
+      ("provider", Json::string("deepseek")),
+      ("model", Json::string("deepseek-v4-flash")),
+      ("usage", usage),
+      ("stopReason", Json::string("stop")),
+      ("timestamp", Json::number(1.0)),
+    ]),
+  )
+}
+
+///|
+/// **The windowed page is the same page.** `History::page` builds only the rows a page can carry, and
+/// that is an optimisation only if the answer is identical to building all of them and slicing — which is
+/// what `page_of(history_rows(session), …)` is. So this walks a 40-turn session page by page **both**
+/// ways and asserts the two agree on the rows, the cursor and the flag, at every step.
+///
+/// It is the test that would catch the two ways this can go wrong: a window that starts one turn too
+/// late (a page that is missing rows), and a `more` that stops being true early (a reader stuck at the
+/// top of a conversation with the rest of it unreachable).
+test "a page built from the window is the page built from everything" {
+  let session = long_session(40)
+  let history = history_of(session)
+  let all = history_rows(session)
+  let mut windowed = ""
+  let mut whole = ""
+  let mut pages = 0
+  while true {
+    let (mine, my_oldest, my_more) = history.page(windowed, 3, 1_000_000)
+    let (theirs, their_oldest, their_more) = page_of(all, whole, 3, 1_000_000)
+    assert_eq(
+      Json::array(mine).stringify(),
+      Json::array(theirs).stringify(),
+      msg="page \{pages} differs",
+    )
+    assert_eq(my_oldest, their_oldest)
+    assert_eq("more: \{my_more}", "more: \{their_more}")
+    pages += 1
+    assert_true(pages <= 14, msg="the walk is not terminating")
+    if !my_more {
+      break
+    }
+    windowed = my_oldest
+    whole = their_oldest
+  }
+  // Every page of the session, and the last one is the head of the transcript.
+  assert_eq(pages, 14)
 }
 
 ///|

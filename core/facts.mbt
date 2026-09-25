@@ -264,18 +264,6 @@ pub(all) enum TurnEnding {
 } derive(Eq, Debug)
 
 ///|
-/// Whether this ending is one a reader needs warning about.
-///
-/// A normally completed turn is recorded but never surfaced: it is the ordinary case, and a
-/// status line that announced it would be saying nothing every time.
-pub fn TurnEnding::is_interruption(self : TurnEnding) -> Bool {
-  match self {
-    Completed => false
-    _ => true
-  }
-}
-
-///|
 /// The `customType` under which a session records that it was forked from another.
 ///
 /// A `custom` entry rather than a field somewhere, for three reasons that all have to hold at once: it
@@ -361,7 +349,7 @@ pub fn turn_start_entry(
 /// This is the durable form of "the process died mid-turn". Read from the entries, so it is the
 /// same answer after a restart as before one, and it holds even when the interruption left the
 /// conversation perfectly balanced — a turn killed between two tool calls wrote no unanswered
-/// call, and `needs_repair` cannot see it.
+/// call, so a check for unanswered calls cannot see it.
 pub fn Session::turn_in_flight(self : Session) -> Bool {
   let mut open = false
   for entry in self.path() {

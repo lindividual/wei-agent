@@ -5,7 +5,7 @@
 {"kind":"earlier","session":"/store/s.jsonl","rows":[{"kind":"user","id":"h-1","text":"wire fixture","complete":true,"blocks":null,"name":"","detail":"","output":"","error":false,"images":[],"skill":null}],"oldest":"h-1","has_more":false}
 {"kind":"sessions","workspaces":[{"cwd":"/tmp","label":"tmp","current":true,"sessions":[{"path":"/store/s.jsonl","id":"s1","label":"wire fixture","modified":1756000000000,"current":true,"running":false}]}]}
 {"kind":"deleted","session":"/store/s.jsonl","path":"/store/s.jsonl","label":"the reader's name","restorable":true}
-{"kind":"blocks","session":"/store/s.jsonl","id":"reply-1-1","from":0,"blocks":[{"t":"h","level":2,"spans":[{"t":"text","text":"Heading"}]},{"t":"p","spans":[{"t":"text","text":"with "},{"t":"code","text":"code"}]}]}
+{"kind":"blocks","session":"/store/s.jsonl","id":"reply-1-1","from":0,"parsed":24,"blocks":[{"t":"h","level":2,"spans":[{"t":"text","text":"Heading"}]},{"t":"p","spans":[{"t":"text","text":"with "},{"t":"code","text":"code"}]}]}
 {"kind":"settings","key":"environment","env":true,"saved":false,"mode":"code","path":"/tmp/settings.json","skills":[],"instructions":"Run the tests with moon test.","instructions_source":"saved","limits":{"rounds":{"value":"200","source":"default"},"cost":{"value":"1","source":"default"},"seconds":{"value":"1800","source":"default"}}}
 {"kind":"user","session":"/store/s.jsonl","text":"what is this?","continued":false,"images":[]}
 {"kind":"reply","session":"/store/s.jsonl","id":"reply-1","delta":"hello"}
@@ -19,4 +19,4 @@
 {"kind":"status","session":"/store/s.jsonl","text":"thinking…"}
 {"kind":"note","session":"/store/s.jsonl","text":"they asked for a parser","name":"context compacted"}
 {"kind":"end","session":"/store/s.jsonl","text":"","calls":19,"tools":3,"cost":"0.000000"}
-{"kind":"error","session":"/store/s.jsonl","text":"the turn failed: connection reset"}
+{"kind":"error","session":"/store/s.jsonl","text":"the turn failed: connection reset","endsTurn":true}

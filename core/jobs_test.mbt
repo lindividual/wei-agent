@@ -40,10 +40,8 @@ test "a live job is the only thing worth showing prominently" {
   assert_eq(store.live().length(), 0)
   // The record survives so the reader can see how it ended.
   assert_eq(store.list().length(), 1)
-  assert_eq(
-    store.get(id).unwrap().list_line(),
-    "bash-1 [bash] completed (exit code: 0) — npm run dev",
-  )
+  assert_eq(store.get(id).unwrap().status, Completed)
+  assert_eq(store.get(id).unwrap().detail, "exit code: 0")
 }
 
 ///|

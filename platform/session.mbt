@@ -99,55 +99,6 @@ pub async fn append_entries(
 }
 
 ///|
-/// Delete the sessions in this directory that hold nothing.
-///
-/// A header-only file is what an opened-but-unused session looks like. They used to be
-/// written on every start, and a picker full of them is worse than useless: it hides
-/// the conversations that exist behind rows that lead nowhere.
-///
-/// Two guards keep this from touching anything real. Only files small enough to be a
-/// header are considered, so a long conversation is never even read; and only files
-/// older than `min_age_ms`, so a session another instance is creating right now is
-/// left alone. Returns how many were removed.
-pub async fn prune_empty_sessions(dir : String, min_age_ms : Int64) -> Int {
-  if !path_exists(dir) {
-    return 0
-  }
-  let now = @env.now().reinterpret_as_int64()
-  let mut removed = 0
-  for name in list_entries(dir) {
-    if !name.has_suffix(".jsonl") {
-      continue
-    }
-    let file = "\{dir}/\{name}"
-    let prefix = read_prefix(file, 4096)
-    // A file with any message in it is a conversation, whatever else it holds.
-    let mut has_message = false
-    for raw in prefix.split("\n") {
-      let line = raw.trim()
-      if line.contains("\"role\"") {
-        has_message = true
-        break
-      }
-    }
-    if has_message {
-      continue
-    }
-    let (seconds, nanos) = @fs.mtime(file)
-    let modified = seconds * 1000L + nanos.to_int64() / 1000000L
-    if now - modified < min_age_ms {
-      continue
-    }
-    try @fs.remove(file) catch {
-      _ => ()
-    } noraise {
-      _ => removed += 1
-    }
-  }
-  removed
-}
-
-///|
 /// A workspace that has been added, whether or not it has been used.
 ///
 /// The store directory's name encodes the path lossily, so a directory with no sessions in it
@@ -395,47 +346,6 @@ pub async fn list_workspaces(root : String) -> Array[StoredWorkspace] {
     })
   }
   out
-}
-
-///|
-/// The session file whose name carries this id, anywhere in the store.
-///
-/// Across workspaces rather than only the starting directory: the store holds every
-/// directory the agent has worked in, and an id is enough to identify one — which is
-/// also what makes `--resume <id>` agree with what the sidebar offers.
-pub async fn find_session(root : String, id : String) -> String? {
-  if id == "" || !path_exists(root) {
-    return None
-  }
-  for name in list_entries(root) {
-    // Including a removed workspace's sessions would make `--resume` reach into a project the sidebar
-    // has been told to forget.
-    if name.has_suffix(removed_suffix()) {
-      continue
-    }
-    let dir = "\{root}/\{name}"
-    if !is_directory(dir) {
-      continue
-    }
-    for file in list_entries(dir) {
-      if file.has_suffix("_\{id}.jsonl") {
-        return Some("\{dir}/\{file}")
-      }
-    }
-  }
-  None
-}
-
-///|
-/// The newest session file for one working directory, which is what
-/// `--continue` means.
-pub async fn newest_session(root : String, cwd : String) -> String? {
-  let sessions = list_sessions(@core.session_dir_for(root, cwd))
-  if sessions.is_empty() {
-    None
-  } else {
-    Some(sessions[0].path)
-  }
 }
 
 ///|

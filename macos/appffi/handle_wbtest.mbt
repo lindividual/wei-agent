@@ -71,7 +71,7 @@ async test "quit is the answer to the loop, and it stops every session" {
 ///
 /// The reason it is a branch at all is priced: an unknown id has no pricing and no context window, so
 /// accepting one would bill the turn at the default's rates and silently send the wrong prompt. The
-/// check is `is_known_model`'s, at the arm — which is exactly the kind of guard that lived only inside
+/// check is `model_spec_for`'s second value, at the arm — which is exactly the kind of guard that lived only inside
 /// a running loop.
 async test "an unknown model is refused, and the sentence lists what is available" {
   let (shell, seen) = test_shell()
@@ -205,7 +205,7 @@ async test "a refused command leaves only the sentence saying why" {
   inspect(lines.length(), content="1")
   inspect(
     lines[0].stringify(),
-    content="{\"kind\":\"error\",\"session\":\"\",\"text\":\"a turn is running here — stop it first\"}",
+    content="{\"kind\":\"error\",\"session\":\"\",\"text\":\"a turn is running here — stop it first\",\"endsTurn\":false}",
   )
 }
 
@@ -244,6 +244,8 @@ async test "the drift log says what a turn's first request cost, when asked" {
       pins: [],
       session,
       path: "/tmp/s.jsonl",
+      session_bytes: 0L,
+      facts: [],
       debug_log: path,
     },
     out=_json => (),

@@ -47,8 +47,8 @@ pub async fn load_pins(home : String) -> Array[String] {
 /// one they did.
 pub async fn save_pins(home : String, pins : Array[String]) -> Unit {
   let path = pins_path(home)
-  let temp = "\{path}.tmp"
   make_dirs(@core.parent_of(path))
+  let temp = temp_beside(path)
   write_text(temp, @core.encode_pins(pins) + "\n")
   @fs.rename(temp, path)
 }

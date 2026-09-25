@@ -104,11 +104,27 @@ public struct Row: Identifiable, Equatable, Decodable {
     public var isError: Bool = false
     /// The parse of `text`, when the shell has sent one.
     ///
-    /// `nil` for a row that is still arriving, and for one whose text has nothing to parse — the
-    /// shell sends a parse once, when a block stops growing, because re-parsing a growing block on
-    /// every delta is quadratic (the web UI measured it: 40KB of reasoning in 64-character frames).
-    /// The view's rule is the simple one: draw the parse if it is here, the text otherwise.
+    /// `nil` for a row that has nothing to parse — the shell sends a parse once, when a block stops
+    /// growing, because re-parsing a growing block on every delta is quadratic (the web UI measured
+    /// it: 40KB of reasoning in 64-character frames). The view's rule is the simple one: draw the
+    /// parse if it is here, the text otherwise.
     public var blocks: [Block]?
+    /// How much of `text` those blocks are the parse of, in **UTF-16 code units** — the unit the shell
+    /// counts strings in.
+    ///
+    /// The part after it is the one block that is still being written, and this field is the whole
+    /// reason it can be on screen before it is over: `one\n\ntwo` is sent as the parse of `one` with a
+    /// boundary of 5, so the reader gets a rendered paragraph and a second one arriving as text rather
+    /// than a blank row until the block finishes. See `unparsedTail`, which is how the two are split.
+    public var parsed: Int = Row.blocksCoverEverything
+
+    /// The `parsed` value that means "the blocks are the whole of this row".
+    ///
+    /// What a shell older than the field meant — before `parsed` existed a row's blocks *were* its
+    /// rendering and the text was not drawn at all — and what a `history` row means, since a row read
+    /// out of the log has stopped changing. Not `0`: "nothing of this row is parsed yet" is a real
+    /// answer, and the two have to stay apart.
+    public static let blocksCoverEverything = Int.max
     /// A question that was a `/skill:<name>` command: the command, the reader's own words, and the
     /// skill's document — which is most of the characters in that message and none of what they typed.
     ///
@@ -126,7 +142,7 @@ public struct Row: Identifiable, Equatable, Decodable {
     /// `isError` crosses as `error`, the same name the `tool` event uses for the same fact — one
     /// field, spelled once, so a row from a history and a row from a live stream decode alike.
     private enum CodingKeys: String, CodingKey {
-        case id, kind, text, complete, name, detail, output, blocks, images, skill
+        case id, kind, text, complete, name, detail, output, blocks, parsed, images, skill
         case isError = "error"
     }
 
@@ -151,6 +167,9 @@ public struct Row: Identifiable, Equatable, Decodable {
         output = try fields.decode(String.self, forKey: .output)
         isError = try fields.decode(Bool.self, forKey: .isError)
         blocks = try fields.decodeIfPresent([Block].self, forKey: .blocks)
+        // Optional on the wire for the same reason `images` is: a `history` row from the log has
+        // nothing to draw after its parse, and it is read by the same decoder as a streamed row.
+        parsed = try fields.decodeIfPresent(Int.self, forKey: .parsed) ?? Row.blocksCoverEverything
         images = try fields.decodeIfPresent([RowImage].self, forKey: .images) ?? []
         // Optional **on the wire** for the same reason `images` is, and it cannot be a defaulted
         // property: only a question that was a `/skill:<name>` command has one, and an older shell
@@ -168,6 +187,7 @@ public struct Row: Identifiable, Equatable, Decodable {
         output: String = "",
         isError: Bool = false,
         blocks: [Block]? = nil,
+        parsed: Int = Row.blocksCoverEverything,
         skill: SkillFrame? = nil,
         images: [RowImage] = []
     ) {
@@ -180,6 +200,7 @@ public struct Row: Identifiable, Equatable, Decodable {
         self.output = output
         self.isError = isError
         self.blocks = blocks
+        self.parsed = parsed
         self.skill = skill
         self.images = images
     }
@@ -300,7 +321,7 @@ public struct Conversation: Equatable {
             hasEarlier = hasMore
             _ = oldest
             return
-        case let .blocks(id, blocks, from):
+        case let .blocks(id, blocks, from, parsed):
             // How the row should be drawn. Patched in place rather than appended: the row is already
             // on screen from its deltas, and the parse describes the text that is already there.
             //
@@ -309,14 +330,18 @@ public struct Conversation: Equatable {
             guard let index = rows.firstIndex(where: { $0.id == live(id) }) else { return }
             if from == 0 {
                 rows[index].blocks = blocks
+                rows[index].parsed = parsed
             } else if let held = rows[index].blocks, from <= held.count {
                 // A frame of a block that is still growing: the head is what the host already has, so
                 // the two are one document again.
                 rows[index].blocks = Array(held.prefix(from)) + blocks
+                rows[index].parsed = parsed
             }
             // A `from` that does not line up — the host has fewer blocks than the shell believes, or
             // none at all — is dropped rather than guessed at. Frames arrive in order, so the only
-            // way here is a shell replaying a session the host has already drawn.
+            // way here is a shell replaying a session the host has already drawn. The boundary is
+            // dropped with it: advancing it past blocks the host does not hold would hide the words
+            // between them, which is worse than drawing a paragraph as text for one more frame.
 
         case .sessions, .session, .settings, .models, .think, .jobs, .elsewhere:
             // The sidebar's, the panel's and the pickers' own facts. The transcript is unchanged by any
@@ -425,11 +450,15 @@ public struct Conversation: Equatable {
             row.complete = true
             rows.append(row)
 
-        case let .error(text):
-            // A failure during a turn is the turn ending: the shell's own path that catches one says
-            // so and then stops. Setting this here rather than waiting for an `end` that is never
-            // sent is what keeps the composer from offering Stop for the rest of the afternoon.
-            running = false
+        case let .error(text, endsTurn):
+            // **Only when the shell says the turn is over.** This used to clear on every error, and the
+            // cost of that guess was a reader who could no longer stop what was running: the jobs file is
+            // recorded on a two-second timer, so one of those messages arriving mid-turn took the Stop
+            // button away and left no way back except waiting. The flag is the shell's answer — the host
+            // cannot tell the two kinds of error apart from their text, and it should not try.
+            if endsTurn {
+                running = false
+            }
             nextNote += 1
             var row = Row(id: "note-\(nextNote)", kind: .note)
             row.text = text

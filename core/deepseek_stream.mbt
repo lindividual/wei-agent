@@ -494,7 +494,6 @@ pub struct StreamParser {
   /// as the SSE spec requires.
   priv mut data : String
   /// Set once `data: [DONE]` is seen.
-  priv mut done : Bool
   priv events : Array[StreamEvent]
   priv api : String
   priv provider : String
@@ -515,7 +514,6 @@ pub fn StreamParser::new(
     accum: Accum::new(model),
     pending_line: "",
     data: "",
-    done: false,
     events: [],
     api,
     provider,
@@ -574,7 +572,9 @@ fn StreamParser::consume_line(self : StreamParser, line : String) -> Unit {
   if trimmed.has_prefix("data:") {
     let payload = trimmed[5:].trim_start().to_owned()
     if payload == "[DONE]" {
-      self.done = true
+      // The stream is over. `[DONE]` used to also set a `done` flag that `is_done` read; nothing
+      // consults that flag now, so the sentinel is answered by flushing and returning here — which
+      // is what the caller sees anyway.
       self.flush_event()
       return
     }
@@ -644,12 +644,6 @@ fn StreamParser::emit_from_absorb(self : StreamParser, chunk : Json) -> Unit {
       None => ()
     }
   }
-}
-
-///|
-/// Whether `data: [DONE]` has been seen.
-pub fn StreamParser::is_done(self : StreamParser) -> Bool {
-  self.done
 }
 
 ///|

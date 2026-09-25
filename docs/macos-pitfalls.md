@@ -7,7 +7,7 @@
 （只跑了 `swift build` 没重新打包，于是宿主打开了旧二进制，而构建是「成功」的）。散文挡不住手快，
 表格可以。
 
-分七组。每条都是开发中**实际撞到**的，不是预想的。
+分七组。除了一条注明是**读代码**发现的，每条都是开发中**实际撞到**的，不是预想的。
 
 **开发循环，从头到尾（这三条必须一起做）**：
 
@@ -117,6 +117,7 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | `osascript` 里找不到输入框 | 表单里有两个 `AXTextField`（设置面板的搜索框、输入框），按顺序取会取错 | 按 **position.y** 取最靠下的那个 |
 | 启动后拿到的 PID 不对 | `( … & )` 拿到的是**子 shell** 的 PID，不是 app 的 | 子 shell 里用 `exec env … /path/to/wei`，再 `echo $!` |
 | `pkill -f "Macos/wei"` 把自己也匹配上了 | `-f` 匹配整条命令行，而你的 `bash -c` 里就写着这个字符串 | 用锚定：`pkill -9 -f "Macos/wei$"`。**这条我照着写了又踩了**：`pkill -9 -f "Macos/wei"` 没杀掉任何一个 app（用户那个进程活得好好的），因为模式先匹配上了**它自己所在的 `bash -c`**，命令根本没走到那一步。教训是锚定要落在**参数的位置**上，`$` 放在路径后面；光把模式写短不算锚定 |
+| `macos/build-moonbit.sh` 报了一堆 libtool 警告、最后一行是 archive 路径，看起来成功了，但**跑出来的行为是旧的**（我这一轮：给一个函数加了打印、量了三轮「没有变化」，其实那个函数根本没编进去） | 脚本里那句 `moon build … >/dev/null 2>&1 \|\| true` —— 「链接到没有 `main` 是可预期的失败」这条注释是对的，但**它把真正的编译错误一起吞了**，之后用上一轮的 `.o` 重新打了包 | 判据：改了 MoonBit 之后**先 `moon check`**（或 `moon build … \| tail -3` 看有没有 `Error`），再 `build-moonbit.sh`。这一轮的错误是 `say_status: unbound`（临时加的一行探针写错了名字），而脚本只回了一行路径 |
 | 反复启动后测到的行为不对 | **多个实例在跑**，你连的是上一个 | 每次测完按 PID 确认存活；断言时带上 PID / 窗口标题。顺带：两个实例**在同一个会话里各发一句**是会交错写进同一个 `.jsonl` 的 —— `Open.turns` 那把 mutex 只管**本进程内** |
 | 明明改了代码、也重新打包了，**跑着的 app 显示的还是旧行为**（我这一轮：把 Sketch 从 `+` 菜单里拿掉了，菜单里还有它） | 上面那条的镜像：**两个实例同时活着**，而且这次两个都是同一个 bundle 路径、同一个窗口尺寸、同一个位置 —— 你截到的是别人那一扇。`pgrep`/`ps` 看得见两个 pid，但窗口列表里两扇窗的参数一模一样，看截图分不出来 | **AX 是按 pid 读的，所以状态问题一律用 AX 问**：`AXUIElementCreateApplication(pid)` 之后 `kAXMenuBarAttribute` / 遍历 `AXChildren`，那条 `AXMenuItem "Sketch"` 属不属于你那个 pid 一目了然。只有**点**是按坐标的（点会落到最前面那扇窗上），所以点之前先 `NSRunningApplication.activate` 并确认 `frontmostApplication.pid`。实测：我用坐标点 + 截图得出了「菜单里还有 Sketch」的错误结论，用 AX 一问是另一个 pid 的窗口 |
 | 按 PID 找窗口号 | 用户的 app 和你的 demo 同时跑时，按 owner 名选窗口会选到**用户那个**（两个进程 owner 都叫 `wei Agent`） | 按 `kCGWindowOwnerPID` 过滤 `CGWindowListCopyWindowInfo`，取 `layer == 0` 且有标题那个；`.optionAll` 是必须的（见第六节） |
@@ -169,6 +170,7 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
 | 按截图数出来的坐标去点，总是**差一行/差几十点** | 截图 PNG 的像素尺寸**不等于点数**：实测一个 1470×835 点的窗口，`screencapture -l` 出来是 **1400×840 像素**（`-R 300x110` 的区域也是 300×110 **像素**） | 坐标一律从 **AX 的 frame** 拿（那是点），截图只用来**看**。非要换算就先把比例量出来（`sips -g pixelWidth` ÷ 窗口的点宽），并记住两个方向都可能不成整数倍 |
 | 想把一个菜单项排成**三列**（`价格 价格 价格  名字`） | **菜单项只能是一个 `Text`。** SwiftUI 的 `Menu` + `Button(label:)` 会取 label 的**第一个片段**：写成 `HStack` 之后，画出来只剩第一段（截图里就是三个模型只剩名字，AX 里也是），一不报错二不警告 | 对齐只能靠**字符串本身**：`monospacedDigit()`（数字等宽）+ 在 shell 里把每个数**切成同样的字符数**（这样「等量空格」就是等量宽度）。判据：屏幕上三行的数字块左右边缘是否对齐（这一轮实测 252.4 / 252.6 / 252.8pt，等于等宽） |
 | 菜单宽度看起来还能塞，加完才**贴到屏幕边** | 菜单宽度 = 它最长那一项的宽度 + 固定开销（内边距 + 勾的位置）。**本轮实测把开销反解出来了：32.8pt**（两条已知行都吻合：338、347）。于是「这一行多少字」可以直接换算成「菜单多少点」——不必先跑起来 | 先算：`NSFont.menuFont(ofSize: 0)` 量最长那一行的文本宽 + 32.8。实测对照：一个价 300pt、三种写法 335–359pt、散文式 484pt（贴边） |
+| **一段回答里，正在写的那一块在屏幕上不见** —— 要等它结束才冒出来。（这条是**读代码**发现的，不是撞到的） | 两句话各自都成立，合起来是错的：`live_frame` 只发「已经定型的部分」（`source[:at]`），并注明「正在写的那块已经在宿主屏幕上是纯文本了」；而宿主 `BlockView` 的规则是「有 `blocks` 就只画 `blocks`」。于是那句「已经在屏幕上的文本」在宿主那边**从来没被画过** —— 一行一旦有了第一个完成的块，它的尾巴就消失 | 把边界当**协议字段**发出去（`parsed`，UTF-16 code unit，和 shell 的 `String::length` 同一把尺），宿主画「`blocks` + `text` 从 `parsed` 起的那一段」；切分那条规则放进有测试的地方（`WeiModel/Sidebar.swift` 的 `unparsedTail` + `BlockView`）。**教训是跨端的假设要在发出方和消费方各钉一条测试**：这条错在两边都只测了自己那一半（shell 测帧的内容、宿主测「有 blocks 就不画 text」），两端的测试全绿，是读代码抓到的 |
 | 想读**弹出菜单里某一项**的 AX 属性（label / 宽度） | 菜单是**自己的窗口**（`kCGWindowLayer == 101`），而这一轮里它的 item 从 app element **走不到**（同一份代码在 release 的 `.app` 上走到过，debug 上没走到；`AXUIElementCreateSystemWide()` 返回 0 个窗口） | 能读的还是读：**闭合的按钮**在 app element 下稳定可读（这一轮靠它验了 `DeepSeek V4 Flash [142x16]`、`Thinking: High [58x17]`、可访问性名字）。菜单**项**读不到就**算**（上一行），并把「算的」和「量的」分开写 |
 
 ## 六、调试手法（正面清单，别丢）
@@ -296,6 +298,60 @@ WEI_DEBUG=/tmp/wei-wire.log open "macos/dist/wei Agent.app"
   一份真 store 进去就是一份可点的数据）。要看清空行、空栏的排版时，还能顺手把
   `defaults write io.github.lindividual.wei-agent NSRequiresAquaSystemAppearance -bool YES` 打上，
   强开浅色外观 —— **验完记得 `defaults delete` 掉**，否则这台机器上的 app 就一直是浅色的。
+  它带的就是调用 shell 的环境：`open` 传给 LaunchServices 的是**父进程的环境副本**，所以
+  `WEI_STORE=` 前缀照旧生效 —— 但也就意味着**任何**变量都会过去（包括你不小心留在
+  shell 里的那些）。
+- **验自己刚编的那份二进制：把 bundle 复制到 `/tmp` 里、把 `.build/release/WeiShell` 换进
+  `Contents/MacOS/wei`、重签一次，然后直接 `nohup` 跑它。** 这一轮就是这么起的：
+  `cp -R "macos/dist/wei Agent.app" /tmp/demo/ && cp .build/release/WeiShell "/tmp/demo/wei Agent.app/Contents/MacOS/wei"
+  && codesign --force -s - … && WEI_STORE=/tmp/wei-ws/store nohup "/tmp/demo/wei Agent.app/Contents/MacOS/wei" > log 2>&1 &`。
+  三个好处：① 它解决那份清单里那条“用户实例和你的 demo 同一条命令行”的老问题 —— 路径不同
+  之后 `pgrep -f demoapp` 只匹配自己那个；② 它仍是**真的 `.app`**（二进制在 bundle 里，
+  `Bundle.main` 读得到 `Info.plist`，所以名字、图标、菜单栏都对），不必等 `make-app.sh` 跑完；
+  ③ `codesign` 要 `--force -s -` 重打一次（`cp` 之后签名和内容对不上），换了二进制也要重签，
+  否则 TCC 的身份可能不对。跑的时候用 `pkill -f demoapp` 收尾，别写不带路径的 `wei`。
+- **右键菜单在 AX 树里是“已经弹开的那个”，而菜单栏本身就是十几个 `AXMenu`。** 症状：读到的项
+  跟自己右键那一行无关（关于本机 / 系统信息 / Left of Screen 这些是**菜单栏**，不是弹出菜单），
+  或者刚读过一项就已失效。修法两条：① 用**内容**认弹出菜单（
+  `children(menu).contains { text(of: $0) == "Remove Project…" }`），别用“第一个 AXMenu”；
+  ② 开菜单用**元素动作** `AXUIElementPerformAction(el, kAXShowMenuAction)` —— 它不靠指针、
+  不靠谁在前面（合成右键事件两者都要），比第二组那条“先移动再按”更省事。而它挂在
+  **row / cell** 上，不在 `AXStaticText` 上：从文字往上找祖先，直到某个接受这个动作
+  （这一轮实测要 0–3 跳）。关菜单发 Escape。
+- **同一份 demo 起了好几份，合成的点击落在别人那扇窗上。** 症状：`axside drag` 报「拖过了」，被拖的行一动
+  不动，而日志里一个 `onMove` 都没有 —— 看起来像「拖拽不能用」。真相是 `pgrep -x dragcheck` 列出**三个** pid：
+  早先几次 `pkill -f "<路径>"` 因为路径写得不一样（`demoapp` / `wei-dragdemo` / `MacOS/wei`）没杀掉它们，于是
+  最前面那扇窗是另一份实例的，`CGEvent` 按坐标投到了别人身上。修法两条：① 起之前 `pkill -x <可执行名>` 并**读回
+  `pgrep` 的输出**确认只剩一个；② 给自己的 demo 换一个**独有的可执行名**（`Contents/MacOS/dragcheck` +
+  `PlistBuddy -c "Set :CFBundleExecutable dragcheck"` + 重签），这样 `pkill -x dragcheck` 只可能打到自己
+  —— 本轮另一个 agent 的 `pkill -f "MacOS/wei"` 就顺手杀掉了我那份（也可能反过来）。
+- **`List` 的行上有 `contextMenu`，`onMove` 就再也不会被调用。** 症状：把 `.onMove` 挂在 `ForEach` 上、行上
+  挂着 `.contextMenu`，拖一行**什么都不发生**（`onMove` 的闭包不执行），而 `List` 自己画得一切正常（行能选中、
+  菜单能弹）。判据是一轮**对照实验**（一个小 SwiftUI app：左右两栏、行一模一样，只差右边有 `contextMenu`，
+  同一扇窗、同一段合成拖拽，各拖一次）：**有菜单那栏 `onMove` 一次都没触发**（那一行留在原位），
+  **没菜单那栏立刻 `onMove [0] -> 3`** 并且行真的换了位。所以不是时序、不是「窗口还没准备好」——菜单自己的
+  按下追踪把「按下并移动」吃掉了。平台不给任何提示，两种行在屏幕上也看不出区别。
+  修法：两个手势只能留一个。这一栏留了拖拽，把行菜单的三项搬到了这一栏的工具条（`RootView.projectActions`）。
+  （若哪天要把行菜单拿回来，路只有一条：行自己用 AppKit 提供 `NSView.menu(for:)`，而不是 SwiftUI 的
+  `contextMenu` —— 没试过，是备选方向而不是结论。）
+- **`onMove` 的第二个参数是「抬起之前那张列表」的空隙下标**（`count` = 末尾），所以「往下一格」是 `from + 2`，
+  而不是 `from + 1`（`from + 1` 是下一行**上面**那条缝，行本来就在那儿，等于没动）。这个语义用平台的
+  `move(fromOffsets:toOffset:)` 对拍过（`WorkspaceMoveTests`），别照直觉写：差一格在 review 里看不出来，
+  在 app 里却是同一个方向的固定偏移。
+- **AX 探针只走自己要的那棵子树，别走整窗。** 症状：`Trace/BPT trap: 5` / `exit=133`，
+  同一个 pid 时有时无、有时连一行都没打出来 —— 这一轮两个探针（我自己写的和仓库里早先那个）
+  都在走过**转录**那棵子树时踩到过，而改成从侧栏的 `AXOutline` 往下走就没再出过（行是
+  `AXStaticText`、折行和 Add Workspace 是 `AXButton`）。原因没查到，所以这条只写“怎么绕”：
+  探针先按 `AXOutline` / 窗口标题定位，再在子树里递归。
+- **工具条里的 `AXMenuButton`：`AXShowMenu` 会返回 `-25206`（action unsupported），得把指针移上去再真点一下。**
+  这条是 `docs/macos-pitfalls.md` 里「工具栏菜单是跟着按钮弹的」那条的细化，量到的数就是这个：指针在别处时
+  `AXUIElementPerformAction(button, kAXShowMenuAction)` 返回 `-25206`，先 `CGEvent(mouseEventSource:mouseType:
+  .mouseMoved)` 到该控件的 AX 中点、再点一次左键，菜单就出来了（`AXMenuItem` 直接可读）。读 `desc` 而不是
+  `title`：SwiftUI 把 `accessibilityLabel` 放在 `desc` 里（实测 `desc=«Project actions»`）。
+- **读弹开的菜单要按内容认它，别按“第一个 `AXMenu`”。** 菜单栏本身在 AX 树里就是十几个 `AXMenu`（关于本机、
+  系统信息、Left of Screen…），「第一个」永远不是刚右键出来的那个。判据用内容：`children(menu).contains {
+  text(of: $0) == "Remove Project…" }`。另外开菜单用**元素动作** `kAXShowMenuAction`（不靠指针也不靠谁在前面）
+  —— 它挂在 **row / cell** 上而不是 `AXStaticText` 上，从文字往上找祖先，直到某个接受这个动作（本轮实测 0–3 跳）。
 - **量布局用 AX 的 frame，不靠截图估**：`/tmp/wei-shell-probe/axframe <pid>` 把整棵 AX 树连
   `y=.. x=..`（窗口相对坐标）打出来 —— 工具条是 `AXToolbar y=0..52`、按钮 `x=872..917`、
   标题 `y=14..38`，于是「标题和按钮在不在同一行」是一个数字问题。同一套工具里还有：

@@ -32,9 +32,16 @@ async test "settings round trip through a file" {
   assert_eq(loaded.max_rounds, Some(40))
   assert_eq(loaded.max_cost, Some(0.25))
   assert_eq(loaded.max_seconds, Some(1800))
-  // The write goes through a temporary file, and it is the rename that publishes it.
+  // The write goes through a temporary file, and it is the rename that publishes it — so what is worth
+  // asserting is that *nothing temporary is left behind*, not that one particular name is gone: the temp
+  // name carries four random bytes (`temp_beside`), so a test that looked for `settings.json.tmp` would
+  // pass whether the rename happened or not.
   assert_true(path_exists(settings_path(home)))
-  assert_false(path_exists("\{settings_path(home)}.tmp"))
+  assert_eq(
+    list_entries(home).filter(name => name.has_suffix(".tmp")).length(),
+    0,
+    msg="a temp file survived the save: \{list_entries(home).join(", ")}",
+  )
   // A second save replaces the first rather than merging with it.
   save_settings(home, @core.AppSettings::new())
   let cleared = load_settings(home)

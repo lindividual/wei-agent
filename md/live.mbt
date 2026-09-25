@@ -12,7 +12,10 @@
 ///   the top level. Everything before it is finished markdown, parsed once and never re-sent, which
 ///   is what keeps the reader's screen from reflowing under them while the model writes. Everything
 ///   after it is the one block being written — an open paragraph, an open fence, an open table — and
-///   is re-parsed on every frame, but it is small.
+///   it is not parsed at all while it grows: it crosses as deltas and the host draws it as text. The
+///   boundary goes out with the frame (`parsed`, in `macos/appffi/events.mbt`), which is how the host
+///   knows where the blocks stop. It is parsed once, when it stops being the newest thing that
+///   happened.
 /// - `diff_prefix` says how much of a **finished** block's parse is unchanged, for the moment a
 ///   block stops growing. That is the one point where a block is re-parsed whole (there is no
 ///   boundary left to prefer, because it is over), and the diff is what keeps the result from being

@@ -3,11 +3,15 @@
 ///
 /// This is the only place that spans all three layers — it derives context from
 /// the session (`core`), calls the model and the tools (`platform`), and decides
-/// what happens next (`core`'s state machine).
+/// what happens next.
 ///
-/// The scheduling decisions themselves are not made here. `AgentState` in `core`
-/// owns when a queued message is admitted and what a turn boundary means; this
-/// file performs the actions it asks for.
+/// **The loop is written here rather than in a state machine.** There used to be one: a pure
+/// `AgentState` in `core` — state plus event gives state plus actions — whose module doc said the
+/// async driver was a thin dispatcher over it. The driver was not that, and the state machine was
+/// eventually deleted: nothing in production ever constructed it, and the feature it was built for
+/// (a queued "interject while it is working" message alongside an "append when it finishes" one) was
+/// never wired up. What decides a turn's boundaries and what a tool batch does is this file,
+/// `run_turn` and `run_tools`, and it says so rather than pointing at `core`.
 
 ///|
 /// Everything a turn needs that does not change while it runs.
@@ -496,18 +500,18 @@ fn now_ms() -> Int64 {
 /// `timestamp` is the moment the entry describes, not the start of the turn: a turn
 /// can spend minutes in tool rounds, and a log that claims every entry of it happened
 /// at the same instant cannot be read back to see where the time went.
-async fn commit(
+/// Append one entry that is already built, and return the session with it in.
+///
+/// **Separate from `commit` because three of a turn's entries are built by `core`, not here.** A
+/// turn's opening, its model choice and its notes are each a `custom_type` plus a payload, and the
+/// reader of each lives in `core` (`Session::in_flight_prompt`, `SessionContext::model`,
+/// `Session::agent_notes`). Writing that payload here as well as reading it there is how a writer and
+/// a reader come to disagree about a key name; `core` owns the shape, this owns the appending.
+async fn commit_entry(
   session : @core.Session,
   path : String,
-  kind : @core.EntryKind,
-  timestamp : Int64,
+  entry : @core.Entry,
 ) -> @core.Session {
-  let entry : @core.Entry = {
-    id: @core.new_entry_id(),
-    parent_id: session.leaf_id,
-    timestamp: @core.format_iso_utc(timestamp),
-    kind,
-  }
   // The header goes in with the first entry, not when the session is opened: a
   // session that is opened and never used is not worth a file, and one that leaves a
   // header-only file behind makes the picker harder to read.
@@ -521,6 +525,23 @@ async fn commit(
   }
   entries.push(entry)
   @core.Session::new(session.header, entries)
+}
+
+///|
+/// Append one entry of a kind the driver builds itself, parented to the session's current leaf.
+async fn commit(
+  session : @core.Session,
+  path : String,
+  kind : @core.EntryKind,
+  timestamp : Int64,
+) -> @core.Session {
+  let entry : @core.Entry = {
+    id: @core.new_entry_id(),
+    parent_id: session.leaf_id,
+    timestamp: @core.format_iso_utc(timestamp),
+    kind,
+  }
+  commit_entry(session, path, entry)
 }
 
 ///|
@@ -1153,14 +1174,10 @@ async fn run_tools(
         Some(Object(fields)) =>
           match fields.get("note") {
             Some(String(text)) =>
-              current = commit(
+              current = commit_entry(
                 current,
                 ctx.session_path,
-                @core.Custom(
-                  custom_type=@core.agent_note_type(),
-                  data=Some(Json::object(Map([("text", Json::string(text))]))),
-                ),
-                now_ms(),
+                @core.agent_note_entry(text, current.leaf_id, now_ms()),
               )
             _ => ()
           }
@@ -1214,11 +1231,15 @@ async fn open_turn(
   let existing = ctx.session.context()
   let mut session = ctx.session
   if existing.model is None {
-    session = commit(
+    session = commit_entry(
       session,
       ctx.session_path,
-      @core.ModelChange(provider="deepseek", model_id=ctx.model),
-      timestamp,
+      @core.model_change_entry(
+        "deepseek",
+        ctx.model,
+        session.leaf_id,
+        timestamp,
+      ),
     )
   }
   // A level is written down even when the caller did not name one, and the name is the resolution of
@@ -1316,14 +1337,10 @@ async fn open_turn(
         timestamp,
       )
     }
-    session = commit(
+    session = commit_entry(
       session,
       ctx.session_path,
-      @core.Custom(
-        custom_type=@core.turn_start_type(),
-        data=Some(Json::object(Map([("prompt", Json::string(prompt))]))),
-      ),
-      timestamp,
+      @core.turn_start_entry(prompt, session.leaf_id, timestamp),
     )
     // Reported even though it moves neither the spend nor the conversation: what it moves is the
     // caller's answer to "is a turn in flight", and that question is what decides whether the next

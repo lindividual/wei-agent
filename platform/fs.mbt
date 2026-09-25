@@ -316,6 +316,40 @@ pub async fn canonical_dir(path : String) -> String? {
 }
 
 ///|
+/// A sibling of `path` to write first, so that a rename into place can be atomic.
+///
+/// **The name carries four random bytes, and that is the whole point of the function.** It used to be
+/// `path + ".tmp"` — one name for every writer, in every process — and two copies of the app sharing a
+/// `HOME` then write the same temp file: the first finishes its rename, the second finds its own file
+/// already gone and fails with `No such file or directory` on a path it had just written. Measured on a
+/// machine with a demo instance beside the reader's window: `jobs.json` is rewritten on a two-second
+/// timer, so the loser reported
+/// `could not record background jobs: @fs.rename(): "…/jobs.json.tmp" => "…/jobs.json": No such file or
+/// directory` every two seconds, for as long as both were open. The file itself was fine; the *saying* was
+/// wrong, and it was said into the conversation.
+///
+/// Random rather than a process id because this package has no portable way to ask for one, and random
+/// is a stronger guarantee anyway: it also covers two writers inside one process.
+pub fn temp_beside(path : String) -> String {
+  let suffix = match @env.rand(4) {
+    Some(bytes) => {
+      let digits = "0123456789abcdef"
+      let out = StringBuilder()
+      for byte in bytes {
+        let value = byte.to_int()
+        out.write_char(digits[value / 16].unsafe_to_char())
+        out.write_char(digits[value % 16].unsafe_to_char())
+      }
+      out.to_string()
+    }
+    // No randomness is a system in trouble, but writing the file matters more than the temp name being
+    // unusual: a fixed suffix here is the old, racy behaviour rather than a failure to save.
+    None => "tmp"
+  }
+  "\{path}.\{suffix}.tmp"
+}
+
+///|
 /// Create a directory and any missing parents.
 ///
 /// Failing because the directory already appeared is not a failure: concurrent
@@ -349,36 +383,6 @@ pub async fn make_dirs(path : String) -> Unit {
 /// Entry names in a directory, unsorted.
 pub async fn list_entries(path : String) -> Array[String] {
   @fs.readdir(path)
-}
-
-///|
-/// Directories and files under a root, as paths relative to it.
-///
-/// Walks in a single task so the order is deterministic: a tool result that
-/// reorders itself between runs is impossible to test.
-pub async fn walk_paths(root : String, max_entries : Int) -> Array[String] {
-  let out : Array[String] = []
-  let dirs : Array[String] = [root]
-  while !dirs.is_empty() && out.length() < max_entries {
-    let dir = dirs.remove(0)
-    let names = @fs.readdir(dir)
-    for name in names {
-      if out.length() >= max_entries {
-        break
-      }
-      let full = if dir == "/" || dir == "" {
-        "\{dir}\{name}"
-      } else {
-        "\{dir}/\{name}"
-      }
-      if is_directory(full) {
-        dirs.push(full)
-      } else {
-        out.push(full)
-      }
-    }
-  }
-  out
 }
 
 ///|

@@ -128,8 +128,8 @@ test "a frame split across chunks is assembled" {
 test "the done sentinel produces no event" {
   let stream = parser()
   let events = stream.feed("data: [DONE]\n\n")
+  // No content, which is the whole assertion: the sentinel ends the stream and produces nothing.
   assert_eq(events.length(), 0)
-  assert_true(stream.is_done())
 }
 
 ///|

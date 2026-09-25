@@ -101,22 +101,6 @@ fn object_schema(
   ])
 }
 
-///|
-/// Output limits, matching upstream's so truncation behaves identically.
-pub fn default_max_lines() -> Int {
-  2000
-}
-
-///|
-pub fn default_max_bytes() -> Int {
-  50 * 1024
-}
-
-///|
-pub fn grep_max_line_length() -> Int {
-  500
-}
-
 // ── Tool definitions ───────────────────────────────────────────────────────
 
 ///|
@@ -334,15 +318,4 @@ pub fn builtin_tools() -> Array[ToolDef] {
     note_tool(),
     script_tool(),
   ]
-}
-
-///|
-/// Look up a tool by the name the model used.
-pub fn builtin_tool(name : String) -> ToolDef? {
-  for tool in builtin_tools() {
-    if tool.name == name {
-      return Some(tool)
-    }
-  }
-  None
 }

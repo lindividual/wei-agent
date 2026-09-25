@@ -121,16 +121,6 @@ pub fn Session::add_entries(self : Session, entries : Array[Entry]) -> Session {
 }
 
 ///|
-/// The path ending at a specific entry. `None` yields an empty path, which is
-/// how "no leaf" is distinguished from "the current leaf".
-pub fn Session::path_to(self : Session, leaf_id : String?) -> Array[Entry] {
-  match leaf_id {
-    None => []
-    Some(id) => walk_path(self.index, id)
-  }
-}
-
-///|
 /// Walk from the current leaf back to the root.
 ///
 /// A missing parent ends the walk: entries are appended with a parent that already exists, so

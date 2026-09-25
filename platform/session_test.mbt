@@ -112,21 +112,6 @@ async test "list_sessions describes a directory" {
 }
 
 ///|
-/// `--continue` means the newest session for this directory, and only this one.
-async test "newest_session is per directory" {
-  let dir = session_scratch("newest")
-  let mine = "\{dir}/\{@core.session_dir_name("/work/one")}/mine.jsonl"
-  make_dirs(@core.parent_of(mine))
-  create_session(mine, header("mine", "/work/one"))
-  let other = "\{dir}/\{@core.session_dir_name("/work/two")}/other.jsonl"
-  make_dirs(@core.parent_of(other))
-  create_session(other, header("other", "/work/two"))
-
-  assert_eq(newest_session(dir, "/work/one"), Some(mine))
-  assert_eq(newest_session(dir, "/work/three"), None)
-}
-
-///|
 /// A prefix read stops at the byte limit and still yields usable lines.
 async test "read_prefix stops early" {
   let dir = session_scratch("prefix")
@@ -193,26 +178,6 @@ async test "list_workspaces lists every session, newest first" {
 }
 
 ///|
-/// An id identifies a session without knowing which workspace it lives in, which is
-/// what makes `--resume <id>` agree with the sidebar.
-async test "find_session searches every workspace" {
-  let root = session_scratch("find")
-  let one = "\{root}/--work-one--/2020-01-01T00-00-00.000Z_aaaa1111.jsonl"
-  let two = "\{root}/--work-two--/2021-01-01T00-00-00.000Z_bbbb2222.jsonl"
-  make_dirs(@core.parent_of(one))
-  make_dirs(@core.parent_of(two))
-  create_session(one, header("aaaa1111", "/work/one"))
-  create_session(two, header("bbbb2222", "/work/two"))
-
-  assert_eq(find_session(root, "bbbb2222"), Some(two))
-  assert_eq(find_session(root, "aaaa1111"), Some(one))
-  // An id that is a suffix of another must not match the wrong file.
-  assert_eq(find_session(root, "1111"), None)
-  assert_eq(find_session(root, ""), None)
-  assert_eq(find_session("\{root}/nope", "aaaa1111"), None)
-}
-
-///|
 /// The header is written once, with the first entry.
 async test "ensure_session writes the header only when it is missing" {
   let dir = session_scratch("ensure")
@@ -228,34 +193,6 @@ async test "ensure_session writes the header only when it is missing" {
   let text = read_text(path)
   assert_true(text.has_prefix(first), msg=text)
   assert_eq(@core.parse_session_file(text).entries.length(), 1)
-}
-
-///|
-/// Empty sessions are removed, and nothing else is.
-async test "prune_empty_sessions removes only stale header-only files" {
-  let dir = session_scratch("prune")
-  let empty = "\{dir}/2020-01-01T00-00-00.000Z_empty.jsonl"
-  let used = "\{dir}/2020-01-02T00-00-00.000Z_used.jsonl"
-  let recent = "\{dir}/2020-01-03T00-00-00.000Z_recent.jsonl"
-  create_session(empty, header("empty", "/tmp"))
-  create_session(used, header("used", "/tmp"))
-  append_entry(used, user_entry("a real conversation", None))
-  create_session(recent, header("recent", "/tmp"))
-  // Backdate the two that are meant to look abandoned. The empty file is only
-  // removable because it is old, so the test has to be able to age it.
-  for path in [empty, used] {
-    ignore(@process.run("touch", ["-t", "202001010000", path]))
-  }
-
-  let removed = prune_empty_sessions(dir, 10L * 60L * 1000L)
-  // The freshly created one survives even though it is empty: an instance that is
-  // mid-session must not have its file deleted from under it.
-  assert_eq(removed, 1)
-  assert_false(path_exists(empty))
-  assert_true(path_exists(recent))
-  assert_true(path_exists(used))
-  // A missing directory is not an error.
-  assert_eq(prune_empty_sessions("\{dir}/nope", 0L), 0)
 }
 
 ///|
@@ -389,11 +326,12 @@ async test "removing a project keeps its sessions, and hides them from the listi
   let left = list_workspaces(root)
   assert_eq(left.length(), 1)
   assert_eq(left[0].cwd, "/elsewhere")
-  // The conversation is where it was, under the name the rename produced.
+  // The conversation is where it was, under the name the rename produced — so a session in a project
+  // the reader has removed is still on disk, and `--resume <path>` still reaches it.
+  //
+  // (Finding it by *id* used to be asserted here too, through `find_session`. That function is gone:
+  // it searched every workspace for a session the store could no longer list, and nothing called it.)
   assert_true(path_exists("\{aside}/\{one.split("/").last().unwrap()}"))
-  // And `--resume <id>` agrees with the sidebar: a session in a project the reader has removed is not
-  // one the store will find by id.
-  assert_true(find_session(root, "abc12345") is None)
   // Removing it again moves nothing, and that is an answer rather than an error — including for a path
   // the store never had.
   assert_true(remove_workspace(root, "/work") is None)

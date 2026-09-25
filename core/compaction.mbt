@@ -1,31 +1,4 @@
 ///|
-/// Compaction: deciding when a conversation has outgrown its context window,
-/// where to cut it, and what to tell the model about the part being dropped.
-///
-/// Only the decision and the prompt live here. Producing a summary means calling
-/// a model, which is the driver's job — this module answers "should we, and from
-/// where", so those questions are testable without a model or a clock.
-///
-/// This is the minimal version: one summary of everything before the cut. upstream also
-/// retries a failed summarization call, and dsh additionally prunes oversized tool
-/// output before summarizing so there is less to condense. Neither is needed to
-/// make long sessions work.
-
-///|
-/// Headroom left below the context window. Summarizing right at the limit would
-/// leave no room for the summary itself plus the response.
-pub fn default_reserve_tokens() -> Int {
-  16384
-}
-
-///|
-/// How much recent conversation to keep verbatim. Older material is summarized,
-/// but the last stretch stays exact because it is what the next turn builds on.
-pub fn default_keep_recent_tokens() -> Int {
-  20000
-}
-
-///|
 /// The two knobs, together, because they only make sense as a pair: the reserve
 /// decides when to compact and the keep decides how much survives.
 pub(all) struct CompactionSettings {

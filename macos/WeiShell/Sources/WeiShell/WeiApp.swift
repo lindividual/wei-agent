@@ -18,6 +18,9 @@ import WeiKit
 struct WeiApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var client = ShellClient()
+    /// Updates. Here rather than inside the shell because it is a fact about the *window* — the process
+    /// that restarts, the menu that asks — and the shell's half of the split knows nothing about either.
+    @StateObject private var updater = Updater()
     /// What the window is in the middle of: shared with the view tree so this menu can open the
     /// folder chooser that `RootView` draws.
     @StateObject private var actions = WindowActions()
@@ -26,10 +29,20 @@ struct WeiApp: App {
         WindowGroup("wei Agent") {
             RootView(client: client, actions: actions)
                 .frame(minWidth: 720, minHeight: 420)
-                .onAppear { client.start() }
+                .onAppear {
+                    client.start()
+                    updater.start(client: client)
+                }
         }
         .defaultSize(width: 980, height: 760)
         .commands {
+            // Where a Mac user looks for it, in the app menu beside "About": the two items that are
+            // about the application rather than about its contents. Sparkle brings its own window for
+            // the rest, so this is one item and no new menu.
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
+            }
             // The one window: the runtime keeps one session and one thread, so a second window would
             // be a second view of the same conversation — which is what the sidebar is for. "New"
             // therefore means a new session, and it is where a Mac user looks for it.

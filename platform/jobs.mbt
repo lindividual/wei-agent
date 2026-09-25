@@ -329,52 +329,6 @@ pub async fn exec_managed(
 }
 
 ///|
-/// How long an output file nobody has written to is kept, in milliseconds.
-///
-/// A day, because that is longer than any run and shorter than forever. This is the only thing that
-/// prunes a `job-*` file: where a job's output lives is a fact about the run that made it rather
-/// than about the job, so it is not in the store, and a `wait` that never comes leaves the file with
-/// nothing left to delete it.
-fn job_output_ttl_ms() -> Int64 {
-  24L * 60L * 60L * 1000L
-}
-
-///|
-/// Remove the output files earlier runs left behind.
-///
-/// Called once at startup, and bounded by age rather than clearing the directory. The unbounded
-/// version would be wrong when a second server is running: the directory is the machine's temp
-/// directory rather than this process's, two servers share it, and one starting up must not delete
-/// the other's live job output. Age is what makes the two cases distinguishable — a job that is
-/// still being waited for has been written to recently, and a file nobody has touched in a day
-/// belongs to a run that is over in every sense but the record.
-pub async fn clear_job_outputs(now : Int64) -> Unit {
-  let names : Array[String] = @fs.readdir(tree_dir()) catch {
-    // A first run has no directory, and a directory that cannot be read is not a reason to fail to
-    // start.
-    _ => return
-  }
-  for name in names {
-    if !name.has_prefix("job-") {
-      continue
-    }
-    let path = "\{tree_dir()}/\{name}"
-    // A file that cannot be dated is left alone: guessing is what deletes the wrong one.
-    let written = @fs.mtime(path) catch { _ => continue }
-    let (seconds, nanos) = written
-    let age = now - (seconds * 1000L + nanos.to_int64() / 1000000L)
-    if age < job_output_ttl_ms() {
-      continue
-    }
-    try @fs.remove(path) catch {
-      _ => ()
-    } noraise {
-      _ => ()
-    }
-  }
-}
-
-///|
 /// The whole process table as (pid, parent) pairs.
 pub async fn process_table() -> Array[(Int, Int)] {
   let (_, out, _) = @process.collect_output("/bin/ps", ["-eo", "pid=,ppid="])
@@ -432,8 +386,11 @@ pub async fn load_jobs(home : String) -> @core.JobStore {
 /// whole point of the file is to be readable after exactly that kind of end.
 pub async fn save_jobs(home : String, store : @core.JobStore) -> Unit {
   let path = jobs_path(home)
-  let temp = "\{path}.tmp"
   make_dirs(@core.parent_of(path))
+  // Beside it rather than `path + ".tmp"`: this file is rewritten on a two-second timer, and a second
+  // copy of the app on the same `HOME` would otherwise take this one's temp file away mid-write. See
+  // `temp_beside`.
+  let temp = temp_beside(path)
   write_text(temp, store.to_json().stringify() + "\n")
   @fs.rename(temp, path)
 }

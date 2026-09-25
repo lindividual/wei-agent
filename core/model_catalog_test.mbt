@@ -28,14 +28,14 @@ test "the default model's entry agrees with the accessors it delegates to" {
 
 ///|
 test "the catalog is searchable by the id a log records" {
-  assert_true(is_known_model("deepseek-v4-flash"))
-  assert_true(is_known_model("deepseek-flash"))
-  assert_true(is_known_model("deepseek-v4-pro"))
+  assert_true(model_spec_for("deepseek-v4-flash").1)
+  assert_true(model_spec_for("deepseek-flash").1)
+  assert_true(model_spec_for("deepseek-v4-pro").1)
   // Case and whitespace are not normalized: an id is an identifier, and guessing at near-misses
   // would turn a typo into a call to the wrong model.
-  assert_false(is_known_model("DeepSeek-V4-Pro"))
-  assert_false(is_known_model(" deepseek-v4-pro"))
-  assert_false(is_known_model(""))
+  assert_false(model_spec_for("DeepSeek-V4-Pro").1)
+  assert_false(model_spec_for(" deepseek-v4-pro").1)
+  assert_false(model_spec_for("").1)
   assert_true(find_model("nope") is None)
 }
 

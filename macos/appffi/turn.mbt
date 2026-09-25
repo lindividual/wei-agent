@@ -435,7 +435,15 @@ async fn Shell::run_turn(
       // Named, because a turn that fails in the background is a turn nobody is watching: the message
       // says which conversation it was about, or the reader sees a failure on screen that happened
       // somewhere else.
-      self.say_error("the turn failed: \{@core.error_text(err)}", session=path)
+      // `ends_turn=true`: this is the one error that *is* the end of a turn, and the host needs to be
+      // told rather than left to guess. It guessed before — any error cleared its "running" flag — and
+      // the cost was that a message about a jobs file (written on a timer, beside the turn) took the
+      // Stop button away from a reader whose turn was still going. See `say_error`.
+      self.say_error(
+        "the turn failed: \{@core.error_text(err)}",
+        session=path,
+        ends_turn=true,
+      )
       self.say_status(path, "failed")
       // The spend still moved — a request that was refused, or a stream that died halfway, was paid
       // for — so the totals are re-sent. `last_turn` is deliberately not updated: a turn that did not

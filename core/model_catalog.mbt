@@ -113,12 +113,6 @@ pub fn find_model(id : String) -> ModelSpec? {
 }
 
 ///|
-/// Whether a string names a model this build can call.
-pub fn is_known_model(id : String) -> Bool {
-  find_model(id) != None
-}
-
-///|
 /// The thinking levels this model offers a reader, least thinking first, `off` included.
 ///
 /// A view of `map` rather than a second table: a level is offered exactly when `map` recognises it,

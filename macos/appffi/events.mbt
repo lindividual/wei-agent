@@ -195,15 +195,17 @@ fn piece_event(
 ///|
 /// A block that has stopped growing, and how to draw it.
 ///
-/// The shell does the parsing because the host cannot: `AttributedString(markdown:)` takes the source
-/// rather than a parse, so a table arrives as its own punctuation and a fenced block loses its
-/// language. `md/` is cmark — the same engine the web UI renders with — so both front ends have the
-/// same opinion about the same answer, which is the whole reason it is a shared package.
+/// The shell parses rather than the host, and the reason is that the parse is the thing that has to be
+/// the same in both front ends: `md/` is cmark, the same engine the web UI renders with. It is not
+/// that the host has no parser — `AttributedString(markdown:)` parses tables, alignments and a fence's
+/// language — but it is a *different* parser, whose behaviour follows the system version rather than
+/// this build, and the picture policy (`md/walk.mbt`) is a decision that has to be made once rather
+/// than once per front end.
 ///
 /// The parse is done here and *diffed*: the host keeps the blocks it has already been given, so what
 /// crosses is the part that changed. The web UI sent the whole block once, at the end, because a host
-/// that cannot keep a parse has to be given one; this one can, which is what makes rendering the
-/// answer while it arrives affordable.
+/// that keeps nothing has to be given everything; this one keeps the parse, which is what makes
+/// rendering the answer while it arrives affordable.
 ///
 /// This is called where a block stops being the newest thing that happened — a tool call, the other
 /// kind of text, or the end of the turn — which are exactly the moments the host stops appending to
@@ -223,11 +225,16 @@ fn Shell::say_blocks(
     Some(state) if state.id == id => @md.diff_prefix(state.sent, blocks)
     _ => 0
   }
-  self.say_blocks_from(path, id, from, blocks)
+  // The whole of it: this is the parse of the finished block, so there is no part of the text left
+  // over for the host to draw on its own. Sent rather than left out, because the host is still holding
+  // the boundary of the last live frame — a frame that said nothing about it would leave the tail of
+  // the block drawn a second time, under the blocks that already contain those words.
+  self.say_blocks_from(path, id, from, text.length(), blocks)
 }
 
 ///|
-/// Blocks `from` onwards, for a row the host already has the head of.
+/// Blocks `from` onwards, for a row the host already has the head of, covering the first `parsed`
+/// UTF-16 code units of the row's text.
 ///
 /// `from` is the number of leading blocks the host is holding, and it is a protocol field rather than
 /// an implementation detail: a host that does not know about it would append the tail to a document
@@ -242,12 +249,13 @@ fn Shell::say_blocks_from(
   path : String,
   id : String,
   from : Int,
+  parsed : Int,
   blocks : Array[@md.Block],
 ) -> Unit {
   if id == "" {
     return
   }
-  self.emit(blocks_event(path, id, from, blocks))
+  self.emit(blocks_event(path, id, from, parsed, blocks))
 }
 
 ///|
@@ -256,10 +264,16 @@ fn Shell::say_blocks_from(
 /// Takes the whole parse and the index the host has up to, rather than a pre-cut tail: which blocks
 /// are the tail is the same fact as the `from` field, and deriving them in two places is how a frame
 /// comes to say `from: 4` and carry five blocks.
+///
+/// `parsed` is how much of the row's text these blocks are the parse of, in UTF-16 code units — the
+/// unit `String::length` counts in, which is why the host slices there too. It is what lets a block
+/// that is still being written be drawn: the blocks cover the finished prefix, and the text after it
+/// is the block being written, which the host has been appending as deltas all along.
 fn blocks_event(
   path : String,
   id : String,
   from : Int,
+  parsed : Int,
   blocks : Array[@md.Block],
 ) -> Json {
   let tail : Array[Json] = []
@@ -269,6 +283,7 @@ fn blocks_event(
   session_event(path, "blocks", [
     ("id", Json::string(id)),
     ("from", Json::number(from.to_double(), repr=from.to_string())),
+    ("parsed", Json::number(parsed.to_double(), repr=parsed.to_string())),
     ("blocks", Json::array(tail)),
   ])
 }
@@ -287,8 +302,9 @@ fn blocks_frame_event(path : String, frame : LiveFrame) -> Json {
 /// Refresh the rendering of a block that is still arriving.
 ///
 /// Called on every delta and refused most of the time — see `LiveMarkdown` for the two gates — so the
-/// cost of a long answer is one parse every `LIVE_MARKDOWN_MS` of a block's *tail* rather than one
-/// parse of the whole of it per delta.
+/// cost of a long answer is one parse of its *finished* prefix every `LIVE_MARKDOWN_MS` or
+/// `LIVE_MARKDOWN_CHARS`, rather than one parse of the whole of it per delta. The part still being
+/// written is never parsed: it crosses as deltas, and the host draws it as text from those.
 ///
 /// `length` is the block's length so far, counted as the deltas arrive rather than read off the
 /// buffer: materialising the whole of a growing block to ask how long it is would be the same
@@ -338,7 +354,9 @@ fn live_due(state : LiveMarkdown, length : Int, now : UInt64) -> Bool {
 ///
 /// Only the part up to the last blank line is parsed, and only the part that has changed is sent.
 /// Everything after that boundary is one block that is still being written, and what the reader has
-/// already read never moves — see `@md.safe_boundary`.
+/// already read never moves — see `@md.safe_boundary`. The boundary travels with the frame so that
+/// the host can draw the rest: without it the host would either drop the block being written or draw
+/// it twice, which is what the row was doing before `parsed` existed.
 fn live_frame(
   state : LiveMarkdown,
   source : String,
@@ -355,15 +373,17 @@ fn live_frame(
   let blocks = @md.parse(source[:at].to_owned())
   let from = @md.diff_prefix(state.sent, blocks)
   if from >= blocks.length() {
-    // Nothing new *finished*: the open block is still growing, and it is already on the host's
-    // screen as text. Sending it again would be a frame that redraws the same paragraph.
+    // Nothing new *finished*. The open block is still growing, and the host is already drawing it —
+    // from the deltas it has, under the blocks of the last frame — so a frame here would say nothing
+    // the host does not have. The boundary it would carry is the one it already has, for the same
+    // reason: a boundary only moves when a block finishes.
     return None
   }
   state.sent = blocks
   // The **tail**, not the whole parse: the host is holding the head, and a frame that repeated it
   // would be applied as `head + head + tail`. The web UI's equivalent sent whole blocks because it
   // had nothing to diff against; this path's whole point is that it does.
-  Some({ id: state.id, from, blocks: blocks[from:].to_owned(), })
+  Some({ id: state.id, from, parsed: at, blocks: blocks[from:].to_owned(), })
 }
 
 ///|
@@ -380,6 +400,13 @@ priv struct LiveFrame {
   id : String
   /// How many leading blocks the host is holding.
   from : Int
+  /// How much of the row's text the parse covers, in UTF-16 code units: the end of the last blank
+  /// line, which is `safe_boundary`'s answer and the reason this frame is worth sending at all.
+  ///
+  /// Everything after it is the block still being written, and the host draws it from the deltas it
+  /// has already been given. Both halves are needed: `from` says where the blocks pick up, and
+  /// `parsed` says where they end.
+  parsed : Int
   /// The blocks from `from` on — and only those. A frame carrying the whole parse would be applied
   /// on the host as `head + head + tail`.
   blocks : Array[@md.Block]
@@ -395,6 +422,10 @@ fn LiveFrame::fields(self : LiveFrame) -> Array[(String, Json)] {
   [
     ("id", Json::string(self.id)),
     ("from", Json::number(self.from.to_double(), repr=self.from.to_string())),
+    (
+      "parsed",
+      Json::number(self.parsed.to_double(), repr=self.parsed.to_string()),
+    ),
     ("blocks", Json::array(tail)),
   ]
 }
@@ -496,18 +527,31 @@ fn end_event(
 /// reader picked, a model id they chose, a turn they asked for. The exception is a turn failing, and
 /// it passes its own path — a background conversation breaking must not stop the one being watched
 /// from being able to send.
+///
+/// `ends_turn` says **whether the turn that is running has ended with this**. Almost nothing here does:
+/// a refused `kill`, a settings save that could not write, a jobs file that could not be recorded — those
+/// are things happening beside a turn, and the turn is still running. The host cannot tell the two apart
+/// from the text, so it is decided here, where the answer exists.
 fn Shell::say_error(
   self : Shell,
   text : String,
   session? : String = "",
+  ends_turn? : Bool = false,
 ) -> Unit {
-  self.emit(error_event(session, text))
+  self.emit(error_event(session, text, ends_turn~))
 }
 
 ///|
 /// Something went wrong, and which session it went wrong in.
-fn error_event(session : String, text : String) -> Json {
-  session_event(session, "error", [("text", Json::string(text))])
+fn error_event(
+  session : String,
+  text : String,
+  ends_turn? : Bool = false,
+) -> Json {
+  session_event(session, "error", [
+    ("text", Json::string(text)),
+    ("endsTurn", Json::boolean(ends_turn)),
+  ])
 }
 
 ///|

@@ -41,6 +41,18 @@ let package = Package(
   // mode — strict concurrency everywhere, which is a much larger change than "target the newest OS".
   // `"26.0"` says the same thing to the build system and changes nothing else.
   platforms: [.macOS("26.0")],
+  // Sparkle, for updates. `exact` rather than `from`: this is the one dependency that can replace the
+  // running app, so a minor version arriving on its own is not a thing to want. It is a *binary* target,
+  // which is a real cost to state plainly — Sparkle ships as an xcframework rather than source, so this
+  // is the one part of the app that no reader can check against a commit. What the app itself does with
+  // it is in `Updater.swift`, and the reason for each of its three decisions is written there.
+  //
+  // `swift build` fetches nothing after the first resolve, but the fetch itself is a network step, and
+  // an offline machine cannot build the app until it has happened once. `macos/build-moonbit.sh` has no
+  // such dependency — which is why the split between the two halves is still worth keeping.
+  dependencies: [
+    .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")
+  ],
   targets: [
     // The boundary, in C.
     .target(name: "WeiShellC"),
@@ -55,7 +67,7 @@ let package = Package(
 
     .executableTarget(
       name: "WeiShell",
-      dependencies: ["WeiKit", "WeiShellC"],
+      dependencies: ["WeiKit", "WeiShellC", .product(name: "Sparkle", package: "Sparkle")],
       linkerSettings: linkWei
     ),
 

@@ -57,6 +57,8 @@ fn shell_in(
       pins: [],
       session,
       path,
+      session_bytes: 0L,
+      facts: [],
       debug_log: "",
     },
     out~,
@@ -183,4 +185,73 @@ test "a level this model has not got is refused in words, and the model's defaul
   }
   // The session records the level in force, never the one that was typed.
   assert_true(open.think_level != "bogus")
+}
+
+///|
+/// **The registry is bounded by bytes, and the two things it may never drop.**
+///
+/// Every session this process had ever *shown* used to stay open for the life of the window, so
+/// flipping through five long conversations cost all five (measured: 291MB for five real 15MB
+/// sessions). `Shell::trim_opens` is what bounds it, and these are the rules a test can see: sessions
+/// over the budget are let go oldest-first, the one on screen is never let go, and neither is a
+/// session with a turn in flight — a turn appends to the log *through* the `Open` it holds.
+test "the registry lets go of the oldest sessions, and never the one on screen" {
+  let (shell, _) = test_shell()
+  let on_screen = shell.shown()
+  // Heavier than the budget on its own, and that is the point: the session on screen is never the one
+  // let go, whatever it weighs — so what gets evicted below is decided without it in the arithmetic.
+  on_screen.weight = 40L * 1024L * 1024L
+  // Two more, read in rather than shown: they are the ones with a chance of being dropped. Older
+  // first, so "oldest goes first" has something to get wrong.
+  let older = Open::new(
+    "/tmp/older.jsonl",
+    "/tmp",
+    "deepseek-v4-flash",
+    "off",
+    on_screen.session,
+  )
+  older.weight = 20L * 1024L * 1024L
+  older.shown_at = 1L
+  shell.opens.push(older)
+  let newer = Open::new(
+    "/tmp/newer.jsonl",
+    "/tmp",
+    "deepseek-v4-flash",
+    "off",
+    on_screen.session,
+  )
+  newer.weight = 20L * 1024L * 1024L
+  newer.shown_at = 2L
+  shell.opens.push(newer)
+  assert_eq(shell.opens.length(), 3)
+  shell.trim_opens()
+  // The newest is kept, the older one went, and the one on screen stayed whatever it weighs.
+  assert_eq(shell.opens.length(), 2)
+  assert_eq(shell.opens[0].path, "/tmp/s.jsonl")
+  assert_eq(shell.opens[1].path, "/tmp/newer.jsonl")
+}
+
+///|
+/// A turn in flight is not evictable, however old its window is.
+///
+/// The failure this prevents is not a slow switch: the turn holds this `Open` and appends to the log
+/// through it, so dropping it would leave a running turn writing to a session the registry does not
+/// have — and `shown` panicking on the session the reader is *watching*.
+test "a session with a turn running is held through the budget" {
+  let (shell, _) = test_shell()
+  let working = Open::new(
+    "/tmp/working.jsonl",
+    "/tmp",
+    "deepseek-v4-flash",
+    "off",
+    shell.shown().session,
+  )
+  working.weight = 400L * 1024L * 1024L
+  working.busy = true
+  working.shown_at = 1L
+  shell.opens.push(working)
+  shell.trim_opens()
+  // Over budget and still held: the only session that could have been dropped is the one running.
+  assert_eq(shell.opens.length(), 2)
+  assert_true(shell.opens[1].busy)
 }

@@ -146,6 +146,24 @@ public final class ShellClient: ObservableObject {
     /// transcript grows all afternoon. This is the thing a view should observe.
     @Published public private(set) var revision = 0
 
+    /// Whether any session has a turn in flight, as this process last heard from the shell.
+    ///
+    /// Two sources rather than one, because they answer at different speeds and both are wanted. The
+    /// sidebar's rows arrive on the shell's tick — every two seconds — and they are the only thing that
+    /// knows about a turn running in a session nobody is looking at. The conversation on screen is
+    /// immediate, and it is the one that matters when the reader is watching it. Asking `groups` alone
+    /// would let a turn that started a moment ago look finished.
+    ///
+    /// This exists for the updater, which must not restart the app out from under running work. It is a
+    /// question about the whole process rather than about the session on screen: a turn in a background
+    /// session is still a turn, and the answer the updater needs is "is anything of the reader's in
+    /// flight anywhere", not "is the window busy".
+    public var isWorking: Bool {
+        conversation.running || groups.contains { group in
+            group.sessions.contains { $0.running }
+        }
+    }
+
     private var started = false
     private var sawReady = false
 
@@ -272,10 +290,11 @@ public final class ShellClient: ObservableObject {
         case let .jobs(items):
             jobs = items
 
-        case let .error(text):
+        case let .error(text, _):
             // The shell says there is no key at startup, and again if a turn cannot be sent. Either
             // way the window should say so rather than looking ready. Later errors belong to the
-            // conversation, which is where they are shown.
+            // conversation, which is where they are shown — and what they do to a running turn is the
+            // conversation's business, not this switch's (see `ShellEvent.error`).
             if !sawReady {
                 state = .failed(text)
             }
@@ -642,6 +661,29 @@ public final class ShellClient: ObservableObject {
     public func removeWorkspace(_ cwd: String, deletingSessions: Bool) {
         guard !cwd.isEmpty else { return }
         tell(deletingSessions ? "/workspace-delete \(cwd)" : "/workspace-remove \(cwd)")
+    }
+
+    /// Move a project one place up or down the column.
+    ///
+    /// **No command crosses to the shell, and that is the whole design of it.** The store has no order
+    /// to ask for: `list_workspaces` sorts by the mtime of each project's newest session, which is a
+    /// fact about the files on disk rather than about the reader's list, and `stableSidebarOrder` is
+    /// what already keeps the column from rearranging itself under that sort (see `WeiModel/Sidebar.swift`).
+    /// The reader's own order is the same kind of fact as the fold: about this window, in this process.
+    ///
+    /// What it costs is that it is forgotten when the window closes, and the next run seeds itself from
+    /// "most recently used first" again. Left that way deliberately — persisting an order would mean the
+    /// seed the store gives every launch (`macos/README.md`) quietly stops applying for good. See
+    /// `macos/README.md` for that as the known limit rather than as an oversight.
+    public func moveWorkspace(_ cwd: String, _ move: WorkspaceMove) {
+        groups = movingWorkspace(groups, cwd: cwd, move)
+    }
+
+    /// The same move, as the list's own drag asks for it: the rows that were lifted, and where they were
+    /// dropped. Two entry points because there are two gestures, and one rule behind both —
+    /// `movingWorkspace(_:from:to:)` is the arithmetic, and the one-step version above is a step of it.
+    public func moveWorkspace(from source: IndexSet, to destination: Int) {
+        groups = movingWorkspace(groups, from: source, to: destination)
     }
 
     /// Take a session out of the store. The file is renamed aside rather than removed, so a mis-click is

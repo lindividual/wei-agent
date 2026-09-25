@@ -240,8 +240,13 @@ struct RootView: View {
 /// here** — that is the whole of the change from two columns to three. A project is a place; its sessions
 /// are what happened in that place, and they belong in a column that can be about one place at a time.
 ///
-/// The list is not filterable and has no disclosure: with the sessions moved out, this column is short
-/// enough to read, and a chevron that folds a row with nothing under it is a control that does nothing.
+/// The list is not filterable — the search field above it spans every project, and narrowing a list of
+/// ten rows is a control that costs a click and saves none. What it has instead is a **fold at the end**
+/// and a **reader-made order**: past five projects the tail is behind one row that says how much is
+/// behind it, and rows are dragged into place. Both are the column's own rules rather than the store's,
+/// so both are arithmetic in `WeiModel/WorkspaceColumn.swift` and this view is only the thing that draws
+/// the answer. The three actions on a project — moved up, moved down, removed — live in this column's
+/// toolbar rather than on its rows; why is measured on `WorkspaceRow`.
 private struct WorkspaceList: View {
     @ObservedObject var client: ShellClient
     @Binding var browsing: String
@@ -251,6 +256,32 @@ private struct WorkspaceList: View {
     /// the File menu opens the same one.
     @ObservedObject var actions: WindowActions
     @Environment(\.openSettings) private var openSettings
+
+    /// Whether the tail of the project list is open.
+    ///
+    /// A fact about this window, in this process, and therefore `@State`: the store has no fold to
+    /// remember and the shell is never told (`ShellClient.moveWorkspace` has the same shape and the same
+    /// argument). Left open, it stays open — including while the reader clicks a project, which is what
+    /// makes the long way round to a moved row (open the fold, then move) survive the clicks in between.
+    @State private var showingAllWorkspaces = false
+
+    /// The projects to draw, and how many are behind the fold.
+    private var column: (shown: [SessionGroup], hidden: Int) {
+        workspaceColumn(client.groups, expanded: showingAllWorkspaces)
+    }
+
+    /// The project the reader is browsing, when the fold is hiding it — what the fold row's mark names.
+    ///
+    /// Empty in every ordinary case: the row a reader is looking at is usually a row they can see. It is
+    /// not empty when they *arrive* somewhere behind the fold (a search result in another project, `⌃⇥`),
+    /// and then this is the only thing in this column that says where they are.
+    private var browsingBehindFold: String {
+        let behind = workspaceIsBehindFold(
+            client.groups, cwd: browsing, expanded: showingAllWorkspaces
+        )
+        guard behind, let group = client.groups.first(where: { $0.cwd == browsing }) else { return "" }
+        return group.label
+    }
 
     /// Sessions with a turn in flight, from the shell's per-row flag.
     ///
@@ -281,6 +312,12 @@ private struct WorkspaceList: View {
                 // the reader clicks has to be where it was — and partly covered elsewhere: the session row
                 // in the middle column carries its own `Running` chip, and the composer's Stop button is
                 // about the turn that matters most, the one on screen. See `docs/design-system.md`.
+                //
+                // **And partly bought back by the fold at the end of the project rows**, which is what keeps a
+                // long list from costing the register its place at all: five rows and one that says how much
+                // is behind it (measured: eight projects with the fold open put the two live sections 96
+                // points lower). The five is chosen against that register rather than against the window.
+                // See `WeiModel/WorkspaceColumn.swift`.
                 // **The air above the first heading is this row's own top padding, not the list's
                 // `.contentMargins(.top:)`.** The two look the same at rest and do not behave the same on a
                 // click: a scroll-content margin belongs to the list's scroll view, and re-applying it is a
@@ -292,18 +329,39 @@ private struct WorkspaceList: View {
                 SectionTitle("Workspaces")
                     .padding(.top, Wei.Space.loose)
                 addWorkspace
-                ForEach(client.groups) { group in
+                ForEach(column.shown) { group in
                     WorkspaceRow(
                         group: group,
                         // The same fill the session column draws on the row it has open, because it is the
                         // same kind of fact: the row the reader picked. Without this the two columns
                         // disagreed — the platform's grey (or, in a focused window, its blue) in this one and
                         // the brand in the other.
-                        selected: group.cwd == browsing,
-                        onRemove: { remove(group) }
+                        selected: group.cwd == browsing
                     )
                     .tag(group.cwd)
                     .listRowBackground(RowSelection(selected: group.cwd == browsing))
+                }
+                // **The reorder itself, and all of it is the platform's.** The row that follows the
+                // pointer, the line where it will land, the scrolling when the drag reaches an edge: one
+                // modifier, not a hand-rolled drag image plus an insertion indicator that has to agree with
+                // the row heights.
+                //
+                // Two things about it were measured rather than assumed. **The indices**: `destination` is a
+                // gap in the list *before* the rows were lifted, so the arithmetic lives in `movingWorkspace`
+                // and is pinned against the platform's own `move(fromOffsets:toOffset:)` by a test. And
+                // **the press**: dragging a row does not change which project this column is listing — the
+                // window kept saying `proj-four` while `proj-six` was dragged past it — so a reorder does not
+                // take the reader's place away from them.
+                //
+                // Rows behind the fold are not draggable, because they are not drawn: a drag can only
+                // rearrange what the reader can see. The toolbar's own two moves are not limited that way,
+                // and the reason is on `move(_:)` — a command about a project can be about one the reader
+                // cannot see. The fold row is not a drop target either: it is not a project.
+                .onMove { source, destination in
+                    client.moveWorkspace(from: source, to: destination)
+                }
+                if column.hidden > 0 {
+                    foldRow
                 }
                 // **Two sections that are usually empty, and absent when they are.** Nothing running means
                 // no heading rather than an empty one: a section that says "Running sessions" over an empty
@@ -363,6 +421,9 @@ private struct WorkspaceList: View {
                 }
                 .help("Settings (⌘,)")
                 .accessibilityLabel("Settings")
+            }
+            ToolbarItem(placement: .automatic) {
+                projectActions
             }
         }
         // The register was refreshed when the popover opened; now that the rows are always on screen it is
@@ -457,6 +518,50 @@ private struct WorkspaceList: View {
         .buttonStyle(.plain)
     }
 
+    /// The row the tail of the list is behind, and the control that opens and closes it.
+    ///
+    /// **A fold over the list, in the fold's own row.** The per-project disclosure went away when the
+    /// sessions moved to the middle column — a triangle that folds a row with nothing under it is a control
+    /// that does nothing — and this is the one that replaced it: the rows under it are projects, the row
+    /// itself is not, so there is somewhere to click and nothing pretending to be a project.
+    ///
+    /// The count is what makes the closed row honest: past a certain length the reader cannot count the
+    /// rows, and a bare "Show More" would be a row that goes somewhere without saying whether what they are
+    /// looking for is there. What the count is *not* is a number that keeps up while open — see
+    /// `workspaceFoldLabel`, where dropping it is the decision.
+    ///
+    /// The chevron points the way the rows will move, and the glyph goes in the slot the folders use so the
+    /// label lines up with theirs. Kept **above** the register sections, with the projects: a control that
+    /// moves every time a tool call starts is a control the reader has to look for.
+    ///
+    /// **And it carries the browsing mark when it is hiding the project the reader is looking at**, which is
+    /// the one thing the fold would otherwise take away: the dot on a project row is the only place this
+    /// column says where the open conversation is, and a fold over that row deletes the answer. Same dot,
+    /// same slot as a project row's, and the project's name in the tooltip — the reader does not have to open
+    /// the fold to find out whether the thing they clicked is inside it.
+    private var foldRow: some View {
+        Button {
+            showingAllWorkspaces.toggle()
+        } label: {
+            HStack(spacing: Wei.Space.tight) {
+                Image(systemName: showingAllWorkspaces ? "chevron.up" : "chevron.down")
+                    .font(.system(size: Wei.Icon.inline - 2, weight: .semibold))
+                    .frame(width: WorkspaceRow.glyphSlot, alignment: .center)
+                Text(workspaceFoldLabel(hidden: column.hidden, expanded: showingAllWorkspaces))
+                Spacer(minLength: 4)
+                if !browsingBehindFold.isEmpty {
+                    Image(systemName: "circle.fill")
+                        .font(.system(size: Wei.Icon.mark))
+                        .foregroundStyle(Wei.Palette.accent)
+                }
+            }
+            .foregroundStyle(Wei.Palette.accent)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(browsingBehindFold)
+    }
+
     /// Ask, then remove: the dialog is the whole of what this decides.
     ///
     /// **Nothing is changed here**, the same rule the session list follows: the row stays until the shell
@@ -467,7 +572,8 @@ private struct WorkspaceList: View {
     ///
     /// The count is the row's own, which is the number the reader can see under that project in the middle
     /// column — the two must not be able to disagree (see `DeleteConfirmation.askAboutProject`).
-    private func remove(_ group: SessionGroup) {
+    private func remove() {
+        guard let group = listed else { return }
         DeleteConfirmation.askAboutProject(
             label: group.label,
             sessions: group.sessions.count
@@ -481,6 +587,66 @@ private struct WorkspaceList: View {
                 client.removeWorkspace(group.cwd, deletingSessions: true)
             }
         }
+    }
+
+    /// **The project this column's own controls act on: the one it is listing.**
+    ///
+    /// The same answer the filled row draws (`selected: group.cwd == browsing`), so a reader who has
+    /// clicked a project and then reached for the toolbar is acting on the row they just filled — there is
+    /// one selection in this column and this is it.
+    ///
+    /// `nil` for a store with nothing in it, and for the moment between adding a project and the shell
+    /// listing it: the controls are disabled then rather than acting on a guess.
+    private var listed: SessionGroup? {
+        client.groups.first { $0.cwd == browsing }
+    }
+
+    /// Move the listed project one place up or down the column, as the drag does — one step of the same
+    /// rule, asked of the *whole* list rather than of the drawn rows: this is a command about a project, and
+    /// one that is behind the fold still has somewhere to go.
+    private func moveListed(_ place: WorkspaceMove) {
+        guard let group = listed else { return }
+        client.moveWorkspace(group.cwd, place)
+    }
+
+    private func canMoveListed(_ place: WorkspaceMove) -> Bool {
+        guard let group = listed else { return false }
+        return canMoveWorkspace(client.groups, cwd: group.cwd, place)
+    }
+
+    /// The project's own actions, at the leading end of this column's toolbar.
+    ///
+    /// **They are here because the rows cannot carry a menu and a drag at once** (measured — see the note on
+    /// `WorkspaceRow`). Put beside the gear rather than in the menu bar, because these act on one row of the
+    /// column they sit in: a reader looking at a project's row finds its actions above it, and the toolbar is
+    /// where a Mac window keeps the actions for what is selected.
+    ///
+    /// Three items in one menu rather than three buttons: remove is rare and irreversible-ish, moving is
+    /// occasional, and the toolbar of this column has one glyph's worth of room before it starts squeezing
+    /// the platform's own sidebar toggle (see the note on the gear).
+    ///
+    /// The label is the platform's `ellipsis.circle` — "there is more here" — with the name given to
+    /// accessibility in words, because a symbol would otherwise be read out as its own localised name (the
+    /// same trap the pin's label documents).
+    private var projectActions: some View {
+        Menu {
+            Button("Move Up", action: { moveListed(.up) })
+                .disabled(!canMoveListed(.up))
+            Button("Move Down", action: { moveListed(.down) })
+                .disabled(!canMoveListed(.down))
+            Divider()
+            // No `role: .destructive`, unlike a session row's menu item: what is destroyed is decided by the
+            // checkbox in the dialog this opens, so red would promise a deletion that may not happen.
+            Button("Remove Project…", action: remove)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuIndicator(.hidden)
+        // Which project, in words: the menu items cannot say it (a menu item's label is one `Text`), and
+        // "Move Up" over four projects is a sentence with no subject.
+        .help(listed.map { "Actions for “\($0.label)”" } ?? "Project actions")
+        .accessibilityLabel("Project actions")
+        .disabled(listed == nil)
     }
 
 }
@@ -601,10 +767,6 @@ private struct WorkspaceRow: View {
     /// Whether this is the project the column is listing — the row the brand fills, and the one whose
     /// supporting ink has to be read against that fill rather than against the window.
     let selected: Bool
-    /// Called when this row's menu asks for the project to go. The dialog belongs to the column, for the
-    /// same reason a session row's does: it is one question about one row, and the row is the thing that
-    /// cannot draw a sheet on the window.
-    let onRemove: () -> Void
 
     /// The width of a row's leading glyph slot — the same slot in the add row above, so every label in this
     /// list starts at the same place whatever its glyph measures. 18 is `folder`'s advance at the control
@@ -638,16 +800,20 @@ private struct WorkspaceRow: View {
         //
         // The path, because two projects can share a name and the name is all there is room for.
         .help(group.cwd)
-        // **The only way out of this list, and it is one item.** A project can be removed and cannot be
-        // renamed (`write_workspace`'s title has never been set — `macos/README.md` has it as future work),
-        // so a menu with one entry is the honest size of it. It is reachable at all because a list with no
-        // way to take a row out again is a list that only grows, and the only other way out is a shell and
-        // an `rm -rf` of a directory the reader has to know the name of.
-        .contextMenu {
-            // No `role: .destructive` here, unlike the session row: what is destroyed is decided by the
-            // checkbox in the dialog this opens, so red would promise a deletion that may not happen.
-            Button("Remove Project…", action: onRemove)
-        }
+        // **No menu on this row, and that is not an oversight — it is what the drag costs.** Measured on a
+        // build with only the `contextMenu` removed: dragging a row then fired `List.onMove` with
+        // `[0] -> 3` and the row moved. With the menu on the row, the same synthesized drag produced
+        // **nothing at all** — the menu's own right-click tracking swallows the press-and-move. So the two
+        // gestures cannot share a row, and the drag won: it is what the reader reached for, it is direct
+        // manipulation, and it is what any other Mac list does.
+        //
+        // What moved with it is the menu's three items: they are the column's toolbar now
+        // (`WorkspaceList.projectActions`), where they act on the project this column is *listing* — the row
+        // that is filled in, one click away — and where their enabled state is drawn by a view that is
+        // watching the selection. What is lost is per-row reach: removing a project is select-then-⋯ rather
+        // than right-click-on-the-row. What is gained is that the action says its own name in the toolbar
+        // before it is used, and that a project behind the fold can still be moved.
+        //
     }
 
     /// The colour of the supporting ink on a *filled* row, given the grey it is on a plain one.
@@ -2685,11 +2851,12 @@ private struct RowView: View {
             .frame(maxWidth: .infinity, alignment: .trailing)
 
         case .reply:
-            // The parse if the shell has sent one, the raw text if it has not. Either way the words are
-            // the same; what the parse adds is what markdown *means* — a table, a heading, a fence's
-            // language — which is the part `AttributedString(markdown:)` gets wrong and the reason the
-            // shell parses at all.
-            BlockView(blocks: row.blocks, plain: row.text)
+            // The parse if the shell has sent one, the raw text if it has not, and both if the block is
+            // still being written — the blocks up to the shell's boundary, and the text after it. Either
+            // way the words are the same; what the parse adds is what markdown *means* — a table, its
+            // alignments, a fence's language — which is a fact about the answer rather than about the
+            // window, and so is decided once, in `md/`.
+            BlockView(blocks: row.blocks, parsed: row.parsed, plain: row.text)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
         case .thinking:
@@ -2853,18 +3020,26 @@ private struct ToolRow: View {
     }
 }
 
-/// A finished block of markdown, drawn from the parse.
+/// A finished block of markdown, drawn from the parse — and the one still being written, drawn from the
+/// text.
 ///
-/// The host draws what the shell parsed rather than parsing the source itself. That is not an
-/// optimisation — it is the only way the two front ends agree: `md/` is cmark, the same engine the web
-/// UI renders with, and `AttributedString(markdown:)` is a different markdown implementation that never
-/// sees a table at all and drops a fenced block's language.
+/// The host draws what the shell parsed rather than parsing the source itself, because the two front ends
+/// have to agree about the answer and only one parser can be the authority: `md/` is cmark, the same engine
+/// the web UI renders with. (A host *can* parse markdown — `AttributedString(markdown:)` knows tables and
+/// fence languages — but it is a different parser, and its picture policy is not the one `md/walk.mbt`
+/// decided.)
+///
+/// The two halves are what makes a streaming answer readable: everything up to the shell's boundary is
+/// drawn as blocks, and the single block after it as plain text, which is what the deltas have been all
+/// along. A row whose parse the shell has not sent yet — still arriving, or nothing to parse — is all text.
 ///
 /// Every case is drawn, and the ones that are awkward on purpose — a code fence with no language, a
 /// heading deeper than the font sizes this file has, a table wider than the window — are handled rather
 /// than dropped, because a block the host cannot draw is an answer the reader cannot read.
 private struct BlockView: View {
     let blocks: [Block]?
+    /// How much of `plain` the blocks cover, in UTF-16 code units; see `unparsedTail`.
+    let parsed: Int
     let plain: String
 
     var body: some View {
@@ -2872,6 +3047,16 @@ private struct BlockView: View {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                     BlockBody(block: block)
+                }
+                // The block still being written does not get a parse of its own, and that is not a
+                // compromise: a fence that is open, a table without its separator row, and a `**bold`
+                // with no closing run all *mean* something different while they are half-written, so
+                // the honest thing to draw is the text. It is also what the reader has been watching
+                // arrive, so nothing already on screen moves when the block ends and its parse lands.
+                if !tail.isEmpty {
+                    Text(tail)
+                        .font(Wei.Font.body())
+                        .textSelection(.enabled)
                 }
             }
         } else {
@@ -2881,6 +3066,8 @@ private struct BlockView: View {
                 .textSelection(.enabled)
         }
     }
+
+    private var tail: String { unparsedTail(text: plain, parsed: parsed) }
 }
 
 /// A paragraph, with the pictures in it given their own line.

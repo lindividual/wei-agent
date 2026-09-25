@@ -90,7 +90,12 @@ fn wire_examples() -> Array[(String, Json)] raise {
     ("deleted", deleted_event(p, "the reader's name", true)),
     (
       "blocks",
-      blocks_event(p, "reply-1-1", 0, @md.parse("## Heading\n\nwith `code`\n")),
+      // `parsed` is the whole of the text: the fixture's example is a block that has stopped growing,
+      // which is the one shape whose blocks cover every character the row has.
+      {
+        let source = "## Heading\n\nwith `code`\n"
+        blocks_event(p, "reply-1-1", 0, source.length(), @md.parse(source))
+      },
     ),
     (
       "settings",
@@ -186,7 +191,12 @@ fn wire_examples() -> Array[(String, Json)] raise {
     ("status", status_event(p, "thinking…")),
     ("note", note_event(p, "they asked for a parser", "context compacted")),
     ("end", end_event(p, "", 19, 3, 0.0)),
-    ("error", error_event(p, "the turn failed: connection reset")),
+    // The flag travels with the fixture: this line is the turn failing, which is the one error that ends
+    // a turn, and the host's decoding of it is what puts Stop away.
+    (
+      "error",
+      error_event(p, "the turn failed: connection reset", ends_turn=true),
+    ),
   ]
 }
 

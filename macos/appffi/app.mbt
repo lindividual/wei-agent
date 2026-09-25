@@ -68,6 +68,16 @@ priv struct Open {
   /// the same thread — MoonBit's async is cooperative — so this needs no lock, only the discipline
   /// that the turn sets it before its first `await` and clears it after its last.
   mut busy : Bool
+  /// How heavy this session is, in bytes of the file it was read from — and the number the registry is
+  /// bounded by.
+  ///
+  /// **A session held in memory costs a multiple of its file** (measured: about 2.4x for a real
+  /// 2000-turn, 48MB conversation), so "how many sessions may be held" is not a count of sessions but a
+  /// budget of bytes. A fresh session nobody has written yet is 0, and a fork is its parent's size.
+  mut weight : Int64
+  /// When this session was last put on screen, as a counter rather than a wall clock: the only question
+  /// asked of it is which held session the reader has gone longest without looking at.
+  mut shown_at : Int64
   /// One turn at a time *in this session*, for the reason the web UI has the same lock: two turns
   /// sharing a session interleave their writes into one file and fork its history — a fork this
   /// project has already produced once, and it left entries naming a parent that no longer existed.
@@ -218,6 +228,8 @@ fn Open::new(
     think_level,
     turn: 0,
     busy: false,
+    weight: 0L,
+    shown_at: 0L,
     turns: @async.Mutex(),
     aborting: { val: false, },
     attached: [],
@@ -259,6 +271,10 @@ priv struct Shell {
   /// Which of them is on screen. Not an index: deleting a session removes it from the registry, and
   /// the window must not then be showing whatever slid into that slot.
   mut current : String
+  /// A counter bumped every time a session is put on screen. What "least recently used" is measured in:
+  /// a wall clock in here would be read only for comparisons, and a clock that can go backwards (or be
+  /// equal twice) is a tie this has to invent an answer for.
+  mut ticks : Int64
   /// What the sidebar's labels cost, cached across refreshes.
   labels : Labels
   /// Which pids were alive at the last look, refreshed on a timer.
@@ -342,11 +358,86 @@ fn Shell::open_of(self : Shell, path : String) -> Open? {
 /// The one place `current` is written, so that "which session is shown" has a single answer rather
 /// than one per command that happens to need it.
 fn Shell::display(self : Shell, open : Open) -> Unit {
-  match self.open_of(open.path) {
-    None => self.opens.push(open)
-    Some(_) => ()
-  }
+  ignore(self.hold(open))
   self.current = open.path
+  self.trim_opens()
+}
+
+///|
+/// Put a session in the registry **without** putting it on screen, and answer with the one that is now
+/// held.
+///
+/// The distinction exists because two callers want different halves. A switch wants both; a rename of a
+/// session the reader is *not* looking at wants only this one -- the log has to be held to be appended
+/// to, and moving the window to it would be the sidebar taking the reader somewhere they did not ask to
+/// go.
+/// **A turn is the one thing an eviction must not cut through.** Every path that starts one sets `busy`
+/// (and clears it on the way out), and this is the same flag the sidebar draws its spinner from — so
+/// "may this be let go" is asked of the newest fact rather than of a copy taken when it was read in.
+fn Shell::hold(self : Shell, open : Open) -> Open {
+  self.ticks += 1L
+  match self.open_of(open.path) {
+    Some(held) => {
+      held.shown_at = self.ticks
+      held
+    }
+    None => {
+      open.shown_at = self.ticks
+      self.opens.push(open)
+      open
+    }
+  }
+}
+
+///|
+/// How much conversation this process may hold in memory at once.
+///
+/// **A budget in bytes rather than a count of sessions**, because it is the bytes that hurt: five real
+/// 15MB conversations held at once measured **291MB of resident memory** (about 2.4x the files), while a
+/// store of ten thousand *small* sessions costs about 3.7KB each. A count would evict the ten thousand
+/// for nothing and keep the five that matter.
+///
+/// 64MB is one long conversation plus everything ordinary around it. The session on screen is never
+/// evicted whatever it weighs, so a reader working in a 200MB conversation pays for it and only it --
+/// the alternative, refusing to open it, is not a choice anyone asked for.
+fn open_budget() -> Int64 {
+  64L * 1024L * 1024L
+}
+
+///|
+/// Let go of sessions the reader is not looking at, until the held ones fit the budget.
+///
+/// **What this protects is the process, not the disk.** Every session this process has *ever* shown used
+/// to stay in `opens` for the life of the window, so a reader who flipped through five long
+/// conversations by mistake paid for all five until they quit. Nothing here is lost: the file is the
+/// conversation, and switching back re-reads it (a 48MB session: ~350ms, then the same rows).
+///
+/// Two sessions are never dropped, and both exceptions are about correctness rather than speed:
+///
+/// - **the one on screen**, which `shown` panics without -- it is the registry's one invariant;
+/// - **any session with a turn in flight**, because the turn holds this `Open` and is appending to the
+///   log through it. A turn is exactly the thing that must not have its session taken away.
+fn Shell::trim_opens(self : Shell) -> Unit {
+  let mut total = 0L
+  for open in self.opens {
+    total += open.weight
+  }
+  if total <= open_budget() {
+    return
+  }
+  // Oldest first, so the session the reader has gone longest without seeing is the first to go.
+  let oldest_first = self.opens.copy()
+  oldest_first.sort_by((a, b) => if a.shown_at < b.shown_at { -1 } else { 1 })
+  for open in oldest_first {
+    if total <= open_budget() {
+      break
+    }
+    if open.path == self.current || open.busy {
+      continue
+    }
+    ignore(self.opens.extract_if(mine => mine.path == open.path))
+    total -= open.weight
+  }
 }
 
 ///|
@@ -466,7 +557,7 @@ async fn last_workspace(root : String) -> String {
 async fn open_session(
   shell_root : String,
   cwd : String,
-) -> (@core.Session, String) {
+) -> (@core.Session, String, Int64) {
   match @env.get_env_var("WEI_SESSION") {
     Some(path) if path != "" => {
       guard @platform.path_exists(path) else {
@@ -483,9 +574,16 @@ async fn open_session(
         path,
         @env.now().reinterpret_as_int64(),
       )
-      (session, path)
+      // The bytes it was read from, which is what the registry's budget is spent in. Read here because
+      // this is a moment that already read the whole file, and one more stat costs nothing.
+      (session, path, @platform.file_size(path))
     }
-    _ => fresh_session(shell_root, cwd)
+    _ => {
+      // A session nobody has written yet weighs nothing, which is the honest answer: there is nothing
+      // in memory either.
+      let (session, path) = fresh_session(shell_root, cwd)
+      (session, path, 0L)
+    }
   }
 }
 
@@ -533,12 +631,22 @@ priv struct World {
   pins : Array[String]
   session : @core.Session
   path : String
+  /// The size of that session's file, or 0 for one that has not been written yet. What the opening
+  /// session takes out of the registry's budget (`open_budget`).
+  session_bytes : Int64
   /// Where a per-turn diagnostic line goes, when somebody asked for one.
   ///
   /// Read here with the other environment facts, for the reason the whole `World`/`Shell` split
   /// exists: one place reads the world, and everything else is pure. Empty means no line is written,
   /// which is the ordinary case.
   debug_log : String
+  /// What a previous run learned about the sessions in this store, or nothing on a first run.
+  ///
+  /// Read here rather than inside the shell for the reason above — it is a file — and passed on
+  /// whole so that `Shell::of` stays a pure function of a value. This is the one field of the world
+  /// that is a *cache*: every fact in it can be derived again by reading the session it is about, so
+  /// an empty one is a slow launch and never a wrong one.
+  facts : Array[@core.SessionFacts]
 }
 
 ///|
@@ -557,7 +665,7 @@ async fn gather() -> World {
   // What a session's directory is when nothing else says: `start_dir` above, with the store's own
   // answer to "where was I".
   let start = start_dir(cwd, last_workspace(root), home)
-  let (session, path) = open_session(root, start)
+  let (session, path, session_bytes) = open_session(root, start)
   let base_url = match @env.get_env_var("DEEPSEEK_BASE_URL") {
     Some(value) if value != "" => value
     _ => "https://api.deepseek.com"
@@ -576,6 +684,7 @@ async fn gather() -> World {
     pins: @platform.load_pins(home),
     session,
     path,
+    session_bytes,
     // The same variable `WeiKit.WireLog` writes the host's side of the wire to, and read here so
     // that one `WEI_DEBUG` turns on both halves. Off unless asked for, because a log beside the app
     // that fills up unasked is a surprise.
@@ -583,6 +692,9 @@ async fn gather() -> World {
       Some(value) if value != "" => value
       _ => ""
     },
+    // Before the shell exists, because reading it is a file. It costs one bounded read whatever the
+    // store looks like, which is the difference between this and reading the store itself.
+    facts: @platform.load_facts(home),
   }
 }
 
@@ -611,6 +723,7 @@ fn Shell::of(world : World, out? : (Json) -> Unit = emit) -> Shell {
     session_level(world.session, session_model(world.session)),
     world.session,
   )
+  opening.weight = world.session_bytes
   {
     base_url: world.base_url,
     jobs: world.jobs,
@@ -625,7 +738,8 @@ fn Shell::of(world : World, out? : (Json) -> Unit = emit) -> Shell {
     // them.
     opens: [opening],
     current: world.path,
-    labels: Labels::new(),
+    ticks: 0L,
+    labels: Labels::of(world.facts),
     live_pids: [],
     saved_jobs: "",
     sent_jobs: "",
@@ -1305,6 +1419,20 @@ async fn Shell::serve(self : Shell) -> Unit {
         }
       }),
     )
+    // **The rename search the first `sessions` deferred, run where nobody is waiting for it.**
+    //
+    // It is spawned here rather than awaited because of what it costs and what it is for: proving that
+    // a log holds no rename means seeing every byte of it, so a first launch over a large store is
+    // minutes of reading — and the window it would be blocking is one that only ever *draws* the first
+    // question of each session, which is a 16 KiB read apiece. The list goes out immediately without
+    // the names, and the names arrive as this finds them.
+    //
+    // Before the command loop, so the loop is not competing with it for the one thing both need: the
+    // store's directories. `spawn_bg` so the sweep does not hold the task group open — a store that is
+    // already known owes nothing, and this returns without touching the disk.
+    if self.labels.deferred {
+      group.spawn_bg(() => self.sweep_deferred(), no_wait=true)
+    }
     // The one thing that is true of a session being *left*: the label of a conversation nobody has
     // asked anything in yet is written by its first entry, so the list has to be rebuilt after a turn
     // on a session the reader has since walked away from.

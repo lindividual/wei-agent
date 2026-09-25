@@ -59,51 +59,262 @@ fn workspace_label(stored : @platform.StoredWorkspace) -> String {
 ///|
 /// Facts about a session file that cost a read: what to call it, and what its reader called it.
 ///
-/// Cached by modification time, for the reason the web UI caches them: the list is rebuilt every
-/// time a turn ends, and reading every session's head to redraw it made that cost grow with the
-/// store.
-priv struct Labels {
-  entries : Map[String, (Int64, String, String?)]
-}
-
-///|
-fn Labels::new() -> Labels {
-  { entries: Map([]), }
-}
-
-///|
-/// One session's cached facts, read if the file has changed since they were.
+/// **Held across launches, and that is the whole point of the type.** It used to be a cache inside
+/// one process, so every launch read every session in full: measured at about 6 ms per megabyte of
+/// store, which is 0.6 s for this machine's own sessions and grows without bound as a reader keeps
+/// talking. `~/.wei/session_facts.json` now carries the same facts between processes, so a launch
+/// costs one `open` per session that the store's own walk says has changed — which, on a launch, is
+/// none of them.
 ///
-/// An empty label is a real answer — a session whose first turn has not been written yet has
-/// nothing to call itself — and is cached like any other, because it will change exactly when the
-/// file does.
-async fn Labels::facts(
+/// **And it is updated incrementally, which is what makes a turn cheap.** A log is appended to on
+/// every turn while its label never changes and its name changes only when somebody renames it, so
+/// re-deriving both from the whole file was reading a conversation to rediscover two strings. What is
+/// remembered instead is how far the log has been searched for a rename entry — see
+/// `@core.plan_read`, which is where the rule that makes resuming safe lives.
+///
+/// Nothing here decides anything. The rules are `@core`'s and the reads are `@platform`'s; this is the
+/// index, the dirty flag, and the order the two are applied in.
+priv struct Labels {
+  entries : Map[String, @core.SessionFacts]
+  /// Whether anything has been learned since the facts were last written out.
+  ///
+  /// The reason this is a flag rather than a comparison of two serialisations: a refresh that learned
+  /// nothing is the common case — it is every refresh where the reader is not writing — and it must
+  /// cost nothing, including not turning ten thousand records into a string to discover they are the
+  /// same ten thousand records.
+  mut dirty : Bool
+  /// Whether any session has been described without searching its log for a rename.
+  ///
+  /// Set by `quick` when it meets a session for the first time, which is what a first launch is
+  /// entirely made of, and the only thing that decides whether the background sweep is worth starting
+  /// at all: a launch that found every session already known leaves nothing owed, and paying an `open`
+  /// per session to rediscover that would be the cost this whole design exists to remove.
+  mut deferred : Bool
+}
+
+///|
+/// The facts a previous run left behind, indexed by path.
+///
+/// Read at startup and never again: the file is this process's own record of itself, and a process
+/// that re-read it mid-flight would be adopting facts it may have already superseded.
+fn Labels::of(loaded : Array[@core.SessionFacts]) -> Labels {
+  let entries : Map[String, @core.SessionFacts] = Map([])
+  for fact in loaded {
+    if fact.path != "" {
+      entries.set(fact.path, fact)
+    }
+  }
+  { entries, dirty: false, deferred: false, }
+}
+
+///|
+/// What to call one session, reading as little as possible.
+///
+/// **The two halves of this cost different things, and the caller is the one that knows which half it
+/// can afford to wait for.** The *label* is the first thing the reader asked, which sits near the top
+/// of the log — a bounded head read, 16 KiB, whatever the conversation weighs. The *name* is a
+/// `session_info` entry, which a rename puts at whatever offset the conversation had reached, so
+/// proving that there is none means seeing every byte.
+///
+/// So a session this process has never seen is described by its head and its rename is **left owed** —
+/// recorded as a log that has not been searched, and settled later by `Labels::sweep`. That is what a
+/// first launch is made of: a whole store of never-seen sessions, where searching each of them for a
+/// rename is minutes of reading to draw a list. The alternative was measured, and it is the reason this
+/// split exists: 810 ms to put a window up on this machine's own store, of which 9 ms was every label
+/// in it.
+///
+/// A session whose file merely *moved* takes the other road: the label only if it could still be
+/// empty, and the rename searched from where the last search stopped — the bytes written since, which
+/// after one turn is tens of them. That is why a rename the reader makes appears at once.
+async fn Labels::quick(
   self : Labels,
   path : String,
   modified : Int64,
 ) -> (String, String?) {
-  match self.entries.get(path) {
-    Some((at, label, name)) => if at == modified { return (label, name) }
-    None => ()
+  let prev = self.entries.get(path)
+  if @core.facts_unchanged(prev, modified) {
+    // The common case by orders of magnitude: nothing has touched this file, so the answer is already
+    // known and no call below this one touches the disk. A refresh where the reader is not writing is
+    // entirely made of this.
+    let prev = prev.unwrap()
+    return (prev.label, prev.name)
   }
-  // Empty for a file that is not there: a session is created before it is written — the first
-  // prompt is what puts a line in it — and asking what to call it in that window is asking about a
-  // conversation with nothing in it, which is a description rather than a failure.
-  let text = @platform.read_text_or_none(path).unwrap_or("")
-  let facts : (String, String?) = (
-    // The first question is near the top of the file, so the label only needs the beginning.
-    @core.session_label(prefix_of(text, 16 * 1024)),
-    // The name, on the other hand, only exists if the log holds a rename, and finding that out by
-    // parsing the whole file is most of what describing a store costs. A log with no rename has no
-    // name to find, so the parse is skipped; `false` is a definite answer.
-    if @core.log_has_name_entry(text) {
-      session_name_of(text)
-    } else {
-      None
-    },
-  )
-  self.entries.set(path, (modified, facts.0, facts.1))
-  facts
+  match prev {
+    Some(prev) => self.derive_facts(path, prev)
+    None => {
+      // **Never seen, so the rename is owed rather than searched here.** This is the deferral the
+      // doc comment above is about: `scanned: 0` is a log whose search has not started, which is what
+      // `sweep` looks for. The file may not be there at all — a session is created before it is
+      // written — and a head read of a missing file is an empty string, which reads as a session with
+      // nothing to call itself: the row draws as its id, which is the truth about it.
+      let label = @core.session_label(
+        @platform.read_prefix(path, label_bytes()),
+      )
+      let facts : @core.SessionFacts = {
+        path,
+        modified,
+        scanned: 0L,
+        label,
+        name: None,
+      }
+      self.entries.set(path, facts)
+      self.dirty = true
+      self.deferred = true
+      (label, None)
+    }
+  }
+}
+
+///|
+/// Search a log for a rename that `quick` left owed, and remember what was found.
+///
+/// The background half of the split: called for the sessions a cold start described from their heads
+/// alone, and it is the one that pays for the whole file. Returns whether the answer a reader would see
+/// *changed*, which is what decides whether the list has to be said again — a sweep that finds no
+/// rename, which is most of them, changes nothing on screen and so costs no event.
+///
+/// Cheap when there is nothing owed, so the caller can hand it every session in the store and expect a
+/// single `open` each for the ones already settled. That is what a second launch pays.
+async fn Labels::sweep(self : Labels, path : String, modified : Int64) -> Bool {
+  let prev = match self.entries.get(path) {
+    Some(prev) => prev
+    // A session the background pass was handed that has since left the store. Nothing to search for,
+    // and nothing to draw: the row it would describe is already gone.
+    None => return false
+  }
+  let size = match @platform.facts_stamp(path) {
+    Some((size, _)) => size
+    None => return false
+  }
+  // **Settled**, and this is the comparison that makes a background pass over a store that is already
+  // known cost one `open` per session and nothing else. Two conditions, and both are needed: the file
+  // has not moved (so nothing derived from it is stale), and the search reached the end of it as it
+  // stood (so there is no tail left to look at). A log that merely grew has the first and not the
+  // second, which is exactly what `quick` leaves behind when it defers.
+  if @core.facts_unchanged(Some(prev), modified) && size == prev.scanned {
+    return false
+  }
+  let (label, name) = self.derive_facts(path, prev)
+  // Either fact moving is enough to be worth saying: the host rebuilds its list from the event, so a
+  // label that changed is as visible as a name that appeared.
+  label != prev.label || name != prev.name
+}
+
+///|
+/// Everything a log says: the label, and the name on its leaf chain.
+///
+/// The expensive half, and the one place the log is read past its head. Split out from `quick` because
+/// the two callers want it at different times — the foreground for a session that merely moved (where
+/// the work is the new bytes), the background for one that was never searched at all (where it is the
+/// whole file).
+async fn Labels::derive_facts(
+  self : Labels,
+  path : String,
+  prev : @core.SessionFacts,
+) -> (String, String?) {
+  let previous = Some(prev)
+  // A file that cannot be opened is one we know nothing about, and the answer for it is the same as
+  // for one with no entries: a session is created before it is written, and asking what to call it in
+  // that window is asking about a conversation with nothing in it. Nothing is remembered, so the next
+  // refresh asks again — which is one failed `open`, once per refresh, for a session that is not
+  // there yet.
+  let (size, stamp) = match @platform.facts_stamp(path) {
+    Some(stamp) => stamp
+    None => return ("", None)
+  }
+  let label = match @core.plan_read(previous, size) {
+    // The whole log, because there is nothing to resume from: it did not grow, and so may have been
+    // rewritten in place at any offset.
+    @core.Whole =>
+      @core.session_label(@platform.read_prefix(path, label_bytes()))
+    // Only the head is worth re-reading, and only when there is no label yet: a first question that
+    // has not been written is the one fact an append can still be the first to supply.
+    @core.Appended(relabel~, ..) =>
+      if relabel {
+        @core.session_label(@platform.read_prefix(path, label_bytes()))
+      } else {
+        prev.label
+      }
+  }
+  // The name, searched only where it has not been searched already.
+  //
+  // **The two branches differ in where an absent rename entry leaves us**, and that is the one thing
+  // about this that is easy to get wrong. On an appended log, "no entry in the new bytes" means the
+  // name is whatever the last full parse found — which may be a name, because the rename may have been
+  // written a thousand turns ago. On a log that did not grow, the search covered every byte of it, so
+  // "no entry" is an answer about the whole file and the previous name is not evidence of anything.
+  let name = match @core.plan_read(previous, size) {
+    @core.Whole =>
+      if @platform.has_rename_entry(path, 0L) {
+        parse_name(path)
+      } else {
+        None
+      }
+    @core.Appended(from~, ..) =>
+      if @platform.has_rename_entry(path, from) {
+        parse_name(path)
+      } else {
+        prev.name
+      }
+  }
+  let facts : @core.SessionFacts = {
+    path,
+    // The clock the file has *now*, rather than the one the walk produced: this is the stamp the
+    // facts were actually derived against, and recording the older one would make the very next
+    // refresh re-read a file that has not moved since.
+    modified: stamp,
+    // Every byte of the log as it stood when the search ran, which is where the next search starts.
+    scanned: size,
+    label,
+    name,
+  }
+  self.entries.set(path, facts)
+  self.dirty = true
+  (facts.label, facts.name)
+}
+
+///|
+/// How much of a session file the label is read from.
+///
+/// Named rather than written at the call because it is a claim about where a first question can be —
+/// `session_label` scans the first 400 non-empty lines — and because the incremental path re-reads
+/// this head on every append to a session whose label is still empty.
+fn label_bytes() -> Int {
+  16 * 1024
+}
+
+///|
+/// The name in a log, read from the whole of it.
+///
+/// The expensive branch, and it is meant to be: it is reached only when the file actually holds
+/// something that looks like a rename, and `session_name_of` is the only implementation of "what is
+/// this session called" — a rename that was cleared, or superseded, or written on a branch the
+/// conversation left, is a question only the parse can answer.
+async fn parse_name(path : String) -> String? {
+  match @platform.read_text_or_none(path) {
+    Some(text) => session_name_of(text)
+    // Read as nothing rather than as unchanged: the file is there — the search just read it — so a
+    // failed read is the file moving out from under us, and the next refresh asks again.
+    None => None
+  }
+}
+
+///|
+/// Write out what was learned, if anything was.
+///
+/// Silent and best-effort. The caller is a shell that has just sent the host a list, and it has
+/// nothing to say about its own bookkeeping: a save that fails costs a re-read next launch, which is
+/// what the program did before the file existed.
+async fn Labels::save(self : Labels, home : String) -> Unit {
+  if !self.dirty {
+    return
+  }
+  let all : Array[@core.SessionFacts] = []
+  for _, fact in self.entries {
+    all.push(fact)
+  }
+  @platform.save_facts(home, all)
+  self.dirty = false
 }
 
 ///|
@@ -113,6 +324,10 @@ async fn Labels::facts(
 /// else now, which is what deleting a session does — the file is renamed aside, not removed.
 fn Labels::forget(self : Labels, path : String) -> Unit {
   self.entries.remove(path)
+  // Marked dirty even when there was nothing to remove: a delete that learns nothing still has to
+  // reach the file, or the record outlives the session and a later launch would attribute it to
+  // whatever ends up at that path.
+  self.dirty = true
 }
 
 ///|
@@ -124,17 +339,8 @@ fn Labels::forget(self : Labels, path : String) -> Unit {
 /// is what keeps the notice naming the session the way the row that was clicked on did.
 fn Labels::modified_of(self : Labels, path : String) -> Int64 {
   match self.entries.get(path) {
-    Some((modified, _, _)) => modified
+    Some(fact) => fact.modified
     None => 0L
-  }
-}
-
-///|
-fn prefix_of(text : String, limit : Int) -> String {
-  if text.length() <= limit {
-    text
-  } else {
-    text[:limit].to_owned()
   }
 }
 
@@ -167,7 +373,7 @@ async fn Shell::label_of(
   path : String,
   modified : Int64,
 ) -> String {
-  let (label, name) = self.labels.facts(path, modified)
+  let (label, name) = self.labels.quick(path, modified)
   match name {
     Some(value) => value
     None =>
@@ -303,6 +509,13 @@ async fn Shell::say_sessions(self : Shell) -> Unit {
     )
   }
   self.emit(sessions_event(groups))
+  // **After the event, not before.** What a reader is waiting for is the list; writing the file the
+  // list was derived from is bookkeeping, and a save in front of the emit would put a filesystem write
+  // — megabytes of it, on a store of many sessions — between a turn ending and the row it ends.
+  //
+  // It costs nothing when nothing was learned, which is the common case: `dirty` is answered before
+  // anything is serialised.
+  self.labels.save(self.home)
 }
 
 ///|
@@ -396,6 +609,10 @@ async fn Shell::show(self : Shell, path : String) -> Unit {
         session_level(loaded, session_model(loaded)),
         loaded,
       )
+      // What this session will cost to hold, for `Shell::trim_opens`. Read here rather than at every
+      // switch: this is the one place a session comes in from the disk, so it is the one place the file
+      // is known to be there.
+      open.weight = @platform.file_size(path)
       self.display(open)
       self.say_open(open)
       self.say_sessions()
@@ -799,7 +1016,7 @@ fn history_event(path : String, session : @core.Session) -> Json {
     path,
     "history",
     page_fields(
-      page_of(history_rows(session), "", page_max_turns(), page_max_bytes()),
+      history_of(session).page("", page_max_turns(), page_max_bytes()),
     ),
   )
 }
@@ -830,7 +1047,7 @@ fn earlier_event(
     path,
     "earlier",
     page_fields(
-      page_of(history_rows(session), before, page_max_turns(), page_max_bytes()),
+      history_of(session).page(before, page_max_turns(), page_max_bytes()),
     ),
   )
 }
@@ -1310,8 +1527,12 @@ fn refuse_deletion(d : Deletion) -> String? {
 /// the caller has moved the file, the listing that produced this answer is out of date.
 async fn Shell::successor_after(self : Shell, path : String) -> Open {
   let shown = self.shown()
+  // Stamped as looked at before it is handed back: the caller is about to put it on screen, and the
+  // session it is replacing has just left the registry, so a replacement that could itself be evicted
+  // in the same breath would leave `current` pointing at nothing.
   for open in self.opens {
     if open.path != path && open.cwd == shown.cwd {
+      open.shown_at = self.ticks
       return open
     }
   }
@@ -1334,13 +1555,15 @@ async fn Shell::successor_after(self : Shell, path : String) -> Open {
             stored.path,
             @env.now().reinterpret_as_int64(),
           )
-          return Open::new(
+          let open = Open::new(
             stored.path,
             loaded.header.cwd,
             session_model(loaded),
             session_level(loaded, session_model(loaded)),
             loaded,
           )
+          open.weight = @platform.file_size(stored.path)
+          return open
         }
     }
   }
@@ -1575,13 +1798,15 @@ async fn Shell::rehome_after(self : Shell, cwd : String) -> Open {
       newest.path,
       @env.now().reinterpret_as_int64(),
     )
-    return Open::new(
+    let open = Open::new(
       newest.path,
       loaded.header.cwd,
       session_model(loaded),
       session_level(loaded, session_model(loaded)),
       loaded,
     )
+    open.weight = @platform.file_size(newest.path)
+    return open
   }
   let (session, path) = fresh_session(self.root, self.home)
   Open::new(
@@ -1604,7 +1829,14 @@ async fn Shell::rehome_after(self : Shell, cwd : String) -> Open {
 priv struct Draft {
   kind : String
   id : String
-  text : String
+  /// **A builder rather than a `String`, because appending to a row must not copy it.** A model writes
+  /// one answer as several blocks, and a block that follows another of the same kind joins it — so a row
+  /// grew by `previous.text + text` at every append, which is a full copy of everything already in the
+  /// row. Measured on an artificial log (one turn, 33981 consecutive answer blocks): `history_rows`
+  /// took **38 s** for that one session, all of it memcpy. A real conversation is nowhere near that
+  /// shape — consecutive answer blocks come in handfuls, not thousands — but the cost was quadratic in
+  /// a number the log decides, and this makes every append O(1) instead.
+  text : StringBuilder
   name : String
   detail : String
   /// Tools only: the call this row answers.
@@ -1662,10 +1894,12 @@ fn blocks_of(kind : String, text : String) -> Json {
 /// labelled is a paragraph the reader will read as an answer — the label is not decoration, it is
 /// what makes the row say what it is.
 fn note_draft(id : String, text : String, label : String) -> Draft {
+  let body = StringBuilder()
+  body.write_string(text)
   {
     kind: "note",
     id,
-    text,
+    text: body,
     name: label,
     detail: "",
     call_id: "",
@@ -1682,7 +1916,9 @@ fn text_draft(
   images? : Array[(String, String)] = [],
   skill? : (String, String, String)? = None,
 ) -> Draft {
-  { kind, id, text, name: "", detail: "", call_id: "", images, skill, }
+  let body = StringBuilder()
+  body.write_string(text)
+  { kind, id, text: body, name: "", detail: "", call_id: "", images, skill, }
 }
 
 ///|
@@ -1699,8 +1935,9 @@ fn append_text(
 ) -> Unit {
   let last = drafts.length() - 1
   if last >= 0 && drafts[last].kind == kind {
-    let previous = drafts[last]
-    drafts[last] = { ..previous, text: previous.text + text, }
+    // One more piece of the row that is already open — `write_string` appends into the builder rather
+    // than rebuilding the string, so the hundredth piece costs what the first one did.
+    drafts[last].text.write_string(text)
   } else {
     drafts.push(text_draft(kind, id, text))
   }
@@ -1813,7 +2050,23 @@ fn attached_images(items : Array[Attachment]) -> Array[(String, String)] {
 /// The ids are prefixed `h-` so that a row from a history cannot collide with one from a stream — the
 /// live ids are `reply-1`, `tool-2` and so on, and a transcript that mixed the two namings would
 /// append a delta to the wrong block.
-fn history_rows(session : @core.Session) -> Array[Json] {
+priv struct History {
+  drafts : Array[Draft]
+  /// Answered tool calls, by the model's own call id: a result arrives in a later message than the call
+  /// it belongs to, so the row that needs it is built long after it was read.
+  results : Map[String, (String, Bool)]
+}
+
+///|
+/// A session's transcript, walked but not yet built.
+///
+/// **Two levels, because a page is a small window on a long conversation.** A `history` event carries at
+/// most `page_max_turns` turns, and building every row to then throw almost all of them away is what
+/// this split exists to avoid: measured on a 48MB, 2000-turn session, building every row cost **231 ms**
+/// and made the shell hold a **91MB** array of JSON for an event that sent 0.2MB. The walk below is the
+/// part that has to see every message — it is linear and it copies nothing but text — and `History::row`
+/// is the expensive part per row: it is what runs cmark, and it is called for the page's rows only.
+fn history_of(session : @core.Session) -> History {
   let drafts : Array[Draft] = []
   // Keyed by the model's call id rather than by index, so nothing here has to know where in the list
   // a row ended up.
@@ -1864,7 +2117,7 @@ fn history_rows(session : @core.Session) -> Array[Json] {
               drafts.push({
                 kind: "tool",
                 id: next_id(),
-                text: "",
+                text: StringBuilder(),
                 name,
                 detail: @core.tool_summary(arguments),
                 call_id: id,
@@ -1884,7 +2137,7 @@ fn history_rows(session : @core.Session) -> Array[Json] {
           drafts.push({
             kind: "tool",
             id: next_id(),
-            text: "",
+            text: StringBuilder(),
             name: result.tool_name,
             detail: "",
             call_id: result.tool_call_id,
@@ -1910,54 +2163,124 @@ fn history_rows(session : @core.Session) -> Array[Json] {
       _ => ()
     }
   }
-  let rows : Array[Json] = []
-  for draft in drafts {
-    let (output, is_error) = match results.get(draft.call_id) {
-      Some(answer) => answer
-      None =>
-        // A tool the turn never got an answer from — the process died, or the turn was stopped
-        // between the call and its result. The row is left without one rather than given an excuse.
-        ("", false)
-    }
-    let pictures : Array[Json] = []
-    for (mime_type, data) in draft.images {
-      pictures.push(image_row(mime_type, data))
-    }
-    rows.push(
-      Json::object(
-        Map([
-          ("kind", Json::string(draft.kind)),
-          ("id", Json::string(draft.id)),
-          ("text", Json::string(draft.text)),
-          // Everything in a history is over: nothing here is still arriving. That is what lets the
-          // row's markdown be parsed once, here, rather than on every delta — the cost the web UI
-          // learned about with 40KB of reasoning in 64-character frames.
-          ("complete", Json::boolean(true)),
-          // And the parse, which is the part that cannot be produced by the host: a SwiftUI `Text`
-          // has no markdown parse of its own, and `AttributedString(markdown:)` — what the app used
-          // before this — never sees a table and drops a fenced block's language. `null` for a row
-          // with no text, so the host has one rule: blocks if they are there, plain text otherwise.
-          ("blocks", blocks_of(draft.kind, draft.text)),
-          ("name", Json::string(draft.name)),
-          ("detail", Json::string(draft.detail)),
-          ("output", Json::string(output)),
-          ("error", Json::boolean(is_error)),
-          // Last, and on **every** row, empty for most of them: a field that appeared and disappeared
-          // would be one more shape for the host to decode, and its default is the empty list either
-          // way. The same reasoning the live stream follows in `say_user`.
-          ("images", Json::array(pictures)),
-          // A question that was a `/skill:<name>` command, taken apart: the name, the reader's own
-          // words, and the skill's document. `null` for every other row — and for a question that
-          // merely mentions a skill, which is prose and stays one bubble.
-          //
-          // Last for the same reason `images` is, and on **every** row for the same reason too: one
-          // shape for the host to decode, with the absent case spelled `null`.
-          ("skill", skill_field(draft.skill)),
-        ]),
-      ),
-    )
+  { drafts, results, }
+}
+
+///|
+/// How many rows the whole transcript has. What a page is measured against, not what it builds.
+fn History::length(self : History) -> Int {
+  self.drafts.length()
+}
+
+///|
+/// One row, built.
+///
+/// The expensive half: `blocks_of` runs the markdown parse over the row's text, and the text itself is
+/// materialised out of its builder here. Called once per row a page carries.
+fn History::row(self : History, index : Int) -> Json {
+  let draft = self.drafts[index]
+  let (output, is_error) = match self.results.get(draft.call_id) {
+    Some(answer) => answer
+    None =>
+      // A tool the turn never got an answer from — the process died, or the turn was stopped
+      // between the call and its result. The row is left without one rather than given an excuse.
+      ("", false)
   }
-  rows
+  let pictures : Array[Json] = []
+  for (mime_type, data) in draft.images {
+    pictures.push(image_row(mime_type, data))
+  }
+  Json::object(
+    Map([
+      ("kind", Json::string(draft.kind)),
+      ("id", Json::string(draft.id)),
+      ("text", Json::string(draft.text.to_string())),
+      // Everything in a history is over: nothing here is still arriving. That is what lets the
+      // row's markdown be parsed once, here, rather than on every delta — the cost the web UI
+      // learned about with 40KB of reasoning in 64-character frames.
+      ("complete", Json::boolean(true)),
+      // And the parse, which is the one thing the host must not work out for itself: two parsers
+      // is two opinions about the same answer, and this one is cmark — the engine the web UI
+      // renders with, and the one that decides here which pictures may be read (`md/walk.mbt`) and
+      // that raw HTML is text rather than markup. `null` for a row with no text, so the host has
+      // one rule: blocks if they are there, plain text otherwise. A row from the log needs no
+      // boundary — it has stopped changing — so the host draws all of it as blocks.
+      ("blocks", blocks_of(draft.kind, draft.text.to_string())),
+      ("name", Json::string(draft.name)),
+      ("detail", Json::string(draft.detail)),
+      ("output", Json::string(output)),
+      ("error", Json::boolean(is_error)),
+      // Last, and on **every** row, empty for most of them: a field that appeared and disappeared
+      // would be one more shape for the host to decode, and its default is the empty list either
+      // way. The same reasoning the live stream follows in `say_user`.
+      ("images", Json::array(pictures)),
+      // A question that was a `/skill:<name>` command, taken apart: the name, the reader's own
+      // words, and the skill's document. `null` for every other row — and for a question that
+      // merely mentions a skill, which is prose and stays one bubble.
+      //
+      // Last for the same reason `images` is, and on **every** row for the same reason too: one
+      // shape for the host to decode, with the absent case spelled `null`.
+      ("skill", skill_field(draft.skill)),
+    ]),
+  )
+}
+
+///|
+/// One page of the transcript, building only the rows it carries.
+///
+/// **The window is the trick.** `page_of` spends the budget newest-first and never past `max_turns`
+/// turns, so no page can ever include a turn before the `max_turns`-th one back — which means the rows
+/// it can possibly need are those turns, and nothing older has to be built at all. The rule itself is
+/// still `page_of`'s, unchanged and still tested as a pure function of rows; what is new is that it is
+/// handed the window rather than the whole transcript.
+///
+/// `more` is then the window's own answer *or* "there is transcript before the window" — the one thing
+/// `page_of` cannot see from inside a slice, and the reason the flag is adjusted here rather than
+/// recomputed.
+fn History::page(
+  self : History,
+  before : String,
+  max_turns : Int,
+  max_bytes : Int,
+) -> (Array[Json], String, Bool) {
+  // Where the host's oldest row is, or the end when the cursor is one this transcript does not have (a
+  // stale request, or a session rewritten under it) — the same fallback `page_of` makes.
+  let end = if before == "" {
+    self.length()
+  } else {
+    let mut found = self.length()
+    for index in 0..<self.length() {
+      if self.drafts[index].id == before {
+        found = index
+        break
+      }
+    }
+    found
+  }
+  if end <= 0 {
+    return ([], "", false)
+  }
+  // Back to the start of the `max_turns`-th turn, on the *same* boundary `page_of` uses: a turn that
+  // ends at `window` begins at the nearest `user` row below it.
+  let mut window = end
+  let mut turns = 0
+  while window > 0 && turns < max_turns {
+    let mut open = window
+    while open > 0 && self.drafts[open - 1].kind != "user" {
+      open -= 1
+    }
+    if open > 0 {
+      open -= 1
+    }
+    window = open
+    turns += 1
+  }
+  let rows : Array[Json] = []
+  for index in window..<end {
+    rows.push(self.row(index))
+  }
+  let (page, oldest, more) = page_of(rows, "", max_turns, max_bytes)
+  (page, oldest, more || window > 0)
 }
 
 ///|
@@ -2043,6 +2366,8 @@ async fn Shell::fork(self : Shell) -> Unit {
     parent.think_level,
     repaired,
   )
+  // The copy that was just written, which is the parent's size plus a header and a name entry.
+  open.weight = @platform.file_size(path)
   self.display(open)
   self.labels.forget(path)
   self.say_open(open)
@@ -2070,22 +2395,45 @@ async fn Shell::fork(self : Shell) -> Unit {
 /// An empty name clears it. That is a deliberate request rather than something a field does by
 /// accident, which is why the host only sends one from its own Clear button.
 ///
-/// The session on screen can be renamed; another one cannot. Naming a file this process is not
-/// holding would mean reading it, appending to it and writing it back — three steps that a turn
-/// running somewhere else could interleave with, and the log is the one file in this program that
-/// must never be forked.
+/// **Any session this process has listed can be renamed** — not only the one on screen. It used to be
+/// the session on screen or nothing, on the argument that appending to a log this process is not
+/// holding would read-modify-write a file a turn elsewhere could interleave with. That argument is about
+/// *not holding* the log, not about not showing it: a session read into the registry is held exactly as
+/// the one on screen is, is never evicted while a turn is running in it, and a menu that refuses the row
+/// the reader right-clicked because they are looking somewhere else is a menu that lies about its row.
+///
+/// A session this process is **not** holding is read in — through the registry, so it is then held like
+/// any other, and without moving the window to it (`Shell::hold`).
 async fn Shell::rename(self : Shell, path : String, name : String) -> Unit {
   if path == "" {
     self.say_error("rename: no session path")
     self.say_sessions()
     return
   }
+  if !@platform.path_exists(path) {
+    self.say_error("no session at \{path}")
+    self.say_sessions()
+    return
+  }
   let open = match self.open_of(path) {
     Some(open) => open
     None => {
-      self.say_error("cannot rename a session that is not open")
-      self.say_sessions()
-      return
+      // Read the same way a switch reads one, repair included: the entry being appended hangs off this
+      // session's leaf, and a leaf the repair moved would put the name on a branch nobody reads.
+      let loaded = @agent.repair_session(
+        @platform.load_session(path),
+        path,
+        @env.now().reinterpret_as_int64(),
+      )
+      let reading = Open::new(
+        path,
+        loaded.header.cwd,
+        session_model(loaded),
+        session_level(loaded, session_model(loaded)),
+        loaded,
+      )
+      reading.weight = @platform.file_size(path)
+      self.hold(reading)
     }
   }
   let now = @env.now().reinterpret_as_int64()
@@ -2236,4 +2584,47 @@ async fn Shell::dismiss_turn(self : Shell, open : Open) -> Unit {
   open.session = open.session.add_entries([entry])
   self.say_status(open.path, "closed the interrupted turn")
   self.say_open(open)
+}
+
+///|
+/// Settle every session whose log has not been searched for a rename, and say the list again if that
+/// changed what a reader sees.
+///
+/// **Started once, at the beginning of a session's life, and it is the whole of what a first launch
+/// defers.** `Labels::quick` describes an unseen session from the head of its log and leaves the rename
+/// owed; this pays for it, one file at a time, while the reader is already looking at their list.
+///
+/// **The yields are not decoration.** This reads every byte of every session in the store, and it runs
+/// in the same `moonbitlang/async` event loop as the sockets that carry turns. Without a point at which
+/// the loop can run something else, a sweep over a large store would be a window that does not repaint
+/// until it finished — which is the exact cost the deferral exists to avoid. One yield per session is
+/// enough to keep the loop live and cheap enough not to matter against the read itself.
+///
+/// A sweep that finds no rename — which is most of them, since a rename entry only exists if the reader
+/// made one — changes nothing on screen, so the list is only said again when a *name* actually appeared.
+/// Saying it unconditionally would rebuild the host's whole sidebar once per file.
+async fn Shell::sweep_deferred(self : Shell) -> Unit {
+  let mut found_a_name = false
+  for stored in @platform.list_workspaces(self.root) {
+    for session in stored.sessions {
+      if self.labels.sweep(session.path, session.modified) {
+        found_a_name = true
+      }
+      @async.sleep(0)
+    }
+  }
+  // Written once at the end rather than per session: the facts file is the whole store's record, so
+  // saving it inside the loop would rewrite it once per file.
+  self.labels.save(self.home)
+  // **Nothing is owed any more, because this just went over the whole store.** Clearing the flag is
+  // what stops a later refresh from starting a second sweep — and it is safe for a session created
+  // *after* this ran, which is the only kind that can still be owed. Such a session's rename can only
+  // be written by a turn, a turn appends to the log, and an append moves the file's clock — which sends
+  // the very next refresh down `derive_facts`, where a mark of zero means the whole file is searched.
+  // So a rename is never left unseen; at worst it is found by the refresh after the one that wrote it,
+  // which is the same refresh that draws the turn's own row.
+  self.labels.deferred = false
+  if found_a_name {
+    self.say_sessions()
+  }
 }

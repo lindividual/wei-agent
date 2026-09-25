@@ -70,8 +70,8 @@ pub async fn api_key(home : String) -> String? {
 /// directory first — the first save is the one that has to make `~/.wei/`.
 pub async fn save_settings(home : String, settings : @core.AppSettings) -> Unit {
   let path = settings_path(home)
-  let temp = "\{path}.tmp"
   make_dirs(@core.parent_of(path))
+  let temp = temp_beside(path)
   write_text(temp, @core.encode_app_settings(settings) + "\n")
   @fs.rename(temp, path)
 }

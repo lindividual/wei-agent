@@ -2,10 +2,12 @@
 /// The shape of a markdown document, for a host that draws its own text.
 ///
 /// The web UI renders markdown to HTML and hands the browser a string, because a browser is a
-/// renderer and cmark speaks its language. A native host is not: a SwiftUI `Text` cannot be given
-/// `<h2>`, and `AttributedString(markdown:)` — what this app used before this package existed —
-/// takes the *source* rather than a parse, so it never sees a table at all and drops a fenced
-/// block's language on the floor.
+/// renderer and cmark speaks its language. A native host draws it itself — a SwiftUI `Text` cannot be
+/// given `<h2>` — and it could parse the markdown too: `AttributedString(markdown:)` knows tables,
+/// their alignments and a fence's language. What it cannot do is *agree*. It is a second
+/// implementation, whose behaviour follows the OS version rather than this build, and two of the
+/// decisions here are ones a host must not make again: which picture targets may be read
+/// (`walk.mbt`), and that raw HTML is text rather than markup.
 ///
 /// So the parse happens here, once per finished block, and crosses as data. What crosses is
 /// deliberately coarse: headings, paragraphs, code, lists, quotes, rules, tables, and a small set
